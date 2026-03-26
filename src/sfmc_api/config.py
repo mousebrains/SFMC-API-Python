@@ -4,18 +4,32 @@ Configuration can be loaded from a JSON credentials file
 (``~/.config/sfmc/credentials.json`` by default) or constructed
 directly via :meth:`SFMCConfig.from_dict` / keyword arguments.
 
-The JSON file uses the same schema as the Node.js reference
-implementation's ``local.json``::
+The credentials file supports **per-host** entries, keyed by hostname::
+
+    {
+        "gliderfmc1.ceoas.oregonstate.edu": {
+            "apiCredentials": {
+                "clientId": "...",
+                "secret": "..."
+            },
+            "tlsRejectUnauthorized": 0,
+            "rootDownloadPath": "/tmp/downloads",
+            "stompDebug": false
+        },
+        "sfmc-backup.example.com": {
+            "apiCredentials": {
+                "clientId": "...",
+                "secret": "..."
+            }
+        }
+    }
+
+The legacy single-host format (with a top-level ``"host"`` key) is
+also supported for backward compatibility::
 
     {
         "host": "sfmc.example.com",
-        "apiCredentials": {
-            "clientId": "...",
-            "secret": "..."
-        },
-        "tlsRejectUnauthorized": 0,
-        "rootDownloadPath": "/tmp/downloads",
-        "stompDebug": false
+        "apiCredentials": { ... }
     }
 """
 
@@ -54,19 +68,35 @@ class SFMCConfig:
     stomp_debug: bool = False
 
     @classmethod
-    def from_file(cls, path: Path | str | None = None) -> SFMCConfig:
+    def from_file(
+        cls,
+        path: Path | str | None = None,
+        host: str | None = None,
+    ) -> SFMCConfig:
         """Load configuration from a JSON credentials file.
+
+        The file may use either format:
+
+        * **Multi-host** (recommended) — top-level keys are hostnames,
+          each mapping to a per-host config dict.  Use *host* to select
+          which entry to load.  If *host* is ``None`` and the file
+          contains exactly one host, that host is used automatically.
+
+        * **Legacy single-host** — a flat dict with a ``"host"`` key.
+          The *host* parameter is ignored in this case.
 
         Args:
             path: Path to the credentials JSON file.  When *None*,
                 defaults to ``~/.config/sfmc/credentials.json``.
+            host: Hostname to look up in a multi-host credentials
+                file.  Optional when only one host is defined.
 
         Returns:
             A new :class:`SFMCConfig` instance.
 
         Raises:
-            ConfigError: If the file cannot be read or is missing
-                required fields.
+            ConfigError: If the file cannot be read, is missing
+                required fields, or *host* is ambiguous.
         """
         path = Path(path) if path is not None else DEFAULT_CONFIG_PATH
 
@@ -82,13 +112,57 @@ class SFMCConfig:
         except json.JSONDecodeError as exc:
             raise ConfigError(f"Invalid JSON in {path}: {exc}") from exc
 
-        return cls.from_dict(data)
+        if not isinstance(data, dict):
+            raise ConfigError(f"Expected JSON object in {path}")
+
+        # Legacy single-host format: has a top-level "host" key.
+        if "host" in data:
+            return cls.from_dict(data)
+
+        # Multi-host format: top-level keys are hostnames.
+        return cls._from_multi_host(data, host, path)
+
+    @classmethod
+    def _from_multi_host(
+        cls,
+        data: dict[str, Any],
+        host: str | None,
+        path: Path,
+    ) -> SFMCConfig:
+        """Resolve a multi-host credentials file to a single SFMCConfig."""
+        if not data:
+            raise ConfigError(f"Credentials file is empty: {path}")
+
+        if host is not None:
+            if host not in data:
+                available = ", ".join(sorted(data.keys()))
+                raise ConfigError(
+                    f"Host {host!r} not found in {path}. Available hosts: {available}"
+                )
+            host_data = data[host]
+        elif len(data) == 1:
+            host = next(iter(data))
+            host_data = data[host]
+        else:
+            available = ", ".join(sorted(data.keys()))
+            raise ConfigError(
+                f"Multiple hosts in {path} — specify one with --host. Available: {available}"
+            )
+
+        if not isinstance(host_data, dict):
+            raise ConfigError(
+                f"Expected dict for host {host!r} in {path}, got {type(host_data).__name__}"
+            )
+
+        host_data_with_host: dict[str, Any] = {"host": host, **host_data}
+        return cls.from_dict(host_data_with_host)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SFMCConfig:
         """Create configuration from a dictionary.
 
-        Accepts the same key structure as the JSON credentials file.
+        Accepts the same key structure as a single-host credentials
+        entry, with a ``"host"`` key and ``"apiCredentials"`` sub-dict.
 
         Args:
             data: Dictionary with keys ``host``,

@@ -101,11 +101,17 @@ def build_parser() -> argparse.ArgumentParser:
         description="CLI for the Slocum Fleet Management Center REST API",
     )
     parser.add_argument(
-        "--config",
+        "--credentials",
         type=Path,
         default=None,
         metavar="PATH",
         help="Path to credentials JSON file (default: ~/.config/sfmc/credentials.json)",
+    )
+    parser.add_argument(
+        "--host",
+        default=None,
+        metavar="HOSTNAME",
+        help="SFMC server hostname (selects entry from multi-host credentials file)",
     )
     parser.add_argument(
         "--compact",
@@ -401,7 +407,7 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        with SFMCClient(config_path=args.config) as client:
+        with SFMCClient(config_path=args.credentials, host=args.host) as client:
             code = _run(client, args)
     except SFMCError as exc:
         sys.stderr.write(f"Error: {exc}\n")

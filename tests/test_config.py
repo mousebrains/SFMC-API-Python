@@ -146,3 +146,57 @@ class TestRootDownloadPath:
     def test_empty_string_means_none(self) -> None:
         cfg = SFMCConfig.from_dict({**VALID_CONFIG, "rootDownloadPath": ""})
         assert cfg.root_download_path is None
+
+
+MULTI_HOST_CONFIG = {
+    "host-a.example.com": {
+        "apiCredentials": {"clientId": "a_id", "secret": "a_sec"},
+    },
+    "host-b.example.com": {
+        "apiCredentials": {"clientId": "b_id", "secret": "b_sec"},
+        "tlsRejectUnauthorized": 0,
+    },
+}
+
+
+class TestMultiHost:
+    def test_select_by_host(self, tmp_path: Path) -> None:
+        p = _write_config(tmp_path, MULTI_HOST_CONFIG)
+        cfg = SFMCConfig.from_file(p, host="host-a.example.com")
+        assert cfg.host == "host-a.example.com"
+        assert cfg.client_id == "a_id"
+
+    def test_select_second_host(self, tmp_path: Path) -> None:
+        p = _write_config(tmp_path, MULTI_HOST_CONFIG)
+        cfg = SFMCConfig.from_file(p, host="host-b.example.com")
+        assert cfg.host == "host-b.example.com"
+        assert cfg.client_id == "b_id"
+        assert cfg.tls_verify is False
+
+    def test_single_host_auto_selects(self, tmp_path: Path) -> None:
+        single = {"only.example.com": {"apiCredentials": {"clientId": "c", "secret": "s"}}}
+        p = _write_config(tmp_path, single)
+        cfg = SFMCConfig.from_file(p)
+        assert cfg.host == "only.example.com"
+
+    def test_multi_host_without_selection_errors(self, tmp_path: Path) -> None:
+        p = _write_config(tmp_path, MULTI_HOST_CONFIG)
+        with pytest.raises(ConfigError, match=r"Multiple hosts.*specify one with --host"):
+            SFMCConfig.from_file(p)
+
+    def test_unknown_host_errors(self, tmp_path: Path) -> None:
+        p = _write_config(tmp_path, MULTI_HOST_CONFIG)
+        with pytest.raises(ConfigError, match="not found"):
+            SFMCConfig.from_file(p, host="nonexistent.example.com")
+
+    def test_legacy_format_still_works(self, tmp_path: Path) -> None:
+        """Files with a top-level 'host' key use the old format."""
+        p = _write_config(tmp_path, VALID_CONFIG)
+        cfg = SFMCConfig.from_file(p)
+        assert cfg.host == "sfmc.example.com"
+        assert cfg.client_id == "cid"
+
+    def test_empty_file_errors(self, tmp_path: Path) -> None:
+        p = _write_config(tmp_path, {})
+        with pytest.raises(ConfigError, match="empty"):
+            SFMCConfig.from_file(p)

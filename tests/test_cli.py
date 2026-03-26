@@ -38,10 +38,15 @@ class TestBuildParser:
         args = parser.parse_args(["--compact", "auth"])
         assert args.compact is True
 
-    def test_config_flag(self) -> None:
+    def test_credentials_flag(self) -> None:
         parser = build_parser()
-        args = parser.parse_args(["--config", "/tmp/c.json", "auth"])
-        assert str(args.config) == "/tmp/c.json"
+        args = parser.parse_args(["--credentials", "/tmp/c.json", "auth"])
+        assert str(args.credentials) == "/tmp/c.json"
+
+    def test_host_flag(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["--host", "sfmc.test.com", "auth"])
+        assert args.host == "sfmc.test.com"
 
     def test_no_command_fails(self) -> None:
         parser = build_parser()

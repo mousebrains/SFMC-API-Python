@@ -63,20 +63,23 @@ class SFMCClient:
         self,
         config: SFMCConfig | None = None,
         config_path: Path | str | None = None,
+        host: str | None = None,
     ) -> None:
         """Initialise the SFMC client.
 
         Args:
             config: A pre-built :class:`SFMCConfig`.  Takes precedence
-                over *config_path* when both are given.
+                over *config_path* and *host* when provided.
             config_path: Path to a credentials JSON file.  Ignored when
                 *config* is provided.  Defaults to
                 ``~/.config/sfmc/credentials.json``.
+            host: Hostname to select from a multi-host credentials
+                file.  Ignored when *config* is provided.
         """
         if config is not None:
             self._config = config
         else:
-            self._config = SFMCConfig.from_file(config_path)
+            self._config = SFMCConfig.from_file(config_path, host=host)
 
         self._http: httpx.Client = build_http_client(self._config)
         self._token: str | None = None
