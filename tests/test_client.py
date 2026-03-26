@@ -122,6 +122,21 @@ class TestRequest:
             client.get_glider_details("nope")
         assert exc_info.value.status_code == 404
 
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_transport_error_wrapped(
+        self, mock_build: MagicMock, mock_auth: MagicMock, config: SFMCConfig
+    ) -> None:
+        """Raw httpx transport errors are wrapped as APIError."""
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_http.request.side_effect = httpx.ConnectError("connection refused")
+        mock_build.return_value = mock_http
+
+        with SFMCClient(config=config) as client, pytest.raises(APIError) as exc_info:
+            client.get_glider_details("g1")
+        assert exc_info.value.status_code == 0
+        assert "connection refused" in exc_info.value.response_body
+
 
 class TestGliderOnlyMethods:
     """Test all glider-name-only methods build the correct request path."""

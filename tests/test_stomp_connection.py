@@ -94,6 +94,70 @@ class TestStompSubscription:
         sub = StompSubscription("sub-0", "/topic/glider-connections-8", q)
         assert sub.topic == "/topic/glider-connections-8"
 
+    def test_close_sends_unsubscribe(self) -> None:
+        """close() calls _unsubscribe on the connection."""
+        from queue import Queue
+
+        conn = MagicMock()
+        q: Queue[dict[str, Any] | None] = Queue()
+        sub = StompSubscription("sub-7", "/topic/test", q, connection=conn)
+        sub.close()
+        conn._unsubscribe.assert_called_once_with("sub-7")
+
+    def test_close_without_connection(self) -> None:
+        """close() works when no connection is set (e.g. during disconnect)."""
+        from queue import Queue
+
+        q: Queue[dict[str, Any] | None] = Queue()
+        sub = StompSubscription("sub-0", "/topic/test", q, connection=None)
+        sub.close()
+        assert q.get_nowait() is None
+
+
+class TestStompTlsConfig:
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_tls_verify_false_passes_ssl_context(self, mock_ws_connect: MagicMock) -> None:
+        """When tls_verify=False, ws_connect gets an ssl context with CERT_NONE."""
+        config = SFMCConfig(host="test.com", client_id="c", secret="s", tls_verify=False)
+        mock_ws = MagicMock()
+        mock_ws.recv.side_effect = [
+            "o",
+            'a["CONNECTED\\nversion:1.2\\n\\n\\u0000"]',
+        ]
+        mock_ws_connect.return_value = mock_ws
+
+        conn = StompConnection(config, "tok")
+        conn.connect()
+
+        call_kwargs = mock_ws_connect.call_args
+        ssl_ctx = call_kwargs.kwargs.get("ssl") or call_kwargs[1].get("ssl")
+        assert ssl_ctx is not None
+        import ssl
+
+        assert ssl_ctx.verify_mode == ssl.CERT_NONE
+
+        conn.disconnect()
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_tls_verify_true_no_ssl_context(self, mock_ws_connect: MagicMock) -> None:
+        """When tls_verify=True, ws_connect gets ssl=None (default verification)."""
+        config = SFMCConfig(host="test.com", client_id="c", secret="s", tls_verify=True)
+        mock_ws = MagicMock()
+        mock_ws.recv.side_effect = [
+            "o",
+            'a["CONNECTED\\nversion:1.2\\n\\n\\u0000"]',
+        ]
+        mock_ws_connect.return_value = mock_ws
+
+        conn = StompConnection(config, "tok")
+        conn.connect()
+
+        call_kwargs = mock_ws_connect.call_args
+        ssl_ctx = call_kwargs.kwargs.get("ssl") or call_kwargs[1].get("ssl")
+        assert ssl_ctx is None
+
+        conn.disconnect()
+
 
 class TestStompConnectionLifecycle:
     @patch("sfmc_api.stomp.ws_connect")

@@ -63,3 +63,13 @@ class TestAuthenticate:
 
         with pytest.raises(AuthenticationError, match="Authentication failed"):
             authenticate(http, config)
+
+    def test_malformed_json_wrapped(self, config: SFMCConfig) -> None:
+        """ValueError from response.json() is wrapped as AuthenticationError."""
+        http = MagicMock(spec=httpx.Client)
+        resp = make_mock_response(200)
+        resp.json.side_effect = ValueError("malformed JSON")
+        http.post.return_value = resp
+
+        with pytest.raises(AuthenticationError, match="Authentication failed"):
+            authenticate(http, config)

@@ -26,7 +26,7 @@ import httpx
 from ._http import build_http_client, check_response
 from .auth import authenticate
 from .config import SFMCConfig
-from .exceptions import AuthenticationError
+from .exceptions import APIError, AuthenticationError
 from .stomp import StompConnection, StompSubscription
 
 __all__ = ["SFMCClient"]
@@ -176,11 +176,14 @@ class SFMCClient:
         Raises:
             AuthenticationError: If sign-in has not been done and fails.
             RateLimitError: If the server returns HTTP 429.
-            APIError: For other non-2xx responses.
+            APIError: For other non-2xx responses or transport errors.
         """
         headers = kwargs.pop("headers", {})
         headers.update(self._auth_headers())
-        response = self._http.request(method, path, headers=headers, **kwargs)
+        try:
+            response = self._http.request(method, path, headers=headers, **kwargs)
+        except httpx.HTTPError as exc:
+            raise APIError(0, str(exc)) from exc
         check_response(response)
         return response
 
@@ -1443,9 +1446,9 @@ class SFMCClient:
         Listens on STOMP topic ``/topic/glider-link-output/{gliderId}``.
 
         Each message is a dict with ``sequenceNumber`` and ``data``
-        (the output text).  Messages may arrive out of order — use
-        :func:`sfmc_api.stomp.ordered_output` to reorder them if
-        needed.
+        (the output text).  Messages may arrive out of order — see
+        ``examples/monitor_glider.py:ordered_dialog()`` for a
+        reordering implementation.
 
         Args:
             glider_name: The registered name of the glider.

@@ -96,10 +96,12 @@ The token string is extracted from the JSON body and stored in
 | Bad credentials (401/403) | `AuthenticationError`    |
 | Server unreachable        | `AuthenticationError`    |
 | Unexpected response shape | `AuthenticationError`    |
-| Rate limited (429)        | `RateLimitError`         |
+| Rate limited (429)        | `AuthenticationError`    |
+| Malformed JSON response   | `AuthenticationError`    |
 
-All errors are wrapped in `AuthenticationError` (or its parent
-`SFMCError`) so callers need only catch one type.
+All sign-in errors — including transport failures, rate limiting,
+and malformed responses — are wrapped in `AuthenticationError`,
+so callers need only catch that single type.
 
 ### 6. Subsequent Requests
 

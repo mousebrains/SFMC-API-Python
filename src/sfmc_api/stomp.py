@@ -26,6 +26,7 @@ import contextlib
 import json
 import logging
 import random
+import ssl
 import string
 import threading
 from collections.abc import Generator
@@ -166,14 +167,20 @@ class StompSubscription:
     """An active STOMP topic subscription.
 
     Provides an iterator interface to receive messages.  Call
-    :meth:`close` to stop iteration, or simply break from the
-    ``for`` loop.
+    :meth:`close` to unsubscribe and stop iteration.
     """
 
-    def __init__(self, sub_id: str, topic: str, queue: Queue[dict[str, Any] | None]) -> None:
+    def __init__(
+        self,
+        sub_id: str,
+        topic: str,
+        queue: Queue[dict[str, Any] | None],
+        connection: StompConnection | None = None,
+    ) -> None:
         self._id = sub_id
         self._topic = topic
         self._queue: Queue[dict[str, Any] | None] = queue
+        self._connection = connection
         self._closed = False
 
     @property
@@ -200,10 +207,18 @@ class StompSubscription:
         return self._queue.get(timeout=timeout)
 
     def close(self) -> None:
-        """Signal this subscription to stop iterating."""
-        if not self._closed:
-            self._closed = True
-            self._queue.put(None)
+        """Unsubscribe from the topic and stop iteration.
+
+        Sends a STOMP ``UNSUBSCRIBE`` frame to the server, removes
+        this subscription from the connection registry, and signals
+        the iterator to stop.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        if self._connection is not None:
+            self._connection._unsubscribe(self._id)
+        self._queue.put(None)
 
 
 # ── STOMP connection ─────────────────────────────────────────────────
@@ -250,8 +265,19 @@ class StompConnection:
         Raises:
             StompError: If the connection or handshake fails.
         """
+        # Honor stomp_debug from config — enable DEBUG logging for this module.
+        if self._config.stomp_debug:
+            logger.setLevel(logging.DEBUG)
+
         url = _sockjs_url(self._config, self._token)
         logger.debug("Connecting to wss://%s/sfmc/api/sfmc-stomp/...", self._config.host)
+
+        # Honor tls_verify from config, matching the HTTP client behavior.
+        ssl_context: ssl.SSLContext | None = None
+        if not self._config.tls_verify:
+            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
 
         try:
             self._ws = ws_connect(
@@ -259,6 +285,7 @@ class StompConnection:
                 additional_headers={},
                 open_timeout=10,
                 close_timeout=5,
+                ssl=ssl_context,
             )
         except Exception as exc:
             raise StompError(f"WebSocket connection failed: {exc}") from exc
@@ -358,7 +385,7 @@ class StompConnection:
             self._next_sub_id += 1
 
             queue: Queue[dict[str, Any] | None] = Queue()
-            sub = StompSubscription(sub_id, topic, queue)
+            sub = StompSubscription(sub_id, topic, queue, connection=self)
             self._subscriptions[sub_id] = sub
             self._sub_topics[sub_id] = topic
 
@@ -370,6 +397,23 @@ class StompConnection:
         logger.debug("Subscribed %s to %s", sub_id, topic)
 
         return sub
+
+    def _unsubscribe(self, sub_id: str) -> None:
+        """Send UNSUBSCRIBE frame and remove from registry.
+
+        Called by :meth:`StompSubscription.close`.
+        """
+        with self._lock:
+            self._subscriptions.pop(sub_id, None)
+            self._sub_topics.pop(sub_id, None)
+
+        if self._connected and self._ws is not None:
+            try:
+                frame = _encode_frame("UNSUBSCRIBE", {"id": sub_id})
+                self._ws.send(json.dumps([frame]))
+                logger.debug("Unsubscribed %s", sub_id)
+            except Exception:
+                pass  # best-effort during teardown
 
     def _receive_loop(self) -> None:
         """Background thread: receive WebSocket messages and dispatch."""

@@ -35,7 +35,7 @@ sfmc get-waypoint-plan osusim                # get navigation plan
 sfmc get-folder-file-listing osusim from-glider  # list files
 sfmc subscribe-connection-events osusim      # stream events (Ctrl-C to stop)
 sfmc --compact get-glider-details osusim     # single-line JSON
-sfmc --help                                  # see all 51 subcommands
+sfmc --help                                  # see all subcommands
 ```
 
 ## Configuration

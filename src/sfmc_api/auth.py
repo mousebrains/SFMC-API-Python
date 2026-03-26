@@ -47,7 +47,7 @@ def authenticate(http_client: httpx.Client, config: SFMCConfig) -> str:
         raise AuthenticationError(
             f"Unexpected sign-in response (missing 'token' key): {exc}"
         ) from exc
-    except SFMCError as exc:
+    except (ValueError, SFMCError) as exc:
         raise AuthenticationError(f"Authentication failed: {exc}") from exc
     except httpx.HTTPError as exc:
         raise AuthenticationError(f"Authentication failed: {exc}") from exc
