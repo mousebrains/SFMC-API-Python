@@ -24,6 +24,9 @@ dev = [
     "ruff>=0.4",
 ]
 
+[project.scripts]
+sfmc = "sfmc_api.cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/sfmc_api"]
 
