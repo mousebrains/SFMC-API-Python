@@ -16,23 +16,27 @@ pip install -e ".[dev]"
 
 ## Configuration
 
-Create a credentials file at `~/.config/sfmc/credentials.json`:
+Create a credentials file at `~/.config/sfmc/credentials.json`, keyed
+by hostname:
 
 ```json
 {
-    "host": "gliderfmc1.ceoas.oregonstate.edu",
-    "apiCredentials": {
-        "clientId": "YOUR_CLIENT_ID",
-        "secret": "YOUR_SECRET"
-    },
-    "tlsRejectUnauthorized": 0,
-    "rootDownloadPath": "/tmp/sfmc-downloads",
-    "stompDebug": false
+    "gliderfmc1.ceoas.oregonstate.edu": {
+        "apiCredentials": {
+            "clientId": "YOUR_CLIENT_ID",
+            "secret": "YOUR_SECRET"
+        },
+        "tlsRejectUnauthorized": 0,
+        "rootDownloadPath": "/tmp/sfmc-downloads",
+        "stompDebug": false
+    }
 }
 ```
 
-See [configuration.md](configuration.md) for details on each field and
-alternative ways to provide credentials.
+If the file has only one host, it is selected automatically.  For
+multiple hosts, use `--host` or `SFMCClient(host="...")`.
+
+See [configuration.md](configuration.md) for the full field reference.
 
 ## First API Call
 

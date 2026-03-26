@@ -9,13 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- `SFMCClient` with lazy authentication and 45+ REST API methods
+- `SFMCClient` with lazy authentication and 50+ REST API methods
 - Full coverage of glider management, plans, file operations, script
   control, deployment, and Zmodem transfers
 - Real-time STOMP-over-SockJS event streaming (connection events,
   dialog output, script events, Zmodem transfers, deployment updates)
-- `sfmc` CLI with 48 subcommands mirroring all API operations
+- `sfmc` CLI with 51 subcommands mirroring all API operations
 - Multi-host credentials file support (`--host` selector)
+- `--download-path` CLI option and `download_dir` property for
+  configurable default download directory
 - `SFMCConfig` with `from_file()` / `from_dict()` for flexible
   configuration loading
 - Custom exception hierarchy: `SFMCError`, `AuthenticationError`,

@@ -130,6 +130,27 @@ config = SFMCConfig.from_dict({
 | Invalid JSON | `ConfigError("Invalid JSON in ...: ...")` |
 | Missing required key | `ConfigError("Missing required config key: ...")` |
 
+## Download Directory
+
+File downloads use a default directory resolved in this order:
+
+1. `download_path=` passed to ``SFMCClient()``
+2. ``rootDownloadPath`` from the credentials file
+3. The current working directory
+
+```python
+# Override at the client level
+client = SFMCClient(download_path="/data/gliders")
+
+# Downloads default to /data/gliders/<filename>
+client.download_glider_file("osusim", "from-glider", "data.sbd")
+
+# CLI equivalent
+# sfmc --download-path /data/gliders download-glider-file osusim from-glider data.sbd
+```
+
+The directory is created automatically if it does not exist.
+
 ## Derived Property
 
 `SFMCConfig.base_url` assembles the full API root from the host:

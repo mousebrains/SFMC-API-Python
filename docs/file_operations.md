@@ -48,6 +48,23 @@ deleting files.
      │ ◄────────────────────────────────────── │
 ```
 
+## Default Download Directory
+
+When no explicit path is given, downloads go to the client's
+`download_dir`, resolved as:
+
+1. ``download_path=`` passed to ``SFMCClient()``
+2. ``rootDownloadPath`` from the credentials file
+3. The current working directory
+
+```python
+# Explicit path
+client.download_glider_file("osusim", "from-glider", "data.sbd", "/tmp/data.sbd")
+
+# Default: saves to download_dir/data.sbd
+client.download_glider_file("osusim", "from-glider", "data.sbd")
+```
+
 ## Data Flow: Download a Single File
 
 Uses HTTP streaming to avoid loading the entire file into memory:

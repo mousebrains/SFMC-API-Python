@@ -143,7 +143,7 @@ sfmc --compact get-glider-details osusim | jq .data.state
 | `upload-glider-files` | `GLIDER FOLDER FILE...` | Upload files to folder |
 | `upload-cache-files` | `GROUP FILE...` | Upload cache files |
 | `download-glider-file` | `GLIDER FOLDER FILE [-o PATH]` | Download single file |
-| `download-glider-files` | `GLIDER FOLDER -o PATH [--filter]` | Download as zip |
+| `download-glider-files` | `GLIDER FOLDER [-o PATH] [--filter]` | Download as zip |
 | `delete-glider-file` | `GLIDER FOLDER FILE` | Delete a file |
 
 ### Real-Time Streaming

@@ -92,7 +92,7 @@ Extracted from the Node.js library source. Base URL: `https://{host}/sfmc/api`
 | Endpoint | Description |
 |----------|-------------|
 | `/v1/scripts-for-glider/{gliderName}` | Get available scripts (GET) |
-| `/v1/set-assigned-script/{gliderName}/{scriptName}` | Set assigned script |
+| `/v1/set-assigned-script/{gliderName}/{scriptType}/{scriptName}` | Set assigned script |
 | `/v1/clear-assigned-script/{gliderName}` | Clear assigned script |
 | `/v1/pause-assigned-script/{gliderName}` | Pause assigned script |
 | `/v1/resume-assigned-script/{gliderName}` | Resume assigned script |
