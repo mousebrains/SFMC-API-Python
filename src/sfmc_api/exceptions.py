@@ -1,0 +1,43 @@
+"""Exception hierarchy for the SFMC API client.
+
+All exceptions inherit from :class:`SFMCError`, so callers can catch
+that single base class to handle any SFMC-related failure.
+"""
+
+
+class SFMCError(Exception):
+    """Base exception for all SFMC client errors."""
+
+
+class ConfigError(SFMCError):
+    """Configuration is missing, unreadable, or malformed."""
+
+
+class AuthenticationError(SFMCError):
+    """Sign-in failed (bad credentials, network error, unexpected response)."""
+
+
+class RateLimitError(SFMCError):
+    """Server returned HTTP 429 — too many requests.
+
+    Attributes:
+        retry_after_seconds: How long the server asks us to wait before retrying.
+    """
+
+    def __init__(self, retry_after_seconds: float, message: str = "") -> None:
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(message or f"Rate limited. Retry after {retry_after_seconds:.1f}s")
+
+
+class APIError(SFMCError):
+    """Non-success HTTP response from the SFMC API.
+
+    Attributes:
+        status_code: The HTTP status code returned by the server.
+        response_body: The raw response body, if available.
+    """
+
+    def __init__(self, status_code: int, response_body: str = "") -> None:
+        self.status_code = status_code
+        self.response_body = response_body
+        super().__init__(f"SFMC API error: HTTP {status_code}")
