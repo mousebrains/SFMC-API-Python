@@ -18,11 +18,6 @@ from sfmc_api.stomp import (
 )
 
 
-@pytest.fixture()
-def config() -> SFMCConfig:
-    return SFMCConfig(host="sfmc.test", client_id="c", secret="s")
-
-
 class TestSockJSUrl:
     def test_format(self, config: SFMCConfig) -> None:
         url = _sockjs_url(config, "tok123")

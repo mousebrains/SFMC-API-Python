@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import contextlib
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -181,7 +181,9 @@ class SFMCClient:
 
         Raises:
             APIError: If the glider is not found or the server returns
-                an error.
+                a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
 
         Example::
 
@@ -190,7 +192,7 @@ class SFMCClient:
             ...     print(info)
         """
         response = self._request("GET", f"/v1/gliders/{glider_name}")
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def get_active_deployment_details(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the active deployment for a glider.
@@ -203,9 +205,14 @@ class SFMCClient:
         Returns:
             A dictionary with deployment details including
             ``"id"``, ``"gliderName"``, timestamps, and status.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request("GET", f"/v1/active-deployment/{glider_name}")
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def get_newest_mission_status(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the newest mission status for a glider.
@@ -217,9 +224,14 @@ class SFMCClient:
 
         Returns:
             A dictionary with mission status details.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request("GET", f"/v1/newest-mission-details/{glider_name}")
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def get_surface_sensor_samples(
         self,
@@ -243,13 +255,18 @@ class SFMCClient:
 
         Returns:
             A dictionary containing the sensor sample data.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request(
             "GET",
             f"/v1/surface-sensor-samples/{glider_name}/{sensor_type_name}",
             params={"startDateTime": start_datetime, "endDateTime": end_datetime},
         )
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def get_folder_file_listing(
         self,
@@ -276,6 +293,11 @@ class SFMCClient:
 
         Returns:
             A dictionary with the file listing and pagination info.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         params: dict[str, str | int] = {"page": page}
         if filter is not None:
@@ -288,7 +310,7 @@ class SFMCClient:
             f"/v1/glider-folder-file-listing/{glider_name}/{folder}",
             params=params,
         )
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def get_available_scripts(self, glider_name: str) -> dict[str, Any]:
         """List available scripts for a glider.
@@ -300,9 +322,14 @@ class SFMCClient:
 
         Returns:
             A dictionary listing available scripts and their types.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request("GET", f"/v1/scripts-for-glider/{glider_name}")
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def get_zmodem_transfers(self, connection_id: int | str) -> dict[str, Any]:
         """Retrieve Zmodem transfers for a connection.
@@ -314,9 +341,14 @@ class SFMCClient:
 
         Returns:
             A dictionary with the Zmodem transfer details.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request("GET", f"/v1/zmodem-transfers/{connection_id}")
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     # ── Plans — Query ────────────────────────────────────────────────
 
@@ -330,9 +362,14 @@ class SFMCClient:
 
         Returns:
             A dictionary describing the assigned mission plan.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request("GET", f"/v1/glider-assigned-mission-plan/{glider_name}")
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def get_waypoint_plan(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the assigned waypoint plan for a glider.
@@ -345,9 +382,14 @@ class SFMCClient:
         Returns:
             A dictionary describing the assigned waypoint plan,
             including waypoint coordinates and sequencing.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request("GET", f"/v1/glider-assigned-waypoint-plan/{glider_name}")
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def get_yo_plan(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the assigned yo plan for a glider.
@@ -362,9 +404,14 @@ class SFMCClient:
 
         Returns:
             A dictionary describing the assigned yo plan.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request("GET", f"/v1/glider-assigned-yo-plan/{glider_name}")
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def get_surface_plan(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the assigned surface plan for a glider.
@@ -380,9 +427,14 @@ class SFMCClient:
         Returns:
             A dictionary describing the assigned surface plan
             and its rules.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request("GET", f"/v1/glider-assigned-surface-plan/{glider_name}")
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def get_sampling_plan(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the assigned sampling plan for a glider.
@@ -398,9 +450,14 @@ class SFMCClient:
         Returns:
             A dictionary describing the assigned sampling plan
             and its rules.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request("GET", f"/v1/glider-assigned-sampling-plan/{glider_name}")
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def get_data_transmission_plan(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the assigned data transmission plan for a glider.
@@ -415,12 +472,17 @@ class SFMCClient:
 
         Returns:
             A dictionary describing the data transmission plan.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request(
             "GET",
             f"/v1/glider-assigned-data-transmission-plan/{glider_name}",
         )
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def get_mission_sensor_plan(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the assigned mission sensor plan for a glider.
@@ -433,12 +495,17 @@ class SFMCClient:
         Returns:
             A dictionary describing which sensors are active
             and their configuration.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request(
             "GET",
             f"/v1/glider-assigned-mission-sensor-plan/{glider_name}",
         )
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def get_abort_plan(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the assigned abort plan for a glider.
@@ -453,9 +520,14 @@ class SFMCClient:
 
         Returns:
             A dictionary describing the abort plan and its triggers.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request("GET", f"/v1/glider-assigned-abort-plan/{glider_name}")
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     # ── Plans — Update ───────────────────────────────────────────────
 
@@ -471,6 +543,11 @@ class SFMCClient:
 
         Returns:
             Server response confirming the update.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         return self._upload_plan_file(
             f"/v1/update-glider-waypoint-plan/{glider_name}",
@@ -489,6 +566,11 @@ class SFMCClient:
 
         Returns:
             Server response confirming the update.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         return self._upload_plan_file(
             f"/v1/update-glider-yo-plan/{glider_name}",
@@ -509,6 +591,11 @@ class SFMCClient:
 
         Returns:
             Server response confirming the update.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         return self._upload_plan_file(
             f"/v1/update-glider-surface-plan/{glider_name}",
@@ -529,6 +616,11 @@ class SFMCClient:
 
         Returns:
             Server response confirming the update.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         return self._upload_plan_file(
             f"/v1/update-glider-sampling-plan/{glider_name}",
@@ -549,6 +641,11 @@ class SFMCClient:
 
         Returns:
             Server response confirming the update.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         return self._upload_plan_file(
             f"/v1/update-glider-flight-data-transmission-plan/{glider_name}",
@@ -569,6 +666,11 @@ class SFMCClient:
 
         Returns:
             Server response confirming the update.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         return self._upload_plan_file(
             f"/v1/update-glider-science-data-transmission-plan/{glider_name}",
@@ -592,7 +694,7 @@ class SFMCClient:
             fobj = stack.enter_context(open(file_path, "rb"))
             files = {"file": (file_path.name, fobj)}
             response = self._request("PUT", path, files=files)
-            return response.json()  # type: ignore[no-any-return]
+            return cast(dict[str, Any], response.json())
 
     # ── Plans — Delete Rules ─────────────────────────────────────────
 
@@ -606,12 +708,17 @@ class SFMCClient:
 
         Returns:
             Server response confirming the deletion.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request(
             "DELETE",
             f"/v1/delete-glider-hit-waypoint-surface-plan-rule/{glider_name}",
         )
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def delete_every_secs_surface_plan_rules(self, glider_name: str) -> dict[str, Any]:
         """Delete all every-N-seconds surface plan rules for a glider.
@@ -623,12 +730,17 @@ class SFMCClient:
 
         Returns:
             Server response confirming the deletion.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request(
             "DELETE",
             f"/v1/delete-glider-every-secs-surface-plan-rules/{glider_name}",
         )
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def delete_at_utc_time_surface_plan_rules(self, glider_name: str) -> dict[str, Any]:
         """Delete all at-UTC-time surface plan rules for a glider.
@@ -640,12 +752,17 @@ class SFMCClient:
 
         Returns:
             Server response confirming the deletion.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request(
             "DELETE",
             f"/v1/delete-glider-at-utc-time-surface-plan-rules/{glider_name}",
         )
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def delete_sampling_plan_rules(self, glider_name: str) -> dict[str, Any]:
         """Delete all sampling plan rules for a glider.
@@ -657,12 +774,17 @@ class SFMCClient:
 
         Returns:
             Server response confirming the deletion.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request(
             "DELETE",
             f"/v1/delete-glider-sampling-plan-rules/{glider_name}",
         )
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     # ── Glider Registration & Deployment ─────────────────────────────
 
@@ -678,6 +800,11 @@ class SFMCClient:
 
         Returns:
             Server response confirming registration.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request(
             "POST",
@@ -685,7 +812,7 @@ class SFMCClient:
             content=glider_name,
             headers={"Content-Type": "application/json; charset=utf-8"},
         )
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def obtain_or_create_active_deployment(self, glider_name: str) -> dict[str, Any]:
         """Get the active deployment for a glider, creating one if needed.
@@ -697,12 +824,17 @@ class SFMCClient:
 
         Returns:
             A dictionary with the active deployment details.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request(
             "POST",
             f"/v1/obtain-or-create-active-deployment/{glider_name}",
         )
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def update_active_deployment_start(
         self, glider_name: str, start_datetime: str
@@ -718,13 +850,18 @@ class SFMCClient:
 
         Returns:
             Server response confirming the update.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request(
             "PUT",
             f"/v1/update-active-deployment-start/{glider_name}",
             params={"startDateTime": start_datetime},
         )
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     # ── Script Control ───────────────────────────────────────────────
 
@@ -742,12 +879,17 @@ class SFMCClient:
 
         Returns:
             Server response confirming the assignment.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request(
             "PUT",
             f"/v1/set-assigned-script/{glider_name}/{script_type}/{script_name}",
         )
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def clear_assigned_script(self, glider_name: str) -> dict[str, Any]:
         """Clear the currently assigned script for a glider.
@@ -759,9 +901,14 @@ class SFMCClient:
 
         Returns:
             Server response confirming the script was cleared.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request("PUT", f"/v1/clear-assigned-script/{glider_name}")
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def pause_assigned_script(self, glider_name: str) -> dict[str, Any]:
         """Pause the currently assigned script for a glider.
@@ -773,9 +920,14 @@ class SFMCClient:
 
         Returns:
             Server response confirming the script was paused.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request("PUT", f"/v1/pause-assigned-script/{glider_name}")
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def resume_assigned_script(self, glider_name: str) -> dict[str, Any]:
         """Resume a paused script for a glider.
@@ -787,9 +939,14 @@ class SFMCClient:
 
         Returns:
             Server response confirming the script was resumed.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request("PUT", f"/v1/resume-assigned-script/{glider_name}")
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def rewind_assigned_script(self, glider_name: str) -> dict[str, Any]:
         """Rewind the assigned script for a glider to the beginning.
@@ -801,9 +958,14 @@ class SFMCClient:
 
         Returns:
             Server response confirming the script was rewound.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request("PUT", f"/v1/rewind-assigned-script/{glider_name}")
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     # ── Commands ─────────────────────────────────────────────────────
 
@@ -818,6 +980,11 @@ class SFMCClient:
 
         Returns:
             Server response confirming the command was submitted.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request(
             "PUT",
@@ -825,7 +992,7 @@ class SFMCClient:
             content=command,
             headers={"Content-Type": "application/json; charset=utf-8"},
         )
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     # ── Deploy Files ─────────────────────────────────────────────────
 
@@ -842,9 +1009,14 @@ class SFMCClient:
 
         Returns:
             Server response confirming the deployment.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request("PUT", f"/v1/gen-and-deploy-glider-goto-file/{glider_name}")
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def deploy_yo_file(self, glider_name: str) -> dict[str, Any]:
         """Generate and deploy a yo file for a glider.
@@ -856,9 +1028,14 @@ class SFMCClient:
 
         Returns:
             Server response confirming the deployment.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request("PUT", f"/v1/gen-and-deploy-glider-yo-file/{glider_name}")
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def deploy_surface_files(self, glider_name: str) -> dict[str, Any]:
         """Generate and deploy surface files for a glider.
@@ -870,12 +1047,17 @@ class SFMCClient:
 
         Returns:
             Server response confirming the deployment.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request(
             "PUT",
             f"/v1/gen-and-deploy-glider-surface-files/{glider_name}",
         )
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def deploy_sample_files(self, glider_name: str) -> dict[str, Any]:
         """Generate and deploy sample files for a glider.
@@ -887,12 +1069,17 @@ class SFMCClient:
 
         Returns:
             Server response confirming the deployment.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request(
             "PUT",
             f"/v1/gen-and-deploy-glider-sample-files/{glider_name}",
         )
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def deploy_sbd_list_file(self, glider_name: str) -> dict[str, Any]:
         """Generate and deploy an SBD list file for a glider.
@@ -907,12 +1094,17 @@ class SFMCClient:
 
         Returns:
             Server response confirming the deployment.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request(
             "PUT",
             f"/v1/gen-and-deploy-glider-sbd-list-file/{glider_name}",
         )
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     def deploy_tbd_list_file(self, glider_name: str) -> dict[str, Any]:
         """Generate and deploy a TBD list file for a glider.
@@ -927,12 +1119,17 @@ class SFMCClient:
 
         Returns:
             Server response confirming the deployment.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         response = self._request(
             "PUT",
             f"/v1/gen-and-deploy-glider-tbd-list-file/{glider_name}",
         )
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     # ── File Operations ──────────────────────────────────────────────
 
@@ -958,6 +1155,9 @@ class SFMCClient:
 
         Raises:
             ValueError: If *folder* is not an allowed upload target.
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         allowed = ("to-glider", "to-science", "from-glider")
         if folder not in allowed:
@@ -984,6 +1184,11 @@ class SFMCClient:
 
         Returns:
             Server response confirming the upload.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         return self._upload_files(
             f"/v1/upload-cache-files/{group_name}",
@@ -1002,7 +1207,7 @@ class SFMCClient:
                 for fp in file_paths
             ]
             response = self._request("PUT", path, files=files)
-            return response.json()  # type: ignore[no-any-return]
+            return cast(dict[str, Any], response.json())
 
     def download_glider_file(
         self,
@@ -1024,6 +1229,11 @@ class SFMCClient:
 
         Returns:
             The :class:`~pathlib.Path` to the downloaded file.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         download_path = Path(download_path)
         headers = self._auth_headers()
@@ -1069,6 +1279,11 @@ class SFMCClient:
 
         Returns:
             The :class:`~pathlib.Path` to the downloaded zip file.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         download_path = Path(download_path)
         params: dict[str, str] = {}
@@ -1112,6 +1327,9 @@ class SFMCClient:
 
         Raises:
             ValueError: If *folder* is not an allowed deletion target.
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         allowed = ("to-glider", "to-science", "configuration")
         if folder not in allowed:
@@ -1120,7 +1338,7 @@ class SFMCClient:
             "DELETE",
             f"/v1/delete-glider-file/{glider_name}/{folder}/{file_name}",
         )
-        return response.json()  # type: ignore[no-any-return]
+        return cast(dict[str, Any], response.json())
 
     # ── Real-Time Streaming (STOMP) ──────────────────────────────────
 
@@ -1181,6 +1399,11 @@ class SFMCClient:
                     for evt in events:
                         status = "CONNECTED" if evt["active"] else "DISCONNECTED"
                         print(f"{status} id={evt['id']}")
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         glider_id = self._get_glider_id(glider_name)
         return stomp.subscribe(f"/topic/glider-connections-{glider_id}")
@@ -1204,6 +1427,11 @@ class SFMCClient:
         Returns:
             A :class:`StompSubscription` yielding glider output
             messages.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         glider_id = self._get_glider_id(glider_name)
         return stomp.subscribe(f"/topic/glider-link-output/{glider_id}")
@@ -1226,6 +1454,11 @@ class SFMCClient:
         Returns:
             A :class:`StompSubscription` yielding script event
             messages.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         glider_id = self._get_glider_id(glider_name)
         return stomp.subscribe(f"/topic/glider-script-assignment-updates-{glider_id}")
@@ -1248,6 +1481,11 @@ class SFMCClient:
         Returns:
             A :class:`StompSubscription` yielding Zmodem transfer
             event messages.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         deployment = self.get_active_deployment_details(glider_name)
         deployment_id = deployment["data"]["id"]
@@ -1268,6 +1506,11 @@ class SFMCClient:
         Returns:
             A :class:`StompSubscription` yielding deployment update
             messages.
+
+        Raises:
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
         """
         deployment = self.get_active_deployment_details(glider_name)
         deployment_id = deployment["data"]["id"]

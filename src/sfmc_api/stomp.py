@@ -39,13 +39,13 @@ from websockets.sync.client import connect as ws_connect
 from .config import SFMCConfig
 from .exceptions import SFMCError
 
-__all__ = ["StompConnection", "StompError", "StompSubscription"]
+__all__ = ["MAX_SEQUENCE", "StompConnection", "StompError", "StompSubscription"]
 
 logger = logging.getLogger(__name__)
 
-# Maximum STOMP sequence number used by the SFMC server.  After this
-# value the sequence wraps back to 0.
-_MAX_SEQUENCE = 9007199254740991
+#: Maximum STOMP sequence number used by the SFMC server.
+#: After this value the sequence wraps back to 0.
+MAX_SEQUENCE = 9007199254740991
 
 
 class StompError(SFMCError):

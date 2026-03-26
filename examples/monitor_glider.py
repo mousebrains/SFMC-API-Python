@@ -26,7 +26,7 @@ import threading
 from collections.abc import Generator
 
 from sfmc_api import SFMCClient
-from sfmc_api.stomp import _MAX_SEQUENCE, StompSubscription
+from sfmc_api.stomp import MAX_SEQUENCE, StompSubscription
 
 # ── Sequence-ordered dialog output ───────────────────────────────────
 
@@ -61,12 +61,12 @@ def ordered_dialog(
             yield data
             if next_expected is None:
                 next_expected = seq
-            next_expected = (next_expected + 1) if next_expected < _MAX_SEQUENCE else 0
+            next_expected = (next_expected + 1) if next_expected < MAX_SEQUENCE else 0
 
             # Drain any buffered messages that are now in order
             while next_expected in pending:
                 yield pending.pop(next_expected)
-                next_expected = (next_expected + 1) if next_expected < _MAX_SEQUENCE else 0
+                next_expected = (next_expected + 1) if next_expected < MAX_SEQUENCE else 0
         else:
             # Out of order — buffer it
             pending[seq] = data

@@ -22,9 +22,10 @@ from .exceptions import (
     RateLimitError,
     SFMCError,
 )
-from .stomp import StompConnection, StompError, StompSubscription
+from .stomp import MAX_SEQUENCE, StompConnection, StompError, StompSubscription
 
 __all__ = [
+    "MAX_SEQUENCE",
     "APIError",
     "AuthenticationError",
     "ConfigError",

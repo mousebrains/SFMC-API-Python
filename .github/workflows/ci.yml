@@ -41,7 +41,7 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Run tests with coverage
-        run: pytest --cov=sfmc_api --cov-report=xml tests/
+        run: pytest --cov=sfmc_api --cov-report=xml --cov-fail-under=70 tests/
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5

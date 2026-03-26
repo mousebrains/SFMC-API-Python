@@ -50,6 +50,9 @@ Repository = "https://github.com/mousebrains/SFMC-API-Python"
 Issues = "https://github.com/mousebrains/SFMC-API-Python/issues"
 Changelog = "https://github.com/mousebrains/SFMC-API-Python/blob/main/CHANGELOG.md"
 
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/README.md", "/LICENSE", "/CHANGELOG.md", "/pyproject.toml"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/sfmc_api"]
 
@@ -74,6 +77,17 @@ python_version = "3.12"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
+
+[tool.coverage.run]
+branch = true
+source = ["sfmc_api"]
+
+[tool.coverage.report]
+fail_under = 70
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+]
 
 [tool.pytest.ini_options]
 addopts = "--cov-fail-under=70"

@@ -66,6 +66,28 @@ class TestFromFile:
         with pytest.raises(ConfigError, match="Missing required"):
             SFMCConfig.from_file(_write_config(tmp_path, data))
 
+    def test_unreadable_file(self, tmp_path: Path) -> None:
+        p = tmp_path / "noperm.json"
+        p.write_text("{}")
+        p.chmod(0o000)
+        try:
+            with pytest.raises(ConfigError, match="Cannot read"):
+                SFMCConfig.from_file(p)
+        finally:
+            p.chmod(0o644)  # restore for cleanup
+
+    def test_non_dict_json(self, tmp_path: Path) -> None:
+        p = tmp_path / "array.json"
+        p.write_text('["not", "a", "dict"]')
+        with pytest.raises(ConfigError, match="Expected JSON object"):
+            SFMCConfig.from_file(p)
+
+    def test_host_entry_not_dict(self, tmp_path: Path) -> None:
+        p = tmp_path / "bad_host.json"
+        p.write_text('{"myhost.com": "not-a-dict"}')
+        with pytest.raises(ConfigError, match="Expected dict for host"):
+            SFMCConfig.from_file(p)
+
 
 class TestFromDict:
     def test_valid(self) -> None:

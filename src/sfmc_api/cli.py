@@ -17,7 +17,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from . import __version__
 from .client import SFMCClient
@@ -323,59 +323,55 @@ def _call_method(
 
     # Category A: glider-name-only
     if cmd in _GLIDER_ONLY:
-        return method(args.glider_name)  # type: ignore[no-any-return]
+        return cast(dict[str, Any], method(args.glider_name))
 
     # Category B: plan-upload
     if cmd in _PLAN_UPLOAD:
-        return method(args.glider_name, args.file)  # type: ignore[no-any-return]
+        return cast(dict[str, Any], method(args.glider_name, args.file))
 
     # Custom commands
+    result: dict[str, Any]
+
     if cmd == "get-surface-sensor-samples":
-        return method(  # type: ignore[no-any-return]
+        result = method(
             args.glider_name,
             args.sensor_type,
             start_datetime=args.start,
             end_datetime=args.end,
         )
+        return result
 
     if cmd == "get-folder-file-listing":
-        return method(  # type: ignore[no-any-return]
+        result = method(
             args.glider_name,
             args.folder,
             page=args.page,
             filter=args.filter,
             last_modified_after=getattr(args, "last_modified_after", None),
         )
+        return result
 
     if cmd == "get-zmodem-transfers":
-        return method(args.connection_id)  # type: ignore[no-any-return]
-
+        return cast(dict[str, Any], method(args.connection_id))
     if cmd == "register-glider":
-        return method(args.glider_name, args.group)  # type: ignore[no-any-return]
-
+        return cast(dict[str, Any], method(args.glider_name, args.group))
     if cmd == "update-active-deployment-start":
-        return method(args.glider_name, args.start_datetime)  # type: ignore[no-any-return]
-
+        return cast(dict[str, Any], method(args.glider_name, args.start_datetime))
     if cmd == "set-assigned-script":
-        return method(  # type: ignore[no-any-return]
-            args.glider_name, args.script_type, args.script_name
-        )
+        result = method(args.glider_name, args.script_type, args.script_name)
+        return result
 
     if cmd == "send-command":
-        return method(args.glider_name, args.command_str)  # type: ignore[no-any-return]
-
+        return cast(dict[str, Any], method(args.glider_name, args.command_str))
     if cmd == "upload-glider-files":
-        return method(  # type: ignore[no-any-return]
-            args.glider_name, args.folder, args.files
-        )
+        result = method(args.glider_name, args.folder, args.files)
+        return result
 
     if cmd == "upload-cache-files":
-        return method(args.group_name, args.files)  # type: ignore[no-any-return]
-
+        return cast(dict[str, Any], method(args.group_name, args.files))
     if cmd == "delete-glider-file":
-        return method(  # type: ignore[no-any-return]
-            args.glider_name, args.folder, args.file_name
-        )
+        result = method(args.glider_name, args.folder, args.file_name)
+        return result
 
     # Should not reach here if build_parser is complete
     raise SystemExit(f"Unknown command: {cmd}")

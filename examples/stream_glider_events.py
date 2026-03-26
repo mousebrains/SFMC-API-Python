@@ -13,7 +13,7 @@ Loads credentials from ``~/.config/sfmc/credentials.json`` by default.
 import json
 import sys
 
-from sfmc_api import SFMCClient
+from sfmc_api import SFMCClient, SFMCError
 
 
 def main() -> None:
@@ -23,18 +23,22 @@ def main() -> None:
 
     glider_name = sys.argv[1]
 
-    with SFMCClient() as client:
-        print(f"Connecting to STOMP for {glider_name}...")
-        with client.open_stream() as stomp:
-            sub = client.subscribe_connection_events(glider_name, stomp)
-            print("Subscribed to connection events. Waiting for events...\n")
+    try:
+        with SFMCClient() as client:
+            print(f"Connecting to STOMP for {glider_name}...")
+            with client.open_stream() as stomp:
+                sub = client.subscribe_connection_events(glider_name, stomp)
+                print("Subscribed to connection events. Waiting for events...\n")
 
-            try:
-                for event in sub:
-                    print(json.dumps(event, indent=2))
-                    print()
-            except KeyboardInterrupt:
-                print("\nStopping.")
+                try:
+                    for event in sub:
+                        print(json.dumps(event, indent=2))
+                        print()
+                except KeyboardInterrupt:
+                    print("\nStopping.")
+    except SFMCError as exc:
+        sys.stderr.write(f"Error: {exc}\n")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
