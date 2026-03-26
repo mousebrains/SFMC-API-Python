@@ -52,6 +52,10 @@ def check_response(response: httpx.Response) -> None:
 
     if response.status_code == 429:
         ms = response.headers.get("x-rate-limit-retry-after-milliseconds", "0")
-        raise RateLimitError(retry_after_seconds=int(ms) / 1000)
+        try:
+            retry_seconds = int(ms) / 1000
+        except (ValueError, TypeError):
+            retry_seconds = 0.0
+        raise RateLimitError(retry_after_seconds=retry_seconds)
 
     raise APIError(response.status_code, response.text)

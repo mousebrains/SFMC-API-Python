@@ -77,6 +77,48 @@ class TestFromDict:
         with pytest.raises(ConfigError):
             SFMCConfig.from_dict({"host": "h"})
 
+    def test_missing_client_id(self) -> None:
+        data = {"host": "h", "apiCredentials": {"secret": "s"}}
+        with pytest.raises(ConfigError, match="Missing required"):
+            SFMCConfig.from_dict(data)
+
+    def test_empty_credentials_dict(self) -> None:
+        data = {"host": "h", "apiCredentials": {}}
+        with pytest.raises(ConfigError, match="Missing required"):
+            SFMCConfig.from_dict(data)
+
+
+class TestTlsVerify:
+    """Test tlsRejectUnauthorized → tls_verify conversion."""
+
+    def test_int_0_means_no_verify(self) -> None:
+        cfg = SFMCConfig.from_dict({**VALID_CONFIG, "tlsRejectUnauthorized": 0})
+        assert cfg.tls_verify is False
+
+    def test_int_1_means_verify(self) -> None:
+        cfg = SFMCConfig.from_dict({**VALID_CONFIG, "tlsRejectUnauthorized": 1})
+        assert cfg.tls_verify is True
+
+    def test_string_0_means_no_verify(self) -> None:
+        cfg = SFMCConfig.from_dict({**VALID_CONFIG, "tlsRejectUnauthorized": "0"})
+        assert cfg.tls_verify is False
+
+    def test_string_false_means_no_verify(self) -> None:
+        cfg = SFMCConfig.from_dict({**VALID_CONFIG, "tlsRejectUnauthorized": "false"})
+        assert cfg.tls_verify is False
+
+    def test_string_1_means_verify(self) -> None:
+        cfg = SFMCConfig.from_dict({**VALID_CONFIG, "tlsRejectUnauthorized": "1"})
+        assert cfg.tls_verify is True
+
+    def test_absent_defaults_to_verify(self) -> None:
+        cfg = SFMCConfig.from_dict(VALID_CONFIG)
+        assert cfg.tls_verify is True
+
+    def test_none_means_no_verify(self) -> None:
+        cfg = SFMCConfig.from_dict({**VALID_CONFIG, "tlsRejectUnauthorized": None})
+        assert cfg.tls_verify is False
+
 
 class TestBaseUrl:
     def test_base_url(self) -> None:
@@ -89,3 +131,18 @@ class TestImmutable:
         cfg = SFMCConfig(host="h", client_id="c", secret="s")
         with pytest.raises(AttributeError):
             cfg.host = "other"  # type: ignore[misc]
+
+
+class TestRootDownloadPath:
+    def test_path_converted(self) -> None:
+        cfg = SFMCConfig.from_dict({**VALID_CONFIG, "rootDownloadPath": "/tmp/dl"})
+        assert cfg.root_download_path == Path("/tmp/dl")
+        assert isinstance(cfg.root_download_path, Path)
+
+    def test_null_means_none(self) -> None:
+        cfg = SFMCConfig.from_dict({**VALID_CONFIG, "rootDownloadPath": None})
+        assert cfg.root_download_path is None
+
+    def test_empty_string_means_none(self) -> None:
+        cfg = SFMCConfig.from_dict({**VALID_CONFIG, "rootDownloadPath": ""})
+        assert cfg.root_download_path is None

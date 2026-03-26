@@ -52,3 +52,45 @@ def test_server_error() -> None:
     with pytest.raises(APIError) as exc_info:
         check_response(r)
     assert exc_info.value.status_code == 500
+
+
+def test_201_is_success() -> None:
+    check_response(_mock_response(201))
+
+
+def test_204_is_success() -> None:
+    check_response(_mock_response(204))
+
+
+def test_401_unauthorized() -> None:
+    r = _mock_response(401, text="unauthorized")
+    with pytest.raises(APIError) as exc_info:
+        check_response(r)
+    assert exc_info.value.status_code == 401
+
+
+def test_403_forbidden() -> None:
+    r = _mock_response(403, text="forbidden")
+    with pytest.raises(APIError) as exc_info:
+        check_response(r)
+    assert exc_info.value.status_code == 403
+
+
+def test_rate_limit_non_numeric_header() -> None:
+    """Non-numeric retry header should not crash — falls back to 0."""
+    r = _mock_response(429, headers={"x-rate-limit-retry-after-milliseconds": "abc"})
+    with pytest.raises(RateLimitError) as exc_info:
+        check_response(r)
+    assert exc_info.value.retry_after_seconds == 0.0
+
+
+def test_build_http_client() -> None:
+    from sfmc_api._http import build_http_client
+    from sfmc_api.config import SFMCConfig
+
+    cfg = SFMCConfig(host="test.example.com", client_id="c", secret="s", tls_verify=False)
+    client = build_http_client(cfg)
+    try:
+        assert "test.example.com/sfmc/api" in str(client._base_url)
+    finally:
+        client.close()

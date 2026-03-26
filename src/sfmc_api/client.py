@@ -25,6 +25,7 @@ import httpx
 from ._http import build_http_client, check_response
 from .auth import authenticate
 from .config import SFMCConfig
+from .exceptions import AuthenticationError
 from .stomp import StompConnection, StompSubscription
 
 
@@ -1129,7 +1130,8 @@ class SFMCClient:
             StompError: If the WebSocket or STOMP handshake fails.
         """
         self._ensure_auth()
-        assert self._token is not None  # guaranteed by _ensure_auth
+        if self._token is None:
+            raise AuthenticationError("Authentication succeeded but no token was returned")
         conn = StompConnection(self._config, self._token)
         conn.connect()
         return conn

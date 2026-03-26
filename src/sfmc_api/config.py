@@ -115,8 +115,12 @@ class SFMCConfig:
             ) from exc
 
         # tlsRejectUnauthorized: 0 means skip verification (tls_verify=False)
+        # Handle both int and string values from JSON.
         tls_raw = data.get("tlsRejectUnauthorized", 1)
-        tls_verify = bool(tls_raw)
+        if isinstance(tls_raw, str):
+            tls_verify = tls_raw not in ("0", "", "false", "no")
+        else:
+            tls_verify = bool(tls_raw)
 
         root_path_raw = data.get("rootDownloadPath")
         root_download_path = Path(root_path_raw) if root_path_raw else None

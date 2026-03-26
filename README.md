@@ -26,7 +26,7 @@ pip install -e ".[dev]"
 from sfmc_api import SFMCClient
 
 with SFMCClient() as client:
-    details = client.get_glider_details("osu684")
+    details = client.get_glider_details("osusim")
     print(details)
 ```
 

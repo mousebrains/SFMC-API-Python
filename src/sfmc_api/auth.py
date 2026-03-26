@@ -15,7 +15,7 @@ import httpx
 
 from ._http import check_response
 from .config import SFMCConfig
-from .exceptions import AuthenticationError
+from .exceptions import AuthenticationError, SFMCError
 
 
 def authenticate(http_client: httpx.Client, config: SFMCConfig) -> str:
@@ -45,5 +45,7 @@ def authenticate(http_client: httpx.Client, config: SFMCConfig) -> str:
         raise AuthenticationError(
             f"Unexpected sign-in response (missing 'token' key): {exc}"
         ) from exc
+    except SFMCError as exc:
+        raise AuthenticationError(f"Authentication failed: {exc}") from exc
     except httpx.HTTPError as exc:
         raise AuthenticationError(f"Authentication failed: {exc}") from exc

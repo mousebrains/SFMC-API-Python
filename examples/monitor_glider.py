@@ -26,11 +26,9 @@ import threading
 from collections.abc import Generator
 
 from sfmc_api import SFMCClient
-from sfmc_api.stomp import StompSubscription
+from sfmc_api.stomp import _MAX_SEQUENCE, StompSubscription
 
 # ── Sequence-ordered dialog output ───────────────────────────────────
-
-_MAX_SEQUENCE = 9007199254740991
 
 
 def ordered_dialog(

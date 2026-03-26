@@ -76,7 +76,7 @@ Extracted from the Node.js library source. Base URL: `https://{host}/sfmc/api`
 | `/v1/delete-glider-at-utc-time-surface-plan-rules/{gliderName}` | Delete at-UTC-time surface plan rules |
 | `/v1/delete-glider-sampling-plan-rules/{gliderName}` | Delete sampling plan rules |
 
-### Deploy Files (all POST)
+### Deploy Files (all PUT)
 
 | Endpoint | Description |
 |----------|-------------|
@@ -87,7 +87,7 @@ Extracted from the Node.js library source. Base URL: `https://{host}/sfmc/api`
 | `/v1/gen-and-deploy-glider-sbd-list-file/{gliderName}` | Generate & deploy SBD list file |
 | `/v1/gen-and-deploy-glider-tbd-list-file/{gliderName}` | Generate & deploy TBD list file |
 
-### Script Control (all POST)
+### Script Control (all PUT, except GET for scripts-for-glider)
 
 | Endpoint | Description |
 |----------|-------------|

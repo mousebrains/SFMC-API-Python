@@ -66,10 +66,12 @@ Plan updates upload a configuration file via multipart form data:
 ### Code Path
 
 ```
-client.update_waypoint_plan(name, path)
-  └─► _upload_plan_file("/v1/update-glider-waypoint-plan/{name}", path)
-        ├─► open(path, "rb")
-        ├─► _request("PUT", path, files={"file": (name, fobj)})
+client.update_waypoint_plan(glider_name, goto_file_path)
+  └─► _upload_plan_file(api_path, file_path)
+        │   api_path  = "/v1/update-glider-waypoint-plan/{glider_name}"
+        │   file_path = goto_file_path
+        ├─► open(file_path, "rb")
+        ├─► _request("PUT", api_path, files={"file": (filename, fobj)})
         │     ├─► _auth_headers()
         │     ├─► httpx sends multipart/form-data
         │     └─► check_response()

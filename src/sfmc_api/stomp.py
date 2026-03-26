@@ -12,8 +12,9 @@ Typical usage::
     from sfmc_api import SFMCClient
 
     with SFMCClient() as client:
-        with client.stream("osu684") as stream:
-            for event in stream.connection_events():
+        with client.open_stream() as stomp:
+            sub = client.subscribe_connection_events("osu684", stomp)
+            for event in sub:
                 print(event)
 
 See :doc:`/docs/streaming` for detailed data-flow documentation.
@@ -161,8 +162,9 @@ def _sockjs_decode(data: str) -> list[str]:
 class StompSubscription:
     """An active STOMP topic subscription.
 
-    Provides an iterator interface to receive messages.  Use
-    :meth:`close` or the context manager protocol to unsubscribe.
+    Provides an iterator interface to receive messages.  Call
+    :meth:`close` to stop iteration, or simply break from the
+    ``for`` loop.
     """
 
     def __init__(self, sub_id: str, topic: str, queue: Queue[dict[str, Any] | None]) -> None:
@@ -223,6 +225,7 @@ class StompConnection:
         self._config = config
         self._token = token
         self._ws: Any = None
+        self._lock = threading.Lock()
         self._subscriptions: dict[str, StompSubscription] = {}
         self._sub_topics: dict[str, str] = {}  # sub_id → topic
         self._next_sub_id = 0
@@ -305,10 +308,12 @@ class StompConnection:
         self._closing = True
 
         # Close all subscriptions
-        for sub in self._subscriptions.values():
+        with self._lock:
+            subs = list(self._subscriptions.values())
+            self._subscriptions.clear()
+            self._sub_topics.clear()
+        for sub in subs:
             sub.close()
-        self._subscriptions.clear()
-        self._sub_topics.clear()
 
         if self._ws is not None and self._connected:
             try:
@@ -345,13 +350,14 @@ class StompConnection:
         if not self._connected:
             raise StompError("Not connected — call connect() first")
 
-        sub_id = f"sub-{self._next_sub_id}"
-        self._next_sub_id += 1
+        with self._lock:
+            sub_id = f"sub-{self._next_sub_id}"
+            self._next_sub_id += 1
 
-        queue: Queue[dict[str, Any] | None] = Queue()
-        sub = StompSubscription(sub_id, topic, queue)
-        self._subscriptions[sub_id] = sub
-        self._sub_topics[sub_id] = topic
+            queue: Queue[dict[str, Any] | None] = Queue()
+            sub = StompSubscription(sub_id, topic, queue)
+            self._subscriptions[sub_id] = sub
+            self._sub_topics[sub_id] = topic
 
         subscribe_frame = _encode_frame(
             "SUBSCRIBE",
@@ -382,7 +388,8 @@ class StompConnection:
 
                 if frame.command == "MESSAGE":
                     sub_id = frame.headers.get("subscription", "")
-                    sub = self._subscriptions.get(sub_id)
+                    with self._lock:
+                        sub = self._subscriptions.get(sub_id)
                     if sub is not None:
                         try:
                             payload: dict[str, Any] = json.loads(frame.body)
@@ -397,5 +404,7 @@ class StompConnection:
                     logger.debug("STOMP frame: %s", frame.command)
 
         # Signal all subscriptions that the connection is gone
-        for sub in self._subscriptions.values():
+        with self._lock:
+            remaining = list(self._subscriptions.values())
+        for sub in remaining:
             sub.close()
