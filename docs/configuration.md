@@ -76,7 +76,7 @@ The credentials file supports multiple SFMC servers, keyed by hostname:
 | `host` | `host` | yes | — | SFMC server hostname or IP (no `https://`) |
 | `apiCredentials.clientId` | `client_id` | yes | — | API credential identifier |
 | `apiCredentials.secret` | `secret` | yes | — | API credential secret |
-| `tlsRejectUnauthorized` | `tls_verify` | no | `1` (verify) | `0` = skip TLS verification, `1` = verify. **Note:** the Python attribute uses the *inverted* convention — `tls_verify=False` when the JSON value is `0`. |
+| `tlsRejectUnauthorized` | `tls_verify` | no | `1` (verify) | Only `0` disables TLS verification (`tls_verify=False`). All other values — including `false`, `true`, `1` — keep verification on. Follows the Node.js `NODE_TLS_REJECT_UNAUTHORIZED` convention. |
 | `rootDownloadPath` | `root_download_path` | no | `None` | Local directory for file downloads. Converted to `pathlib.Path`. |
 | `stompDebug` | `stomp_debug` | no | `false` | Enable verbose STOMP protocol logging. |
 
@@ -88,8 +88,11 @@ The JSON schema matches the Node.js reference implementation
 ```
 JSON                         Python
 ────                         ──────
-tlsRejectUnauthorized: 0  →  tls_verify = False
-tlsRejectUnauthorized: 1  →  tls_verify = True   (default)
+tlsRejectUnauthorized: 0      →  tls_verify = False  (only 0 disables)
+tlsRejectUnauthorized: 1      →  tls_verify = True
+tlsRejectUnauthorized: false  →  tls_verify = True   (not 0, so verify)
+tlsRejectUnauthorized: true   →  tls_verify = True
+(absent)                      →  tls_verify = True   (default)
 rootDownloadPath: "/tmp"  →  root_download_path = Path("/tmp")
 rootDownloadPath: null    →  root_download_path = None
 ```

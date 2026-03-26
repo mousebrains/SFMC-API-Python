@@ -48,8 +48,10 @@ class SFMCConfig:
         client_id: API credential — client identifier.
         secret: API credential — client secret.
         tls_verify: Whether to verify TLS certificates. Defaults to ``True``.
-            The JSON config field ``tlsRejectUnauthorized`` uses the inverse
-            convention: ``0`` means *do not verify* (maps to ``tls_verify=False``).
+            The JSON config field ``tlsRejectUnauthorized`` follows the
+            Node.js convention: only the value ``0`` disables verification.
+            All other values (including ``false``, ``true``, absent) keep
+            verification enabled.
         root_download_path: Local directory for file downloads. Optional.
         stomp_debug: Enable verbose STOMP protocol logging. Defaults to ``False``.
     """
@@ -173,13 +175,13 @@ class SFMCConfig:
                 "and 'apiCredentials.secret'."
             ) from exc
 
-        # tlsRejectUnauthorized: 0 means skip verification (tls_verify=False)
-        # Handle both int and string values from JSON.
+        # tlsRejectUnauthorized follows the Node.js convention:
+        # only the integer 0 (or string "0") disables TLS verification.
+        # All other values — including false, true, 1, absent — enable it.
+        # This matches Node's process.env["NODE_TLS_REJECT_UNAUTHORIZED"]
+        # where only the string "0" skips verification.
         tls_raw = data.get("tlsRejectUnauthorized", 1)
-        if isinstance(tls_raw, str):
-            tls_verify = tls_raw not in ("0", "", "false", "no")
-        else:
-            tls_verify = bool(tls_raw)
+        tls_verify = str(tls_raw) != "0"
 
         root_path_raw = data.get("rootDownloadPath")
         root_download_path = Path(root_path_raw) if root_path_raw else None

@@ -114,35 +114,47 @@ class TestFromDict:
 
 
 class TestTlsVerify:
-    """Test tlsRejectUnauthorized → tls_verify conversion."""
+    """Test tlsRejectUnauthorized → tls_verify conversion.
 
-    def test_int_0_means_no_verify(self) -> None:
+    Follows the Node.js convention: only the value 0 (int or string "0")
+    disables TLS verification.  All other values — including false, true,
+    None, "false" — leave verification enabled.
+    """
+
+    def test_int_0_disables_verify(self) -> None:
         cfg = SFMCConfig.from_dict({**VALID_DICT, "tlsRejectUnauthorized": 0})
         assert cfg.tls_verify is False
 
-    def test_int_1_means_verify(self) -> None:
-        cfg = SFMCConfig.from_dict({**VALID_DICT, "tlsRejectUnauthorized": 1})
-        assert cfg.tls_verify is True
-
-    def test_string_0_means_no_verify(self) -> None:
+    def test_string_0_disables_verify(self) -> None:
         cfg = SFMCConfig.from_dict({**VALID_DICT, "tlsRejectUnauthorized": "0"})
         assert cfg.tls_verify is False
 
-    def test_string_false_means_no_verify(self) -> None:
-        cfg = SFMCConfig.from_dict({**VALID_DICT, "tlsRejectUnauthorized": "false"})
-        assert cfg.tls_verify is False
+    def test_int_1_enables_verify(self) -> None:
+        cfg = SFMCConfig.from_dict({**VALID_DICT, "tlsRejectUnauthorized": 1})
+        assert cfg.tls_verify is True
 
-    def test_string_1_means_verify(self) -> None:
-        cfg = SFMCConfig.from_dict({**VALID_DICT, "tlsRejectUnauthorized": "1"})
+    def test_bool_false_enables_verify(self) -> None:
+        """JSON false → str(False) = 'False' ≠ '0' → verify stays on."""
+        cfg = SFMCConfig.from_dict({**VALID_DICT, "tlsRejectUnauthorized": False})
+        assert cfg.tls_verify is True
+
+    def test_bool_true_enables_verify(self) -> None:
+        cfg = SFMCConfig.from_dict({**VALID_DICT, "tlsRejectUnauthorized": True})
+        assert cfg.tls_verify is True
+
+    def test_string_false_enables_verify(self) -> None:
+        """String "false" ≠ "0" → verify stays on."""
+        cfg = SFMCConfig.from_dict({**VALID_DICT, "tlsRejectUnauthorized": "false"})
+        assert cfg.tls_verify is True
+
+    def test_none_enables_verify(self) -> None:
+        """None → str(None) = 'None' ≠ '0' → verify stays on."""
+        cfg = SFMCConfig.from_dict({**VALID_DICT, "tlsRejectUnauthorized": None})
         assert cfg.tls_verify is True
 
     def test_absent_defaults_to_verify(self) -> None:
         cfg = SFMCConfig.from_dict(VALID_DICT)
         assert cfg.tls_verify is True
-
-    def test_none_means_no_verify(self) -> None:
-        cfg = SFMCConfig.from_dict({**VALID_DICT, "tlsRejectUnauthorized": None})
-        assert cfg.tls_verify is False
 
 
 class TestBaseUrl:
