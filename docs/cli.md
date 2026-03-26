@@ -24,6 +24,7 @@ python -m sfmc_api --help
 |--------|-------------|
 | `--credentials PATH` | Path to credentials JSON file (default: `~/.config/sfmc/credentials.json`) |
 | `--host HOSTNAME` | Select host from a multi-host credentials file |
+| `--download-path DIR` | Default directory for downloads (overrides config `rootDownloadPath`) |
 | `--compact` | Single-line JSON output (default: pretty-printed) |
 | `--version` | Show version and exit |
 

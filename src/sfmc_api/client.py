@@ -67,6 +67,7 @@ class SFMCClient:
         config: SFMCConfig | None = None,
         config_path: Path | str | None = None,
         host: str | None = None,
+        download_path: Path | str | None = None,
     ) -> None:
         """Initialise the SFMC client.
 
@@ -78,12 +79,17 @@ class SFMCClient:
                 ``~/.config/sfmc/credentials.json``.
             host: Hostname to select from a multi-host credentials
                 file.  Ignored when *config* is provided.
+            download_path: Default directory for file downloads.
+                Overrides ``rootDownloadPath`` from the credentials
+                file.  When *None*, uses the config value or the
+                current working directory.
         """
         if config is not None:
             self._config = config
         else:
             self._config = SFMCConfig.from_file(config_path, host=host)
 
+        self._download_path: Path | None = Path(download_path) if download_path else None
         self._http: httpx.Client = build_http_client(self._config)
         self._token: str | None = None
 
@@ -98,6 +104,22 @@ class SFMCClient:
     def close(self) -> None:
         """Close the underlying HTTP connection pool."""
         self._http.close()
+
+    @property
+    def download_dir(self) -> Path:
+        """Default directory for file downloads.
+
+        Resolution order:
+
+        1. *download_path* passed to the constructor.
+        2. ``rootDownloadPath`` from the credentials file.
+        3. The current working directory.
+
+        The directory is created if it does not exist.
+        """
+        d = self._download_path or self._config.root_download_path or Path.cwd()
+        d.mkdir(parents=True, exist_ok=True)
+        return d
 
     # ── Authentication ───────────────────────────────────────────────
 
@@ -1214,7 +1236,7 @@ class SFMCClient:
         glider_name: str,
         folder: str,
         file_name: str,
-        download_path: Path | str,
+        download_path: Path | str | None = None,
     ) -> Path:
         """Download a single file from a glider folder.
 
@@ -1226,6 +1248,7 @@ class SFMCClient:
             folder: Source folder (e.g. ``"from-glider"``).
             file_name: Name of the file to download.
             download_path: Local path where the file will be saved.
+                Defaults to :attr:`download_dir` ``/ file_name``.
 
         Returns:
             The :class:`~pathlib.Path` to the downloaded file.
@@ -1235,7 +1258,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
-        download_path = Path(download_path)
+        download_path = Path(download_path) if download_path else self.download_dir / file_name
         headers = self._auth_headers()
         with self._http.stream(
             "GET",
@@ -1258,7 +1281,7 @@ class SFMCClient:
         self,
         glider_name: str,
         folder: str,
-        download_path: Path | str,
+        download_path: Path | str | None = None,
         *,
         filter: str | None = None,
         last_modified_after: str | None = None,
@@ -1272,6 +1295,7 @@ class SFMCClient:
             glider_name: The registered name of the glider.
             folder: Source folder (e.g. ``"from-glider"``).
             download_path: Local path for the downloaded zip file.
+                Defaults to :attr:`download_dir` ``/ {glider_name}-{folder}.zip``.
             filter: Wildcard filter for file names
                 (e.g. ``"*.sbd"``).  Optional.
             last_modified_after: Only include files modified after
@@ -1285,7 +1309,10 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
-        download_path = Path(download_path)
+        if download_path is not None:
+            download_path = Path(download_path)
+        else:
+            download_path = self.download_dir / f"{glider_name}-{folder}.zip"
         params: dict[str, str] = {}
         if filter is not None:
             params["filter"] = filter

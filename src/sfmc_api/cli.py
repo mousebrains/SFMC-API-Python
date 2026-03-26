@@ -116,6 +116,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="SFMC server hostname (selects entry from multi-host credentials file)",
     )
     parser.add_argument(
+        "--download-path",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="Default directory for file downloads (overrides config rootDownloadPath)",
+    )
+    parser.add_argument(
         "--compact",
         action="store_true",
         default=False,
@@ -242,9 +249,9 @@ def build_parser() -> argparse.ArgumentParser:
         "-o",
         "--output",
         type=Path,
-        required=True,
+        default=None,
         metavar="PATH",
-        help="Output zip path",
+        help="Output zip path (default: download-path/<glider>-<folder>.zip)",
     )
     p.add_argument(
         "--filter",
@@ -290,8 +297,9 @@ def _run(client: SFMCClient, args: argparse.Namespace) -> int:
 
     # Download commands
     if cmd == "download-glider-file":
-        output = args.output or Path(args.file_name)
-        path = client.download_glider_file(args.glider_name, args.folder, args.file_name, output)
+        path = client.download_glider_file(
+            args.glider_name, args.folder, args.file_name, args.output
+        )
         _print_json({"downloaded": str(path)}, compact)
         return 0
 
@@ -408,7 +416,11 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        with SFMCClient(config_path=args.credentials, host=args.host) as client:
+        with SFMCClient(
+            config_path=args.credentials,
+            host=args.host,
+            download_path=args.download_path,
+        ) as client:
             code = _run(client, args)
     except SFMCError as exc:
         sys.stderr.write(f"Error: {exc}\n")
