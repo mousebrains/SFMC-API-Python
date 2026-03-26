@@ -6,7 +6,7 @@ Provides the ``sfmc`` command with subcommands for every API operation::
     sfmc get-waypoint-plan osusim
     sfmc subscribe-connection-events osusim
     sfmc --compact get-glider-details osusim
-    sfmc --config /path/to/creds.json auth
+    sfmc --credentials /path/to/creds.json auth
 
 Run ``sfmc --help`` for the full list of subcommands.
 """

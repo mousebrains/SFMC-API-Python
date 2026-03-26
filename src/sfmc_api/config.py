@@ -4,7 +4,7 @@ Configuration can be loaded from a JSON credentials file
 (``~/.config/sfmc/credentials.json`` by default) or constructed
 directly via :meth:`SFMCConfig.from_dict` / keyword arguments.
 
-The credentials file supports **per-host** entries, keyed by hostname::
+The credentials file uses **per-host** entries, keyed by hostname::
 
     {
         "gliderfmc1.ceoas.oregonstate.edu": {
@@ -22,14 +22,6 @@ The credentials file supports **per-host** entries, keyed by hostname::
                 "secret": "..."
             }
         }
-    }
-
-The legacy single-host format (with a top-level ``"host"`` key) is
-also supported for backward compatibility::
-
-    {
-        "host": "sfmc.example.com",
-        "apiCredentials": { ... }
     }
 """
 
@@ -77,15 +69,10 @@ class SFMCConfig:
     ) -> SFMCConfig:
         """Load configuration from a JSON credentials file.
 
-        The file may use either format:
-
-        * **Multi-host** (recommended) — top-level keys are hostnames,
-          each mapping to a per-host config dict.  Use *host* to select
-          which entry to load.  If *host* is ``None`` and the file
-          contains exactly one host, that host is used automatically.
-
-        * **Legacy single-host** — a flat dict with a ``"host"`` key.
-          The *host* parameter is ignored in this case.
+        Top-level keys are hostnames, each mapping to a per-host
+        config dict.  Use *host* to select which entry to load.
+        If *host* is ``None`` and the file contains exactly one
+        host, that host is used automatically.
 
         Args:
             path: Path to the credentials JSON file.  When *None*,
@@ -116,10 +103,6 @@ class SFMCConfig:
 
         if not isinstance(data, dict):
             raise ConfigError(f"Expected JSON object in {path}")
-
-        # Legacy single-host format: has a top-level "host" key.
-        if "host" in data:
-            return cls.from_dict(data)
 
         # Multi-host format: top-level keys are hostnames.
         return cls._from_multi_host(data, host, path)

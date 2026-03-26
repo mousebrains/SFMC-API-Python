@@ -70,21 +70,6 @@ sfmc --host sfmc-backup.example.com get-glider-details osusim
 
 If the file has only one host, it is selected automatically.
 
-### Legacy Single-Host Format
-
-The original single-host format is also supported:
-
-```json
-{
-    "host": "gliderfmc1.ceoas.oregonstate.edu",
-    "apiCredentials": {
-        "clientId": "YOUR_CLIENT_ID",
-        "secret": "YOUR_SECRET"
-    },
-    "tlsRejectUnauthorized": 0
-}
-```
-
 See [docs/configuration.md](docs/configuration.md) for full details.
 
 ## Documentation

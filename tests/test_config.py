@@ -17,15 +17,21 @@ def _write_config(tmp_path: Path, data: dict) -> Path:  # type: ignore[type-arg]
     return p
 
 
-VALID_CONFIG = {
+VALID_DICT = {
     "host": "sfmc.example.com",
     "apiCredentials": {"clientId": "cid", "secret": "s3cret"},
+}
+
+VALID_FILE = {
+    "sfmc.example.com": {
+        "apiCredentials": {"clientId": "cid", "secret": "s3cret"},
+    },
 }
 
 
 class TestFromFile:
     def test_load_minimal(self, tmp_path: Path) -> None:
-        p = _write_config(tmp_path, VALID_CONFIG)
+        p = _write_config(tmp_path, VALID_FILE)
         cfg = SFMCConfig.from_file(p)
         assert cfg.host == "sfmc.example.com"
         assert cfg.client_id == "cid"
@@ -36,10 +42,12 @@ class TestFromFile:
 
     def test_load_full(self, tmp_path: Path) -> None:
         data = {
-            **VALID_CONFIG,
-            "tlsRejectUnauthorized": 0,
-            "rootDownloadPath": "/tmp/dl",
-            "stompDebug": True,
+            "sfmc.example.com": {
+                "apiCredentials": {"clientId": "cid", "secret": "s3cret"},
+                "tlsRejectUnauthorized": 0,
+                "rootDownloadPath": "/tmp/dl",
+                "stompDebug": True,
+            },
         }
         cfg = SFMCConfig.from_file(_write_config(tmp_path, data))
         assert cfg.tls_verify is False
@@ -56,13 +64,8 @@ class TestFromFile:
         with pytest.raises(ConfigError, match="Invalid JSON"):
             SFMCConfig.from_file(p)
 
-    def test_missing_host(self, tmp_path: Path) -> None:
-        data = {"apiCredentials": {"clientId": "c", "secret": "s"}}
-        with pytest.raises(ConfigError, match="Missing required"):
-            SFMCConfig.from_file(_write_config(tmp_path, data))
-
-    def test_missing_credentials(self, tmp_path: Path) -> None:
-        data = {"host": "h"}
+    def test_missing_credentials_in_host_entry(self, tmp_path: Path) -> None:
+        data = {"myhost.com": {"tlsRejectUnauthorized": 0}}
         with pytest.raises(ConfigError, match="Missing required"):
             SFMCConfig.from_file(_write_config(tmp_path, data))
 
@@ -91,7 +94,7 @@ class TestFromFile:
 
 class TestFromDict:
     def test_valid(self) -> None:
-        cfg = SFMCConfig.from_dict(VALID_CONFIG)
+        cfg = SFMCConfig.from_dict(VALID_DICT)
         assert cfg.host == "sfmc.example.com"
         assert cfg.client_id == "cid"
 
@@ -114,31 +117,31 @@ class TestTlsVerify:
     """Test tlsRejectUnauthorized → tls_verify conversion."""
 
     def test_int_0_means_no_verify(self) -> None:
-        cfg = SFMCConfig.from_dict({**VALID_CONFIG, "tlsRejectUnauthorized": 0})
+        cfg = SFMCConfig.from_dict({**VALID_DICT, "tlsRejectUnauthorized": 0})
         assert cfg.tls_verify is False
 
     def test_int_1_means_verify(self) -> None:
-        cfg = SFMCConfig.from_dict({**VALID_CONFIG, "tlsRejectUnauthorized": 1})
+        cfg = SFMCConfig.from_dict({**VALID_DICT, "tlsRejectUnauthorized": 1})
         assert cfg.tls_verify is True
 
     def test_string_0_means_no_verify(self) -> None:
-        cfg = SFMCConfig.from_dict({**VALID_CONFIG, "tlsRejectUnauthorized": "0"})
+        cfg = SFMCConfig.from_dict({**VALID_DICT, "tlsRejectUnauthorized": "0"})
         assert cfg.tls_verify is False
 
     def test_string_false_means_no_verify(self) -> None:
-        cfg = SFMCConfig.from_dict({**VALID_CONFIG, "tlsRejectUnauthorized": "false"})
+        cfg = SFMCConfig.from_dict({**VALID_DICT, "tlsRejectUnauthorized": "false"})
         assert cfg.tls_verify is False
 
     def test_string_1_means_verify(self) -> None:
-        cfg = SFMCConfig.from_dict({**VALID_CONFIG, "tlsRejectUnauthorized": "1"})
+        cfg = SFMCConfig.from_dict({**VALID_DICT, "tlsRejectUnauthorized": "1"})
         assert cfg.tls_verify is True
 
     def test_absent_defaults_to_verify(self) -> None:
-        cfg = SFMCConfig.from_dict(VALID_CONFIG)
+        cfg = SFMCConfig.from_dict(VALID_DICT)
         assert cfg.tls_verify is True
 
     def test_none_means_no_verify(self) -> None:
-        cfg = SFMCConfig.from_dict({**VALID_CONFIG, "tlsRejectUnauthorized": None})
+        cfg = SFMCConfig.from_dict({**VALID_DICT, "tlsRejectUnauthorized": None})
         assert cfg.tls_verify is False
 
 
@@ -157,16 +160,16 @@ class TestImmutable:
 
 class TestRootDownloadPath:
     def test_path_converted(self) -> None:
-        cfg = SFMCConfig.from_dict({**VALID_CONFIG, "rootDownloadPath": "/tmp/dl"})
+        cfg = SFMCConfig.from_dict({**VALID_DICT, "rootDownloadPath": "/tmp/dl"})
         assert cfg.root_download_path == Path("/tmp/dl")
         assert isinstance(cfg.root_download_path, Path)
 
     def test_null_means_none(self) -> None:
-        cfg = SFMCConfig.from_dict({**VALID_CONFIG, "rootDownloadPath": None})
+        cfg = SFMCConfig.from_dict({**VALID_DICT, "rootDownloadPath": None})
         assert cfg.root_download_path is None
 
     def test_empty_string_means_none(self) -> None:
-        cfg = SFMCConfig.from_dict({**VALID_CONFIG, "rootDownloadPath": ""})
+        cfg = SFMCConfig.from_dict({**VALID_DICT, "rootDownloadPath": ""})
         assert cfg.root_download_path is None
 
 
@@ -210,13 +213,6 @@ class TestMultiHost:
         p = _write_config(tmp_path, MULTI_HOST_CONFIG)
         with pytest.raises(ConfigError, match="not found"):
             SFMCConfig.from_file(p, host="nonexistent.example.com")
-
-    def test_legacy_format_still_works(self, tmp_path: Path) -> None:
-        """Files with a top-level 'host' key use the old format."""
-        p = _write_config(tmp_path, VALID_CONFIG)
-        cfg = SFMCConfig.from_file(p)
-        assert cfg.host == "sfmc.example.com"
-        assert cfg.client_id == "cid"
 
     def test_empty_file_errors(self, tmp_path: Path) -> None:
         p = _write_config(tmp_path, {})

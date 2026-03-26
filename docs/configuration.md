@@ -67,23 +67,7 @@ The credentials file supports multiple SFMC servers, keyed by hostname:
   - Python: `SFMCClient(host="sfmc-backup.example.com")`
 - **Unknown host** -- error with list of available hosts.
 
-## Legacy Single-Host Format
-
-The original single-host format (with a top-level ``"host"`` key) is
-still supported for backward compatibility:
-
-```json
-{
-    "host": "gliderfmc1.ceoas.oregonstate.edu",
-    "apiCredentials": {
-        "clientId": "your-client-id",
-        "secret": "your-secret"
-    },
-    "tlsRejectUnauthorized": 0,
-    "rootDownloadPath": "/tmp/sfmc-downloads",
-    "stompDebug": false
-}
-```
+## Per-Host Entry Fields
 
 ### Field Reference
 

@@ -22,9 +22,9 @@ class TestConstruction:
 
     def test_from_config_file(self, tmp_path: Path) -> None:
         p = tmp_path / "creds.json"
-        p.write_text('{"host":"h","apiCredentials":{"clientId":"c","secret":"s"}}')
+        p.write_text('{"h.test":{"apiCredentials":{"clientId":"c","secret":"s"}}}')
         client = SFMCClient(config_path=p)
-        assert client._config.host == "h"
+        assert client._config.host == "h.test"
         client.close()
 
     def test_with_host_param(self, tmp_path: Path) -> None:
