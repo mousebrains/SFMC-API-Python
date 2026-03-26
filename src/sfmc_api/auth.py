@@ -17,6 +17,8 @@ from ._http import check_response
 from .config import SFMCConfig
 from .exceptions import AuthenticationError, SFMCError
 
+__all__ = ["authenticate"]
+
 
 def authenticate(http_client: httpx.Client, config: SFMCConfig) -> str:
     """Sign in to the SFMC API and return the bearer token.

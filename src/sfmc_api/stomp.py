@@ -22,6 +22,7 @@ See :doc:`/docs/streaming` for detailed data-flow documentation.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import random
@@ -37,6 +38,8 @@ from websockets.sync.client import connect as ws_connect
 
 from .config import SFMCConfig
 from .exceptions import SFMCError
+
+__all__ = ["StompConnection", "StompError", "StompSubscription"]
 
 logger = logging.getLogger(__name__)
 
@@ -248,7 +251,7 @@ class StompConnection:
             StompError: If the connection or handshake fails.
         """
         url = _sockjs_url(self._config, self._token)
-        logger.debug("Connecting to %s", url)
+        logger.debug("Connecting to wss://%s/sfmc/api/sfmc-stomp/...", self._config.host)
 
         try:
             self._ws = ws_connect(
@@ -260,23 +263,20 @@ class StompConnection:
         except Exception as exc:
             raise StompError(f"WebSocket connection failed: {exc}") from exc
 
-        # Wait for SockJS open frame
         try:
+            # Wait for SockJS open frame
             open_frame = self._ws.recv(timeout=10)
             logger.debug("SockJS open: %s", open_frame)
-        except Exception as exc:
-            raise StompError(f"No SockJS open frame: {exc}") from exc
 
-        # Send STOMP CONNECT
-        connect_frame = _encode_frame(
-            "CONNECT",
-            {"accept-version": "1.2", "heart-beat": "0,0"},
-        )
-        self._ws.send(json.dumps([connect_frame]))
-        logger.debug("Sent STOMP CONNECT")
+            # Send STOMP CONNECT
+            connect_frame = _encode_frame(
+                "CONNECT",
+                {"accept-version": "1.2", "heart-beat": "0,0"},
+            )
+            self._ws.send(json.dumps([connect_frame]))
+            logger.debug("Sent STOMP CONNECT")
 
-        # Wait for STOMP CONNECTED
-        try:
+            # Wait for STOMP CONNECTED
             resp = self._ws.recv(timeout=10)
             messages = _sockjs_decode(resp)
             for msg in messages:
@@ -287,13 +287,15 @@ class StompConnection:
                     break
                 elif frame.command == "ERROR":
                     raise StompError(f"STOMP connection refused: {frame.body}")
+
+            if not self._connected:
+                raise StompError("Did not receive STOMP CONNECTED frame")
         except StompError:
+            self._close_ws()
             raise
         except Exception as exc:
+            self._close_ws()
             raise StompError(f"STOMP handshake failed: {exc}") from exc
-
-        if not self._connected:
-            raise StompError("Did not receive STOMP CONNECTED frame")
 
         # Start receiver thread
         self._receiver_thread = threading.Thread(
@@ -322,16 +324,17 @@ class StompConnection:
             except Exception:
                 pass  # best-effort disconnect
 
-        if self._ws is not None:
-            import contextlib
-
-            with contextlib.suppress(Exception):
-                self._ws.close()
-
+        self._close_ws()
         self._connected = False
 
         if self._receiver_thread is not None:
             self._receiver_thread.join(timeout=5)
+
+    def _close_ws(self) -> None:
+        """Close the WebSocket connection, ignoring errors."""
+        if self._ws is not None:
+            with contextlib.suppress(Exception):
+                self._ws.close()
 
     def subscribe(self, topic: str) -> StompSubscription:
         """Subscribe to a STOMP topic.

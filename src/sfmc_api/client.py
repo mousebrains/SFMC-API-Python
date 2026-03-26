@@ -17,6 +17,7 @@ See :doc:`/docs/getting_started` for installation and configuration.
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,8 @@ from .auth import authenticate
 from .config import SFMCConfig
 from .exceptions import AuthenticationError
 from .stomp import StompConnection, StompSubscription
+
+__all__ = ["SFMCClient"]
 
 
 class SFMCClient:
@@ -585,10 +588,11 @@ class SFMCClient:
             The parsed JSON response from the server.
         """
         file_path = Path(file_path)
-        with open(file_path, "rb") as f:
-            files = {"file": (file_path.name, f)}
+        with contextlib.ExitStack() as stack:
+            fobj = stack.enter_context(open(file_path, "rb"))
+            files = {"file": (file_path.name, fobj)}
             response = self._request("PUT", path, files=files)
-        return response.json()  # type: ignore[no-any-return]
+            return response.json()  # type: ignore[no-any-return]
 
     # ── Plans — Delete Rules ─────────────────────────────────────────
 
@@ -992,8 +996,6 @@ class SFMCClient:
         Opens each file with a context manager to satisfy resource
         management requirements.
         """
-        import contextlib
-
         with contextlib.ExitStack() as stack:
             files = [
                 ("files", (Path(fp).name, stack.enter_context(open(Path(fp), "rb"))))
@@ -1031,9 +1033,15 @@ class SFMCClient:
             headers=headers,
         ) as response:
             check_response(response)
-            with open(download_path, "wb") as f:
-                for chunk in response.iter_bytes():
-                    f.write(chunk)
+            tmp_path = download_path.with_suffix(download_path.suffix + ".part")
+            try:
+                with open(tmp_path, "wb") as f:
+                    for chunk in response.iter_bytes():
+                        f.write(chunk)
+                tmp_path.rename(download_path)
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
         return download_path
 
     def download_glider_files(
@@ -1077,9 +1085,15 @@ class SFMCClient:
             params=params,
         ) as response:
             check_response(response)
-            with open(download_path, "wb") as f:
-                for chunk in response.iter_bytes():
-                    f.write(chunk)
+            tmp_path = download_path.with_suffix(download_path.suffix + ".part")
+            try:
+                with open(tmp_path, "wb") as f:
+                    for chunk in response.iter_bytes():
+                        f.write(chunk)
+                tmp_path.rename(download_path)
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
         return download_path
 
     def delete_glider_file(self, glider_name: str, folder: str, file_name: str) -> dict[str, Any]:

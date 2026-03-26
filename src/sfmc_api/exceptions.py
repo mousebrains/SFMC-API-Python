@@ -4,6 +4,8 @@ All exceptions inherit from :class:`SFMCError`, so callers can catch
 that single base class to handle any SFMC-related failure.
 """
 
+__all__ = ["APIError", "AuthenticationError", "ConfigError", "RateLimitError", "SFMCError"]
+
 
 class SFMCError(Exception):
     """Base exception for all SFMC client errors."""

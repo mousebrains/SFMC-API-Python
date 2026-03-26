@@ -23,6 +23,8 @@ from . import __version__
 from .client import SFMCClient
 from .exceptions import SFMCError
 
+__all__ = ["build_parser", "main"]
+
 # ── Command categories ───────────────────────────────────────────────
 
 # Commands that take only GLIDER_NAME and return JSON.
@@ -330,7 +332,10 @@ def _call_method(
     # Custom commands
     if cmd == "get-surface-sensor-samples":
         return method(  # type: ignore[no-any-return]
-            args.glider_name, args.sensor_type, args.start, args.end
+            args.glider_name,
+            args.sensor_type,
+            start_datetime=args.start,
+            end_datetime=args.end,
         )
 
     if cmd == "get-folder-file-listing":

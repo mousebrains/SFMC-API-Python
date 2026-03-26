@@ -42,6 +42,8 @@ from typing import Any
 
 from .exceptions import ConfigError
 
+__all__ = ["DEFAULT_CONFIG_PATH", "SFMCConfig"]
+
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "sfmc" / "credentials.json"
 
 

@@ -7,3 +7,12 @@ build/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+.coverage
+coverage.xml
+.venv/
+venv/
+.env
+.env.local
+*.swp
+*.swo
+.DS_Store

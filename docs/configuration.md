@@ -12,11 +12,11 @@ When `SFMCClient` is constructed, configuration is resolved in this
 priority order:
 
 ```
-SFMCClient(config=..., config_path=...)
+SFMCClient(config=..., config_path=..., host=...)
 
   1. config argument     ──► used directly if provided
-  2. config_path argument ──► loaded via SFMCConfig.from_file(path)
-  3. default path         ──► ~/.config/sfmc/credentials.json
+  2. config_path + host  ──► loaded via SFMCConfig.from_file(path, host)
+  3. default path + host ──► ~/.config/sfmc/credentials.json
 ```
 
 ```
@@ -28,16 +28,49 @@ SFMCClient(config=..., config_path=...)
 │        no                                            │
 │        │                                             │
 │        ▼                                             │
-│   config_path provided? ──yes──► from_file(path)     │
+│   config_path provided? ──yes──► from_file(path,host)│
 │        │                                             │
 │        no                                            │
 │        │                                             │
 │        ▼                                             │
-│   from_file(~/.config/sfmc/credentials.json)         │
+│   from_file(~/.config/sfmc/credentials.json, host)   │
 └──────────────────────────────────────────────────────┘
 ```
 
-## JSON File Schema
+## Multi-Host Format (Recommended)
+
+The credentials file supports multiple SFMC servers, keyed by hostname:
+
+```json
+{
+    "gliderfmc1.ceoas.oregonstate.edu": {
+        "apiCredentials": {
+            "clientId": "your-client-id",
+            "secret": "your-secret"
+        },
+        "tlsRejectUnauthorized": 0
+    },
+    "sfmc-backup.example.com": {
+        "apiCredentials": {
+            "clientId": "other-id",
+            "secret": "other-secret"
+        }
+    }
+}
+```
+
+**Host selection rules:**
+
+- **One host in file** -- auto-selected, no `--host` needed.
+- **Multiple hosts** -- specify with `--host`:
+  - CLI: `sfmc --host sfmc-backup.example.com ...`
+  - Python: `SFMCClient(host="sfmc-backup.example.com")`
+- **Unknown host** -- error with list of available hosts.
+
+## Legacy Single-Host Format
+
+The original single-host format (with a top-level ``"host"`` key) is
+still supported for backward compatibility:
 
 ```json
 {

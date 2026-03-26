@@ -7,10 +7,16 @@ translating non-success responses into typed exceptions.
 
 from __future__ import annotations
 
+import logging
+
 import httpx
 
 from .config import SFMCConfig
 from .exceptions import APIError, RateLimitError
+
+logger = logging.getLogger(__name__)
+
+__all__: list[str] = []  # internal module — no public exports
 
 
 def build_http_client(config: SFMCConfig) -> httpx.Client:
@@ -25,6 +31,12 @@ def build_http_client(config: SFMCConfig) -> httpx.Client:
 
     The caller is responsible for closing the client when done.
     """
+    if not config.tls_verify:
+        logger.warning(
+            "TLS certificate verification is DISABLED for %s. "
+            "This is insecure and should only be used for testing.",
+            config.host,
+        )
     return httpx.Client(
         base_url=config.base_url,
         verify=config.tls_verify,

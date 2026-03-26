@@ -125,7 +125,7 @@ class TestStompConnectionLifecycle:
         mock_ws_connect.return_value = mock_ws
 
         conn = StompConnection(config, "tok")
-        with pytest.raises(StompError, match="No SockJS open frame"):
+        with pytest.raises(StompError, match="handshake failed"):
             conn.connect()
 
     @patch("sfmc_api.stomp.ws_connect")

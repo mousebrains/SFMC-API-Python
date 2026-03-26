@@ -44,11 +44,13 @@ with SFMCClient() as client:
     print(details)
 ```
 
-Or run the included example script:
+Or use the `sfmc` CLI directly:
 
 ```bash
-python examples/get_glider_details.py osusim
+sfmc get-glider-details osusim
 ```
+
+See [cli.md](cli.md) for the full list of CLI commands.
 
 ## What Happens Under the Hood
 
