@@ -28,6 +28,25 @@ python -m sfmc_api --help
 | `--compact` | Single-line JSON output (default: pretty-printed) |
 | `--version` | Show version and exit |
 
+## Setup
+
+```bash
+# Create a new credentials file (interactive prompts)
+sfmc init
+
+# Add another SFMC server to an existing credentials file
+sfmc add-host
+
+# Use a custom credentials path
+sfmc --credentials /path/to/creds.json init
+```
+
+The `init` command prompts for hostname, client ID, secret, TLS
+verification, and an optional download directory.  It provides the
+URL to the API credentials page for each server:
+
+    https://<hostname>/sfmc/api-access-pages/api-access
+
 ## Examples
 
 ```bash
@@ -55,10 +74,12 @@ sfmc --compact get-glider-details osusim | jq .data.state
 
 ## Commands
 
-### Authentication
+### Setup & Authentication
 
 | Command | Description |
 |---------|-------------|
+| `init` | Create a new credentials file (interactive prompts) |
+| `add-host` | Add another host to an existing credentials file |
 | `auth` | Test credentials, prints `{"status": "ok", "host": "..."}` |
 
 ### Glider Queries

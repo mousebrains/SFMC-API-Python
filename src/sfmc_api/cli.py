@@ -21,6 +21,7 @@ from typing import Any, cast
 
 from . import __version__
 from .client import SFMCClient
+from .config import DEFAULT_CONFIG_PATH
 from .exceptions import SFMCError
 
 __all__ = ["build_parser", "main"]
@@ -135,6 +136,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
+
+    # ── init / add-host ──────────────────────────────────────────
+    sub.add_parser(
+        "init",
+        help="Create a new credentials file (interactive prompts)",
+    )
+    sub.add_parser(
+        "add-host",
+        help="Add another host to the credentials file (interactive prompts)",
+    )
 
     # ── auth ─────────────────────────────────────────────────────
     sub.add_parser("auth", help="Test authentication credentials")
@@ -407,6 +418,108 @@ def _handle_stream(
     return 0
 
 
+# ── Init / add-host handlers ─────────────────────────────────────────
+
+
+def _prompt(label: str, default: str | None = None, required: bool = True) -> str:
+    """Prompt the user for input with an optional default."""
+    if default is not None:
+        raw = input(f"{label} [{default}]: ").strip()
+        return raw or default
+    suffix = ": " if required else " (optional): "
+    while True:
+        raw = input(f"{label}{suffix}").strip()
+        if raw or not required:
+            return raw
+
+
+def _prompt_host_entry() -> tuple[str, dict[str, Any]]:
+    """Interactively prompt for one host's credentials.
+
+    Returns:
+        A tuple of ``(hostname, config_dict)``.
+    """
+    sys.stderr.write(
+        "\nEnter SFMC server details.\n"
+        "You can find your API credentials at:\n"
+        "  https://<hostname>/sfmc/api-access-pages/api-access\n\n"
+    )
+
+    hostname = _prompt("Hostname (e.g. gliderfmc1.ceoas.oregonstate.edu)")
+    sys.stderr.write(
+        f"\n  Credentials page: https://{hostname}/sfmc/api-access-pages/api-access\n\n"
+    )
+    client_id = _prompt("Client ID")
+    secret = _prompt("Secret")
+    tls_input = _prompt("Verify TLS certificates? (yes/no)", default="no")
+    tls_reject = 1 if tls_input.lower() in ("yes", "y", "true", "1") else 0
+    download = _prompt("Download directory", required=False)
+
+    entry: dict[str, Any] = {
+        "apiCredentials": {
+            "clientId": client_id,
+            "secret": secret,
+        },
+        "tlsRejectUnauthorized": tls_reject,
+    }
+    if download:
+        entry["rootDownloadPath"] = download
+
+    return hostname, entry
+
+
+def _handle_init(args: argparse.Namespace) -> int:
+    """Create a new credentials file interactively."""
+    creds_path = args.credentials or DEFAULT_CONFIG_PATH
+
+    if creds_path.exists():
+        sys.stderr.write(f"Credentials file already exists: {creds_path}\n")
+        sys.stderr.write("Use 'sfmc add-host' to add another host.\n")
+        return 1
+
+    hostname, entry = _prompt_host_entry()
+
+    creds_path.parent.mkdir(parents=True, exist_ok=True)
+    creds_path.write_text(json.dumps({hostname: entry}, indent=4) + "\n")
+    creds_path.chmod(0o600)
+
+    sys.stderr.write(f"\nCredentials saved to {creds_path}\n")
+    sys.stderr.write("Test with: sfmc auth\n")
+    return 0
+
+
+def _handle_add_host(args: argparse.Namespace) -> int:
+    """Add another host to an existing credentials file."""
+    creds_path = args.credentials or DEFAULT_CONFIG_PATH
+
+    if not creds_path.exists():
+        sys.stderr.write(f"No credentials file found at {creds_path}\n")
+        sys.stderr.write("Use 'sfmc init' to create one first.\n")
+        return 1
+
+    try:
+        data = json.loads(creds_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        sys.stderr.write(f"Error reading {creds_path}: {exc}\n")
+        return 1
+
+    hostname, entry = _prompt_host_entry()
+
+    if hostname in data:
+        confirm = _prompt(f"Host '{hostname}' already exists. Overwrite? (yes/no)", "no")
+        if confirm.lower() not in ("yes", "y"):
+            sys.stderr.write("Cancelled.\n")
+            return 1
+
+    data[hostname] = entry
+    creds_path.write_text(json.dumps(data, indent=4) + "\n")
+    creds_path.chmod(0o600)
+
+    sys.stderr.write(f"\nHost '{hostname}' added to {creds_path}\n")
+    sys.stderr.write(f"Test with: sfmc --host {hostname} auth\n")
+    return 0
+
+
 # ── Entry point ──────────────────────────────────────────────────────
 
 
@@ -414,6 +527,12 @@ def main() -> None:
     """Entry point for the ``sfmc`` console script."""
     parser = build_parser()
     args = parser.parse_args()
+
+    # init and add-host don't need an SFMCClient
+    if args.command == "init":
+        sys.exit(_handle_init(args))
+    if args.command == "add-host":
+        sys.exit(_handle_add_host(args))
 
     try:
         with SFMCClient(
