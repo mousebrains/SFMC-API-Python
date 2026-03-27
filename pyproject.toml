@@ -43,6 +43,7 @@ dev = [
 
 [project.scripts]
 sfmc = "sfmc_api.cli:main"
+sfmc-api-test = "sfmc_api.test_runner:main"
 
 [project.urls]
 Homepage = "https://github.com/mousebrains/SFMC-API-Python"

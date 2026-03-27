@@ -187,6 +187,18 @@ class SFMCClient:
         check_response(response)
         return response
 
+    @staticmethod
+    def _json_or_empty(response: httpx.Response) -> dict[str, Any]:
+        """Parse a JSON response body, returning ``{}`` when the body is empty.
+
+        Several SFMC endpoints return HTTP 200 with an empty body on
+        success (e.g. deploy, script-control, and delete-rule operations).
+        """
+        body = response.content
+        if not body or not body.strip():
+            return {}
+        return cast(dict[str, Any], response.json())
+
     # ── Glider Management ────────────────────────────────────────────
 
     def get_glider_details(self, glider_name: str) -> dict[str, Any]:
@@ -217,7 +229,7 @@ class SFMCClient:
             ...     print(info)
         """
         response = self._request("GET", f"/v1/gliders/{glider_name}")
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def get_active_deployment_details(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the active deployment for a glider.
@@ -237,7 +249,7 @@ class SFMCClient:
             AuthenticationError: If sign-in fails.
         """
         response = self._request("GET", f"/v1/active-deployment/{glider_name}")
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def get_newest_mission_status(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the newest mission status for a glider.
@@ -256,7 +268,7 @@ class SFMCClient:
             AuthenticationError: If sign-in fails.
         """
         response = self._request("GET", f"/v1/newest-mission-details/{glider_name}")
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def get_surface_sensor_samples(
         self,
@@ -291,7 +303,7 @@ class SFMCClient:
             f"/v1/surface-sensor-samples/{glider_name}/{sensor_type_name}",
             params={"startDateTime": start_datetime, "endDateTime": end_datetime},
         )
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def get_folder_file_listing(
         self,
@@ -335,7 +347,7 @@ class SFMCClient:
             f"/v1/glider-folder-file-listing/{glider_name}/{folder}",
             params=params,
         )
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def get_available_scripts(self, glider_name: str) -> dict[str, Any]:
         """List available scripts for a glider.
@@ -354,7 +366,7 @@ class SFMCClient:
             AuthenticationError: If sign-in fails.
         """
         response = self._request("GET", f"/v1/scripts-for-glider/{glider_name}")
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def get_zmodem_transfers(self, connection_id: int | str) -> dict[str, Any]:
         """Retrieve Zmodem transfers for a connection.
@@ -373,7 +385,7 @@ class SFMCClient:
             AuthenticationError: If sign-in fails.
         """
         response = self._request("GET", f"/v1/zmodem-transfers/{connection_id}")
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     # ── Plans — Query ────────────────────────────────────────────────
 
@@ -394,7 +406,7 @@ class SFMCClient:
             AuthenticationError: If sign-in fails.
         """
         response = self._request("GET", f"/v1/glider-assigned-mission-plan/{glider_name}")
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def get_waypoint_plan(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the assigned waypoint plan for a glider.
@@ -414,7 +426,7 @@ class SFMCClient:
             AuthenticationError: If sign-in fails.
         """
         response = self._request("GET", f"/v1/glider-assigned-waypoint-plan/{glider_name}")
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def get_yo_plan(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the assigned yo plan for a glider.
@@ -436,7 +448,7 @@ class SFMCClient:
             AuthenticationError: If sign-in fails.
         """
         response = self._request("GET", f"/v1/glider-assigned-yo-plan/{glider_name}")
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def get_surface_plan(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the assigned surface plan for a glider.
@@ -459,7 +471,7 @@ class SFMCClient:
             AuthenticationError: If sign-in fails.
         """
         response = self._request("GET", f"/v1/glider-assigned-surface-plan/{glider_name}")
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def get_sampling_plan(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the assigned sampling plan for a glider.
@@ -482,7 +494,7 @@ class SFMCClient:
             AuthenticationError: If sign-in fails.
         """
         response = self._request("GET", f"/v1/glider-assigned-sampling-plan/{glider_name}")
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def get_data_transmission_plan(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the assigned data transmission plan for a glider.
@@ -507,7 +519,7 @@ class SFMCClient:
             "GET",
             f"/v1/glider-assigned-data-transmission-plan/{glider_name}",
         )
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def get_mission_sensor_plan(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the assigned mission sensor plan for a glider.
@@ -530,7 +542,7 @@ class SFMCClient:
             "GET",
             f"/v1/glider-assigned-mission-sensor-plan/{glider_name}",
         )
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def get_abort_plan(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the assigned abort plan for a glider.
@@ -552,7 +564,7 @@ class SFMCClient:
             AuthenticationError: If sign-in fails.
         """
         response = self._request("GET", f"/v1/glider-assigned-abort-plan/{glider_name}")
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     # ── Plans — Update ───────────────────────────────────────────────
 
@@ -719,7 +731,7 @@ class SFMCClient:
             fobj = stack.enter_context(open(file_path, "rb"))
             files = {"file": (file_path.name, fobj)}
             response = self._request("PUT", path, files=files)
-            return cast(dict[str, Any], response.json())
+            return self._json_or_empty(response)
 
     # ── Plans — Delete Rules ─────────────────────────────────────────
 
@@ -743,7 +755,7 @@ class SFMCClient:
             "DELETE",
             f"/v1/delete-glider-hit-waypoint-surface-plan-rule/{glider_name}",
         )
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def delete_every_secs_surface_plan_rules(self, glider_name: str) -> dict[str, Any]:
         """Delete all every-N-seconds surface plan rules for a glider.
@@ -765,7 +777,7 @@ class SFMCClient:
             "DELETE",
             f"/v1/delete-glider-every-secs-surface-plan-rules/{glider_name}",
         )
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def delete_at_utc_time_surface_plan_rules(self, glider_name: str) -> dict[str, Any]:
         """Delete all at-UTC-time surface plan rules for a glider.
@@ -787,7 +799,7 @@ class SFMCClient:
             "DELETE",
             f"/v1/delete-glider-at-utc-time-surface-plan-rules/{glider_name}",
         )
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def delete_sampling_plan_rules(self, glider_name: str) -> dict[str, Any]:
         """Delete all sampling plan rules for a glider.
@@ -809,7 +821,7 @@ class SFMCClient:
             "DELETE",
             f"/v1/delete-glider-sampling-plan-rules/{glider_name}",
         )
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     # ── Glider Registration & Deployment ─────────────────────────────
 
@@ -837,7 +849,7 @@ class SFMCClient:
             content=glider_name,
             headers={"Content-Type": "application/json; charset=utf-8"},
         )
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def obtain_or_create_active_deployment(self, glider_name: str) -> dict[str, Any]:
         """Get the active deployment for a glider, creating one if needed.
@@ -859,7 +871,7 @@ class SFMCClient:
             "POST",
             f"/v1/obtain-or-create-active-deployment/{glider_name}",
         )
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def update_active_deployment_start(
         self, glider_name: str, start_datetime: str
@@ -886,7 +898,7 @@ class SFMCClient:
             f"/v1/update-active-deployment-start/{glider_name}",
             params={"startDateTime": start_datetime},
         )
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     # ── Script Control ───────────────────────────────────────────────
 
@@ -914,7 +926,7 @@ class SFMCClient:
             "PUT",
             f"/v1/set-assigned-script/{glider_name}/{script_type}/{script_name}",
         )
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def clear_assigned_script(self, glider_name: str) -> dict[str, Any]:
         """Clear the currently assigned script for a glider.
@@ -933,7 +945,7 @@ class SFMCClient:
             AuthenticationError: If sign-in fails.
         """
         response = self._request("PUT", f"/v1/clear-assigned-script/{glider_name}")
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def pause_assigned_script(self, glider_name: str) -> dict[str, Any]:
         """Pause the currently assigned script for a glider.
@@ -952,7 +964,7 @@ class SFMCClient:
             AuthenticationError: If sign-in fails.
         """
         response = self._request("PUT", f"/v1/pause-assigned-script/{glider_name}")
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def resume_assigned_script(self, glider_name: str) -> dict[str, Any]:
         """Resume a paused script for a glider.
@@ -971,7 +983,7 @@ class SFMCClient:
             AuthenticationError: If sign-in fails.
         """
         response = self._request("PUT", f"/v1/resume-assigned-script/{glider_name}")
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def rewind_assigned_script(self, glider_name: str) -> dict[str, Any]:
         """Rewind the assigned script for a glider to the beginning.
@@ -990,7 +1002,7 @@ class SFMCClient:
             AuthenticationError: If sign-in fails.
         """
         response = self._request("PUT", f"/v1/rewind-assigned-script/{glider_name}")
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     # ── Commands ─────────────────────────────────────────────────────
 
@@ -1017,7 +1029,7 @@ class SFMCClient:
             content=command,
             headers={"Content-Type": "application/json; charset=utf-8"},
         )
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     # ── Deploy Files ─────────────────────────────────────────────────
 
@@ -1041,7 +1053,7 @@ class SFMCClient:
             AuthenticationError: If sign-in fails.
         """
         response = self._request("PUT", f"/v1/gen-and-deploy-glider-goto-file/{glider_name}")
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def deploy_yo_file(self, glider_name: str) -> dict[str, Any]:
         """Generate and deploy a yo file for a glider.
@@ -1060,7 +1072,7 @@ class SFMCClient:
             AuthenticationError: If sign-in fails.
         """
         response = self._request("PUT", f"/v1/gen-and-deploy-glider-yo-file/{glider_name}")
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def deploy_surface_files(self, glider_name: str) -> dict[str, Any]:
         """Generate and deploy surface files for a glider.
@@ -1082,7 +1094,7 @@ class SFMCClient:
             "PUT",
             f"/v1/gen-and-deploy-glider-surface-files/{glider_name}",
         )
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def deploy_sample_files(self, glider_name: str) -> dict[str, Any]:
         """Generate and deploy sample files for a glider.
@@ -1104,7 +1116,7 @@ class SFMCClient:
             "PUT",
             f"/v1/gen-and-deploy-glider-sample-files/{glider_name}",
         )
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def deploy_sbd_list_file(self, glider_name: str) -> dict[str, Any]:
         """Generate and deploy an SBD list file for a glider.
@@ -1129,7 +1141,7 @@ class SFMCClient:
             "PUT",
             f"/v1/gen-and-deploy-glider-sbd-list-file/{glider_name}",
         )
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     def deploy_tbd_list_file(self, glider_name: str) -> dict[str, Any]:
         """Generate and deploy a TBD list file for a glider.
@@ -1154,7 +1166,7 @@ class SFMCClient:
             "PUT",
             f"/v1/gen-and-deploy-glider-tbd-list-file/{glider_name}",
         )
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     # ── File Operations ──────────────────────────────────────────────
 
@@ -1232,7 +1244,7 @@ class SFMCClient:
                 for fp in file_paths
             ]
             response = self._request("PUT", path, files=files)
-            return cast(dict[str, Any], response.json())
+            return self._json_or_empty(response)
 
     def download_glider_file(
         self,
@@ -1368,7 +1380,7 @@ class SFMCClient:
             "DELETE",
             f"/v1/delete-glider-file/{glider_name}/{folder}/{file_name}",
         )
-        return cast(dict[str, Any], response.json())
+        return self._json_or_empty(response)
 
     # ── Real-Time Streaming (STOMP) ──────────────────────────────────
 

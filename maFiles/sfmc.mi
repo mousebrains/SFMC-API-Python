@@ -1,0 +1,79 @@
+# sfmc.mi
+# Written by SFMC on UTC: 2025-02-03T20:26:03.930292
+
+sensor: c_science_all_on_enabled(bool) 0
+sensor: u_use_ctd_depth_for_flying(bool) 0
+sensor: u_use_current_correction(nodim) 1
+sensor: u_low_power_cycle_time(sec) -1
+sensor: u_science_low_power(sec) -1
+sensor: u_alt_min_depth(m) 2.0
+sensor: u_dbd_sensor_list_xmit_control(enum) 3
+sensor: u_sci_dbd_sensor_list_xmit_control(enum) 2
+#sensor: u_adj_overshoot(bool) 1
+
+################################################################################
+
+behavior: abend
+	b_arg: overdepth_sample_time(s) 30.0 # How often to check
+	b_arg: overtime(s) -1.0 # Disabled
+	b_arg: max_wpt_distance(m) -1 # Disabled
+	b_arg: samedepth_for_sample_time(s) 30.0 # How often to check
+	b_arg: undervolts(volts) 12.0
+	b_arg: no_cop_tickle_for(sec) 48600.0 # tickled this often, abort mission if watchdog
+	b_arg: no_cop_tickle_percent(%) -1 # Disabled
+
+################################################################################
+
+behavior: surface
+	b_arg: args_from_file(enum) 30	 # read from mafiles/surfac30.ma nocomms
+
+################################################################################
+
+behavior: surface
+	b_arg: start_when(enum) 3 # BAW_HEADING_IDLE
+	b_arg: end_action(enum) 0 # Quit
+	b_arg: gps_wait_time(sec) 300 # Wait 300 seconds for gps
+	b_arg: keystroke_wait_time(sec) 300 # Wait 300 seconds for control-C
+	b_arg: c_use_pitch(enum) 3 # 3:servo
+	b_arg: c_pitch_value(X) 0.4538 # 26 deg
+	b_arg: printout_cycle_time(sec) 60.0 # How often to print dialog
+
+################################################################################
+
+behavior: surface
+	b_arg: start_when(enum) 2 # BAW_PITCH_IDLE
+	b_arg: end_action(enum) 1 # Quit
+	b_arg: gps_wait_time(sec) 300 # Wait 300 seconds for gps
+	b_arg: keystroke_wait_time(sec) 300 # Wait 300 seconds for control-C
+	b_arg: c_use_pitch(enum) 3 # 3:servo
+	b_arg: c_pitch_value(X) 0.4538 # 26 deg
+	b_arg: printout_cycle_time(sec) 60.0 # How often to print dialog
+
+################################################################################
+
+behavior: goto_list
+	b_arg: args_from_file(enum) 30	 # read from mafiles/goto_l30.ma
+
+################################################################################
+
+behavior: yo
+	b_arg: args_from_file(enum) 30	 # read from mafiles/yo30.ma
+################################################################################
+
+behavior: sample
+	b_arg: args_from_file(enum) 30	 # read from mafiles/sample30.ma CTD
+
+################################################################################
+
+behavior: sample
+	b_arg: args_from_file(enum) 31	 # read from mafiles/sample31.ma MICRORIDER
+
+################################################################################
+
+behavior: prepare_to_dive
+	b_arg: start_when(enum) 0 # Immediately
+
+################################################################################
+
+behavior: sensors_in
+
