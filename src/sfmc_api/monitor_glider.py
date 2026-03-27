@@ -6,13 +6,13 @@ assignment events, logging each line with a high-resolution timestamp.
 
 Usage::
 
-    python monitor_glider.py <glider-name> [logfile]
+    sfmc-monitor-glider <glider-name> [logfile]
 
     # Log to file (also prints to stderr)
-    python monitor_glider.py osusim osusim.log
+    sfmc-monitor-glider osusim osusim.log
 
     # Log to stdout only
-    python monitor_glider.py osusim
+    sfmc-monitor-glider osusim
 
 Press Ctrl-C to stop.
 
@@ -21,8 +21,10 @@ Loads credentials from ``~/.config/sfmc/credentials.json`` by default.
 
 import argparse
 import logging
+import re
 import sys
 import threading
+import time
 from collections.abc import Generator
 
 from sfmc_api import SFMCClient
@@ -109,7 +111,7 @@ def setup_logging(
         dt = datetime.datetime.fromtimestamp(record.created)
         return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")
 
-    fmt.formatTime = format_time_usec  # type: ignore[assignment]
+    fmt.formatTime = format_time_usec  # type: ignore[method-assign]
 
     handlers: list[logging.Handler] = []
 
@@ -145,20 +147,48 @@ def setup_logging(
 # ── Monitoring threads ───────────────────────────────────────────────
 
 
+_LINE_SEP = re.compile(r"\r\n|\r|\n")
+
+
+def _log_with_time(log: logging.Logger, msg: str, created: float) -> None:
+    """Emit a log record with an explicit creation timestamp."""
+    record = log.makeRecord(
+        log.name,
+        logging.INFO,
+        "(monitor)",
+        0,
+        msg,
+        (),
+        None,
+    )
+    record.created = created
+    log.handle(record)
+
+
 def monitor_dialog(
     sub: StompSubscription,
     log: logging.Logger,
     stop: threading.Event,
 ) -> None:
-    """Read dialog output and log each line."""
+    """Read dialog output and log each reassembled line."""
+    buf = ""
+    line_start: float = 0.0
     for data in ordered_dialog(sub):
         if stop.is_set():
             break
-        # Dialog data may contain multiple lines or partial lines.
-        # Log each non-empty line separately for clean output.
-        for line in data.splitlines():
+        if not buf:
+            line_start = time.time()
+        buf += data
+        parts = _LINE_SEP.split(buf)
+        # Last element is the unterminated fragment — keep buffering it.
+        buf = parts[-1]
+        for line in parts[:-1]:
             if line:
-                log.info(line)
+                _log_with_time(log, line, line_start)
+            line_start = time.time()
+    # Flush remaining buffer when stream ends.
+    if buf.strip():
+        _log_with_time(log, buf, line_start)
 
 
 def monitor_scripts(
