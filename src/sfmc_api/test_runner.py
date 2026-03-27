@@ -1,4 +1,4 @@
-"""Integration test runner for the SFMC REST API via the ``sfmc`` CLI.
+"""Integration test runner for the SFMC REST API via the ``sfmc-api`` CLI.
 
 Installed as the ``sfmc-api-test`` console script.  Exercises as many
 API endpoints as possible against a live SFMC server *without*
@@ -71,7 +71,7 @@ def _sfmc(
     expect_fail: bool = False,
     warn_on_codes: set[int] | None = None,
 ) -> tuple[str, str, str]:
-    """Run an ``sfmc`` CLI command and return (status, stdout, stderr).
+    """Run an ``sfmc-api`` CLI command and return (status, stdout, stderr).
 
     Automatically retries on rate-limit (429) errors, sleeping for the
     duration indicated by the server.
@@ -92,7 +92,7 @@ def _sfmc(
     if warn_on_codes is None:
         warn_on_codes = _WARN_CODES
 
-    cmd = ["sfmc", "--host", host]
+    cmd = ["sfmc-api", "--host", host]
     if credentials:
         cmd.extend(["--credentials", credentials])
     cmd.extend(args)
@@ -632,13 +632,13 @@ def main() -> None:
     ma_dir: Path | None = args.ma_files
     skip: set[str] = set(args.skip or [])
 
-    # Check that sfmc CLI is available
+    # Check that sfmc-api CLI is available
     try:
         subprocess.run(
-            ["sfmc", "--version"], capture_output=True, text=True, check=True, timeout=10
+            ["sfmc-api", "--version"], capture_output=True, text=True, check=True, timeout=10
         )
     except (FileNotFoundError, subprocess.CalledProcessError):
-        sys.stderr.write("Error: 'sfmc' command not found.\nInstall with: pip install -e .\n")
+        sys.stderr.write("Error: 'sfmc-api' command not found.\nInstall with: pip install -e .\n")
         sys.exit(1)
 
     # Check credentials file exists

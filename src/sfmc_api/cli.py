@@ -1,14 +1,14 @@
 """Command-line interface for the SFMC REST API.
 
-Provides the ``sfmc`` command with subcommands for every API operation::
+Provides the ``sfmc-api`` command with subcommands for every API operation::
 
-    sfmc get-glider-details osusim
-    sfmc get-waypoint-plan osusim
-    sfmc subscribe-connection-events osusim
-    sfmc --compact get-glider-details osusim
-    sfmc --credentials /path/to/creds.json auth
+    sfmc-api get-glider-details osusim
+    sfmc-api get-waypoint-plan osusim
+    sfmc-api subscribe-connection-events osusim
+    sfmc-api --compact get-glider-details osusim
+    sfmc-api --credentials /path/to/creds.json auth
 
-Run ``sfmc --help`` for the full list of subcommands.
+Run ``sfmc-api --help`` for the full list of subcommands.
 """
 
 from __future__ import annotations
@@ -100,7 +100,7 @@ def _add_glider_arg(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser with all subcommands."""
     parser = argparse.ArgumentParser(
-        prog="sfmc",
+        prog="sfmc-api",
         description="CLI for the Slocum Fleet Management Center REST API",
     )
     parser.add_argument(
@@ -474,7 +474,7 @@ def _handle_init(args: argparse.Namespace) -> int:
 
     if creds_path.exists():
         sys.stderr.write(f"Credentials file already exists: {creds_path}\n")
-        sys.stderr.write("Use 'sfmc add-host' to add another host.\n")
+        sys.stderr.write("Use 'sfmc-api add-host' to add another host.\n")
         return 1
 
     hostname, entry = _prompt_host_entry()
@@ -484,7 +484,7 @@ def _handle_init(args: argparse.Namespace) -> int:
     creds_path.chmod(0o600)
 
     sys.stderr.write(f"\nCredentials saved to {creds_path}\n")
-    sys.stderr.write("Test with: sfmc auth\n")
+    sys.stderr.write("Test with: sfmc-api auth\n")
     return 0
 
 
@@ -494,7 +494,7 @@ def _handle_add_host(args: argparse.Namespace) -> int:
 
     if not creds_path.exists():
         sys.stderr.write(f"No credentials file found at {creds_path}\n")
-        sys.stderr.write("Use 'sfmc init' to create one first.\n")
+        sys.stderr.write("Use 'sfmc-api init' to create one first.\n")
         return 1
 
     try:
@@ -516,7 +516,7 @@ def _handle_add_host(args: argparse.Namespace) -> int:
     creds_path.chmod(0o600)
 
     sys.stderr.write(f"\nHost '{hostname}' added to {creds_path}\n")
-    sys.stderr.write(f"Test with: sfmc --host {hostname} auth\n")
+    sys.stderr.write(f"Test with: sfmc-api --host {hostname} auth\n")
     return 0
 
 
@@ -524,7 +524,7 @@ def _handle_add_host(args: argparse.Namespace) -> int:
 
 
 def main() -> None:
-    """Entry point for the ``sfmc`` console script."""
+    """Entry point for the ``sfmc-api`` console script."""
     parser = build_parser()
     args = parser.parse_args()
 
