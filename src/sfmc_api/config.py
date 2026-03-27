@@ -184,7 +184,7 @@ class SFMCConfig:
         tls_verify = str(tls_raw) != "0"
 
         root_path_raw = data.get("rootDownloadPath")
-        root_download_path = Path(root_path_raw) if root_path_raw else None
+        root_download_path = Path(root_path_raw).expanduser() if root_path_raw else None
 
         stomp_debug = bool(data.get("stompDebug", False))
 

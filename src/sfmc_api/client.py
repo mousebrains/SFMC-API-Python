@@ -89,7 +89,9 @@ class SFMCClient:
         else:
             self._config = SFMCConfig.from_file(config_path, host=host)
 
-        self._download_path: Path | None = Path(download_path) if download_path else None
+        self._download_path: Path | None = (
+            Path(download_path).expanduser() if download_path else None
+        )
         self._http: httpx.Client = build_http_client(self._config)
         self._token: str | None = None
 
