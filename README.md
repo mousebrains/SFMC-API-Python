@@ -29,13 +29,13 @@ with SFMCClient() as client:
 ### Command-Line Interface
 
 ```bash
-sfmc auth                                    # test credentials
-sfmc get-glider-details osusim               # query a glider
-sfmc get-waypoint-plan osusim                # get navigation plan
-sfmc get-folder-file-listing osusim from-glider  # list files
-sfmc subscribe-connection-events osusim      # stream events (Ctrl-C to stop)
-sfmc --compact get-glider-details osusim     # single-line JSON
-sfmc --help                                  # see all subcommands
+sfmc-api auth                                    # test credentials
+sfmc-api get-glider-details osusim               # query a glider
+sfmc-api get-waypoint-plan osusim                # get navigation plan
+sfmc-api get-folder-file-listing osusim from-glider  # list files
+sfmc-api subscribe-connection-events osusim      # stream events (Ctrl-C to stop)
+sfmc-api --compact get-glider-details osusim     # single-line JSON
+sfmc-api --help                                  # see all subcommands
 ```
 
 ## Configuration
@@ -65,7 +65,7 @@ Credentials are loaded from `~/.config/sfmc/credentials.json` by default.
 Select a host with `--host`:
 
 ```bash
-sfmc --host sfmc-backup.example.com get-glider-details osusim
+sfmc-api --host sfmc-backup.example.com get-glider-details osusim
 ```
 
 If the file has only one host, it is selected automatically.

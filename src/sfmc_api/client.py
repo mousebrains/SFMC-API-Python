@@ -1461,7 +1461,7 @@ class SFMCClient:
 
         Each message is a dict with ``sequenceNumber`` and ``data``
         (the output text).  Messages may arrive out of order — see
-        ``examples/monitor_glider.py:ordered_dialog()`` for a
+        ``sfmc_api.monitor_glider.ordered_dialog()`` for a
         reordering implementation.
 
         Args:

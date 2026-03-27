@@ -1,6 +1,6 @@
 # CLI Reference
 
-The `sfmc` command provides access to all SFMC REST API operations
+The `sfmc-api` command provides access to all SFMC REST API operations
 from the terminal.
 
 ## Installation
@@ -9,7 +9,7 @@ The CLI is installed automatically with the package:
 
 ```bash
 pip install -e .
-sfmc --help
+sfmc-api --help
 ```
 
 Or run via Python module:
@@ -32,13 +32,13 @@ python -m sfmc_api --help
 
 ```bash
 # Create a new credentials file (interactive prompts)
-sfmc init
+sfmc-api init
 
 # Add another SFMC server to an existing credentials file
-sfmc add-host
+sfmc-api add-host
 
 # Use a custom credentials path
-sfmc --credentials /path/to/creds.json init
+sfmc-api --credentials /path/to/creds.json init
 ```
 
 The `init` command prompts for hostname, client ID, secret, TLS
@@ -51,25 +51,25 @@ URL to the API credentials page for each server:
 
 ```bash
 # Test authentication
-sfmc auth
+sfmc-api auth
 
 # Query a glider
-sfmc get-glider-details osusim
+sfmc-api get-glider-details osusim
 
 # Select a specific host
-sfmc --host gliderfmc1.ceoas.oregonstate.edu get-glider-details osusim
+sfmc-api --host gliderfmc1.ceoas.oregonstate.edu get-glider-details osusim
 
 # Use a different credentials file
-sfmc --credentials /path/to/creds.json auth
+sfmc-api --credentials /path/to/creds.json auth
 
 # List files with filtering
-sfmc get-folder-file-listing osusim from-glider --filter "*.sbd" --page 0
+sfmc-api get-folder-file-listing osusim from-glider --filter "*.sbd" --page 0
 
 # Stream events (Ctrl-C to stop)
-sfmc subscribe-connection-events osusim
+sfmc-api subscribe-connection-events osusim
 
 # Compact output for piping
-sfmc --compact get-glider-details osusim | jq .data.state
+sfmc-api --compact get-glider-details osusim | jq .data.state
 ```
 
 ## Commands

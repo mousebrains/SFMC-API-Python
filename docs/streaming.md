@@ -200,5 +200,6 @@ network.  The Node.js reference implementation queues out-of-order
 messages and replays them when gaps are filled (with wraparound at
 sequence 9007199254740991 → 0).
 
-For the Python client, consumers can implement similar reordering
-if strict ordering is required.
+The Python client provides ``sfmc_api.monitor_glider.ordered_dialog()``
+which implements this reordering.  The installed ``sfmc-monitor-glider``
+script uses it to reassemble dialog output into complete lines.

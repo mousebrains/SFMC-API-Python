@@ -48,10 +48,10 @@ with SFMCClient() as client:
     print(details)
 ```
 
-Or use the `sfmc` CLI directly:
+Or use the `sfmc-api` CLI directly:
 
 ```bash
-sfmc get-glider-details osusim
+sfmc-api get-glider-details osusim
 ```
 
 See [cli.md](cli.md) for the full list of CLI commands.

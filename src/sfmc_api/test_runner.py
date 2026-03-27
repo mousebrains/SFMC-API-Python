@@ -576,11 +576,11 @@ def _test_delete_plan_rules(host: str, glider: str, creds: str | None) -> None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sfmc-api-test",
-        description="Integration test runner for the SFMC REST API via the sfmc CLI.",
+        description="Integration test runner for the SFMC REST API via the sfmc-api CLI.",
         epilog=(
             "Requires a credentials file at ~/.config/sfmc/credentials.json.\n"
-            "Create one with: sfmc init\n"
-            "Add a host with:  sfmc add-host"
+            "Create one with: sfmc-api init\n"
+            "Add a host with:  sfmc-api add-host"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -647,7 +647,7 @@ def main() -> None:
         sys.stderr.write(
             f"Error: Credentials file not found at {creds_path}\n\n"
             "Create one with:\n"
-            "  sfmc init\n\n"
+            "  sfmc-api init\n\n"
         )
         sys.exit(1)
 
@@ -659,7 +659,7 @@ def main() -> None:
                 f"Error: Host '{host}' not found in {creds_path}\n\n"
                 f"Available hosts: {', '.join(data.keys())}\n\n"
                 "Add it with:\n"
-                "  sfmc add-host\n\n"
+                "  sfmc-api add-host\n\n"
             )
             sys.exit(1)
     except (json.JSONDecodeError, OSError) as exc:

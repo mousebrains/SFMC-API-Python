@@ -63,7 +63,7 @@ The credentials file supports multiple SFMC servers, keyed by hostname:
 
 - **One host in file** -- auto-selected, no `--host` needed.
 - **Multiple hosts** -- specify with `--host`:
-  - CLI: `sfmc --host sfmc-backup.example.com ...`
+  - CLI: `sfmc-api --host sfmc-backup.example.com ...`
   - Python: `SFMCClient(host="sfmc-backup.example.com")`
 - **Unknown host** -- error with list of available hosts.
 
@@ -149,7 +149,7 @@ client = SFMCClient(download_path="/data/gliders")
 client.download_glider_file("osusim", "from-glider", "data.sbd")
 
 # CLI equivalent
-# sfmc --download-path /data/gliders download-glider-file osusim from-glider data.sbd
+# sfmc-api --download-path /data/gliders download-glider-file osusim from-glider data.sbd
 ```
 
 The directory is created automatically if it does not exist.

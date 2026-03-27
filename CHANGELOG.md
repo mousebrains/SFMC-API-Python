@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   control, deployment, and Zmodem transfers
 - Real-time STOMP-over-SockJS event streaming (connection events,
   dialog output, script events, Zmodem transfers, deployment updates)
-- `sfmc` CLI with subcommands for all API operations plus `init`
+- `sfmc-api` CLI with subcommands for all API operations plus `init`
   and `add-host` for credential management
 - Multi-host credentials file support (`--host` selector)
 - `--download-path` CLI option and `download_dir` property for

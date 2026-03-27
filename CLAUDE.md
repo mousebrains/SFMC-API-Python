@@ -56,7 +56,7 @@ Extracted from the Node.js library source. Base URL: `https://{host}/sfmc/api`
 | GET | `/v1/glider-assigned-mission-sensor-plan/{gliderName}` | Mission sensor plan |
 | GET | `/v1/glider-assigned-abort-plan/{gliderName}` | Abort plan |
 
-### Plans — Update (all PUT, body: JSON plan object)
+### Plans — Update (all PUT, body: multipart file upload)
 
 | Endpoint | Description |
 |----------|-------------|
