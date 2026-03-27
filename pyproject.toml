@@ -42,7 +42,7 @@ dev = [
 ]
 
 [project.scripts]
-sfmc = "sfmc_api.cli:main"
+sfmc-api = "sfmc_api.cli:main"
 sfmc-api-test = "sfmc_api.test_runner:main"
 
 [project.urls]
