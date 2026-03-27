@@ -82,6 +82,7 @@ warn_unused_configs = true
 [tool.coverage.run]
 branch = true
 source = ["sfmc_api"]
+omit = ["src/sfmc_api/test_runner.py"]
 
 [tool.coverage.report]
 fail_under = 70

@@ -351,3 +351,481 @@ class TestGetGliderId:
 
         assert gid == 42
         assert isinstance(gid, int)
+
+
+# ── download_dir property ────────────────────────────────────────
+
+
+class TestDownloadDir:
+    @patch("sfmc_api.client.build_http_client")
+    def test_uses_constructor_path(
+        self, mock_build: MagicMock, tmp_path: Path, config: SFMCConfig
+    ) -> None:
+        mock_build.return_value = MagicMock(spec=httpx.Client)
+        dl_dir = tmp_path / "my-downloads"
+
+        with SFMCClient(config=config, download_path=dl_dir) as client:
+            result = client.download_dir
+
+        assert result == dl_dir
+        assert dl_dir.is_dir()
+
+    @patch("sfmc_api.client.build_http_client")
+    def test_uses_config_download_path(self, mock_build: MagicMock, tmp_path: Path) -> None:
+        mock_build.return_value = MagicMock(spec=httpx.Client)
+        cfg_dir = tmp_path / "cfg-downloads"
+        cfg = SFMCConfig(
+            host="sfmc.test",
+            client_id="cid",
+            secret="sec",
+            tls_verify=False,
+            root_download_path=cfg_dir,
+        )
+
+        with SFMCClient(config=cfg) as client:
+            result = client.download_dir
+
+        assert result == cfg_dir
+        assert cfg_dir.is_dir()
+
+    @patch("sfmc_api.client.build_http_client")
+    def test_creates_directory(
+        self, mock_build: MagicMock, tmp_path: Path, config: SFMCConfig
+    ) -> None:
+        mock_build.return_value = MagicMock(spec=httpx.Client)
+        nested = tmp_path / "a" / "b" / "c"
+
+        with SFMCClient(config=config, download_path=nested) as client:
+            result = client.download_dir
+
+        assert result == nested
+        assert nested.is_dir()
+
+
+# ── _json_or_empty with non-empty body ───────────────────────────
+
+
+class TestJsonOrEmpty:
+    def test_returns_parsed_json_for_non_empty_body(self) -> None:
+        response = MagicMock(spec=httpx.Response)
+        response.content = b'{"status": "ok"}'
+        response.json.return_value = {"status": "ok"}
+
+        result = SFMCClient._json_or_empty(response)
+
+        assert result == {"status": "ok"}
+        response.json.assert_called_once()
+
+    def test_returns_empty_dict_for_empty_body(self) -> None:
+        response = MagicMock(spec=httpx.Response)
+        response.content = b""
+
+        result = SFMCClient._json_or_empty(response)
+
+        assert result == {}
+        response.json.assert_not_called()
+
+    def test_returns_empty_dict_for_whitespace_only_body(self) -> None:
+        response = MagicMock(spec=httpx.Response)
+        response.content = b"   \n  "
+
+        result = SFMCClient._json_or_empty(response)
+
+        assert result == {}
+        response.json.assert_not_called()
+
+
+# ── Upload files ─────────────────────────────────────────────────
+
+
+class TestUploadFiles:
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_upload_glider_files_valid_folder(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        tmp_path: Path,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        resp = make_mock_response(200, {"uploaded": 2})
+        resp.content = b'{"uploaded": 2}'
+        mock_http.request.return_value = resp
+        mock_build.return_value = mock_http
+
+        f1 = tmp_path / "a.ma"
+        f2 = tmp_path / "b.mi"
+        f1.write_bytes(b"file-a-content")
+        f2.write_bytes(b"file-b-content")
+
+        with SFMCClient(config=config) as client:
+            result = client.upload_glider_files("g1", "to-glider", [f1, f2])
+
+        assert result == {"uploaded": 2}
+        call_args = mock_http.request.call_args
+        assert call_args[0][0] == "PUT"
+        assert call_args[0][1] == "/v1/upload-glider-files/g1/to-glider"
+        # Verify files were passed in the request
+        files_kwarg = call_args.kwargs["files"]
+        assert len(files_kwarg) == 2
+        assert files_kwarg[0][0] == "files"
+        assert files_kwarg[0][1][0] == "a.ma"
+        assert files_kwarg[1][0] == "files"
+        assert files_kwarg[1][1][0] == "b.mi"
+
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_upload_cache_files(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        tmp_path: Path,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        resp = make_mock_response(200, {"uploaded": 1})
+        resp.content = b'{"uploaded": 1}'
+        mock_http.request.return_value = resp
+        mock_build.return_value = mock_http
+
+        f1 = tmp_path / "cache.dat"
+        f1.write_bytes(b"cache-data")
+
+        with SFMCClient(config=config) as client:
+            result = client.upload_cache_files("mygroup", [f1])
+
+        assert result == {"uploaded": 1}
+        call_args = mock_http.request.call_args
+        assert call_args[0][0] == "PUT"
+        assert call_args[0][1] == "/v1/upload-cache-files/mygroup"
+
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_upload_correct_path_to_science(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        tmp_path: Path,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        resp = make_mock_response(200)
+        resp.content = b""
+        mock_http.request.return_value = resp
+        mock_build.return_value = mock_http
+
+        f1 = tmp_path / "science.dat"
+        f1.write_bytes(b"data")
+
+        with SFMCClient(config=config) as client:
+            client.upload_glider_files("osu680", "to-science", [f1])
+
+        assert mock_http.request.call_args[0][1] == "/v1/upload-glider-files/osu680/to-science"
+
+
+# ── Download single file ─────────────────────────────────────────
+
+
+def _make_stream_context(chunks: list[bytes] | None = None, raise_on_iter: bool = False):
+    """Build a mock stream context manager for self._http.stream()."""
+    mock_stream_response = MagicMock()
+    mock_stream_response.is_success = True
+    mock_stream_response.status_code = 200
+    mock_stream_response.headers = {}
+    mock_stream_response.text = ""
+    if raise_on_iter:
+        mock_stream_response.iter_bytes.side_effect = OSError("disk full")
+    else:
+        mock_stream_response.iter_bytes.return_value = chunks or [b"file content"]
+
+    ctx = MagicMock()
+    ctx.__enter__ = MagicMock(return_value=mock_stream_response)
+    ctx.__exit__ = MagicMock(return_value=False)
+    return ctx
+
+
+class TestDownloadGliderFile:
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_download_single_file(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        tmp_path: Path,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_http.stream.return_value = _make_stream_context([b"hello ", b"world"])
+        mock_build.return_value = mock_http
+
+        dest = tmp_path / "test.sbd"
+        with SFMCClient(config=config) as client:
+            result = client.download_glider_file(
+                "g1", "from-glider", "test.sbd", download_path=dest
+            )
+
+        assert result == dest
+        assert dest.read_bytes() == b"hello world"
+        # .part file should not remain
+        assert not dest.with_suffix(".sbd.part").exists()
+
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_download_with_explicit_path(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        tmp_path: Path,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_http.stream.return_value = _make_stream_context([b"data"])
+        mock_build.return_value = mock_http
+
+        custom_path = tmp_path / "custom" / "output.bin"
+        custom_path.parent.mkdir(parents=True)
+        with SFMCClient(config=config) as client:
+            result = client.download_glider_file(
+                "g1", "from-glider", "f.bin", download_path=custom_path
+            )
+
+        assert result == custom_path
+        assert custom_path.read_bytes() == b"data"
+        # Verify the correct API path was called
+        mock_http.stream.assert_called_once()
+        call_args = mock_http.stream.call_args
+        assert call_args[0][0] == "GET"
+        assert call_args[0][1] == "/v1/download-glider-file/g1/from-glider/f.bin"
+
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_download_cleanup_on_error(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        tmp_path: Path,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_http.stream.return_value = _make_stream_context(raise_on_iter=True)
+        mock_build.return_value = mock_http
+
+        dest = tmp_path / "fail.sbd"
+        with SFMCClient(config=config) as client, pytest.raises(OSError, match="disk full"):
+            client.download_glider_file("g1", "from-glider", "fail.sbd", download_path=dest)
+
+        # Neither the final file nor the .part temp file should remain
+        assert not dest.exists()
+        assert not dest.with_suffix(".sbd.part").exists()
+
+
+# ── Download multiple files (zip) ────────────────────────────────
+
+
+class TestDownloadGliderFiles:
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_download_zip_default_path(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        tmp_path: Path,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_http.stream.return_value = _make_stream_context([b"PK\x03\x04zipdata"])
+        mock_build.return_value = mock_http
+
+        with SFMCClient(config=config, download_path=tmp_path) as client:
+            result = client.download_glider_files("g1", "from-glider")
+
+        expected = tmp_path / "g1-from-glider.zip"
+        assert result == expected
+        assert expected.read_bytes() == b"PK\x03\x04zipdata"
+
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_download_zip_with_filters(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        tmp_path: Path,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_http.stream.return_value = _make_stream_context([b"zip"])
+        mock_build.return_value = mock_http
+
+        with SFMCClient(config=config, download_path=tmp_path) as client:
+            client.download_glider_files(
+                "g1",
+                "from-glider",
+                filter="*.sbd",
+                last_modified_after="202601010000",
+            )
+
+        call_kwargs = mock_http.stream.call_args.kwargs
+        assert call_kwargs["params"]["filter"] == "*.sbd"
+        assert call_kwargs["params"]["lastModifiedAfter"] == "202601010000"
+
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_download_zip_explicit_path(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        tmp_path: Path,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_http.stream.return_value = _make_stream_context([b"zipdata"])
+        mock_build.return_value = mock_http
+
+        explicit = tmp_path / "my-archive.zip"
+        with SFMCClient(config=config) as client:
+            result = client.download_glider_files("g1", "from-glider", download_path=explicit)
+
+        assert result == explicit
+        assert explicit.read_bytes() == b"zipdata"
+
+
+# ── Delete file (valid folder) ───────────────────────────────────
+
+
+class TestDeleteGliderFileValid:
+    @pytest.mark.parametrize("folder", ["to-glider", "to-science", "configuration"])
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_delete_valid_folder(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        config: SFMCConfig,
+        folder: str,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        resp = make_mock_response(200)
+        resp.content = b""
+        mock_http.request.return_value = resp
+        mock_build.return_value = mock_http
+
+        with SFMCClient(config=config) as client:
+            result = client.delete_glider_file("g1", folder, "old.ma")
+
+        assert result == {}
+        call_args = mock_http.request.call_args
+        assert call_args[0][0] == "DELETE"
+        assert call_args[0][1] == f"/v1/delete-glider-file/g1/{folder}/old.ma"
+
+
+# ── Subscription methods ─────────────────────────────────────────
+
+
+class TestSubscriptionMethods:
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_subscribe_connection_events(
+        self, mock_build: MagicMock, mock_auth: MagicMock, config: SFMCConfig
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_http.request.return_value = make_mock_response(
+            200, {"data": {"id": 42, "name": "g1"}}
+        )
+        mock_build.return_value = mock_http
+
+        mock_stomp = MagicMock()
+        mock_sub = MagicMock()
+        mock_stomp.subscribe.return_value = mock_sub
+
+        with SFMCClient(config=config) as client:
+            result = client.subscribe_connection_events("g1", mock_stomp)
+
+        mock_stomp.subscribe.assert_called_once_with("/topic/glider-connections-42")
+        assert result is mock_sub
+
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_subscribe_glider_output(
+        self, mock_build: MagicMock, mock_auth: MagicMock, config: SFMCConfig
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_http.request.return_value = make_mock_response(
+            200, {"data": {"id": 42, "name": "g1"}}
+        )
+        mock_build.return_value = mock_http
+
+        mock_stomp = MagicMock()
+        mock_sub = MagicMock()
+        mock_stomp.subscribe.return_value = mock_sub
+
+        with SFMCClient(config=config) as client:
+            result = client.subscribe_glider_output("g1", mock_stomp)
+
+        mock_stomp.subscribe.assert_called_once_with("/topic/glider-link-output/42")
+        assert result is mock_sub
+
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_subscribe_script_events(
+        self, mock_build: MagicMock, mock_auth: MagicMock, config: SFMCConfig
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_http.request.return_value = make_mock_response(
+            200, {"data": {"id": 42, "name": "g1"}}
+        )
+        mock_build.return_value = mock_http
+
+        mock_stomp = MagicMock()
+        mock_sub = MagicMock()
+        mock_stomp.subscribe.return_value = mock_sub
+
+        with SFMCClient(config=config) as client:
+            result = client.subscribe_script_events("g1", mock_stomp)
+
+        mock_stomp.subscribe.assert_called_once_with("/topic/glider-script-assignment-updates-42")
+        assert result is mock_sub
+
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_subscribe_zmodem_transfer_events(
+        self, mock_build: MagicMock, mock_auth: MagicMock, config: SFMCConfig
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_http.request.return_value = make_mock_response(
+            200, {"data": {"id": 99, "gliderName": "g1"}}
+        )
+        mock_build.return_value = mock_http
+
+        mock_stomp = MagicMock()
+        mock_sub = MagicMock()
+        mock_stomp.subscribe.return_value = mock_sub
+
+        with SFMCClient(config=config) as client:
+            result = client.subscribe_zmodem_transfer_events("g1", mock_stomp)
+
+        mock_stomp.subscribe.assert_called_once_with("/topic/new-and-updated-zmodem-transfers-99")
+        assert result is mock_sub
+
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_subscribe_deployment_events(
+        self, mock_build: MagicMock, mock_auth: MagicMock, config: SFMCConfig
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_http.request.return_value = make_mock_response(
+            200, {"data": {"id": 99, "gliderName": "g1"}}
+        )
+        mock_build.return_value = mock_http
+
+        mock_stomp = MagicMock()
+        mock_sub = MagicMock()
+        mock_stomp.subscribe.return_value = mock_sub
+
+        with SFMCClient(config=config) as client:
+            result = client.subscribe_deployment_events("g1", mock_stomp)
+
+        mock_stomp.subscribe.assert_called_once_with(
+            "/topic/low-freq-glider-deployment-updates-99"
+        )
+        assert result is mock_sub

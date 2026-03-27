@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
+import threading
+import time
 from queue import Empty
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from websockets.exceptions import ConnectionClosed
 
 from sfmc_api.config import SFMCConfig
 from sfmc_api.stomp import (
@@ -277,3 +281,433 @@ class TestStompConnectionLifecycle:
         conn = StompConnection(config, "tok")
         with conn:
             assert conn._connected
+
+
+# ── Helpers for SockJS-encoded STOMP frames ──────────────────────────
+
+
+def _sockjs_message_frame(
+    command: str, headers: dict[str, str] | None = None, body: str = ""
+) -> str:
+    """Build a SockJS 'a[...]' frame wrapping a single STOMP frame."""
+    hdr = headers or {}
+    lines = [command]
+    for k, v in hdr.items():
+        lines.append(f"{k}:{v}")
+    lines.append("")
+    lines.append(body)
+    stomp_str = "\\n".join(lines) + "\\u0000"
+    return f'a["{stomp_str}"]'
+
+
+_OPEN = "o"
+_CONNECTED = 'a["CONNECTED\\nversion:1.2\\n\\n\\u0000"]'
+
+
+def _make_connected_ws(mock_ws_connect: MagicMock) -> MagicMock:
+    """Create a mock ws that completes the STOMP handshake, then blocks."""
+    mock_ws = MagicMock()
+    mock_ws.recv.side_effect = [
+        _OPEN,
+        _CONNECTED,
+    ]
+    mock_ws_connect.return_value = mock_ws
+    return mock_ws
+
+
+# ── TestStompDebugConfig ─────────────────────────────────────────────
+
+
+class TestStompDebugConfig:
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_stomp_debug_enables_logging(self, mock_ws_connect: MagicMock) -> None:
+        """When stomp_debug=True, the module logger level is set to DEBUG."""
+        config = SFMCConfig(
+            host="sfmc.test",
+            client_id="cid",
+            secret="sec",
+            tls_verify=False,
+            stomp_debug=True,
+        )
+        _make_connected_ws(mock_ws_connect)
+
+        conn = StompConnection(config, "tok")
+        conn.connect()
+
+        stomp_logger = logging.getLogger("sfmc_api.stomp")
+        assert stomp_logger.level == logging.DEBUG
+
+        conn.disconnect()
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_stomp_debug_false_does_not_change_level(self, mock_ws_connect: MagicMock) -> None:
+        """When stomp_debug=False (default), logger level is not forced to DEBUG."""
+        config = SFMCConfig(
+            host="sfmc.test",
+            client_id="cid",
+            secret="sec",
+            tls_verify=False,
+            stomp_debug=False,
+        )
+        stomp_logger = logging.getLogger("sfmc_api.stomp")
+        original_level = stomp_logger.level
+        _make_connected_ws(mock_ws_connect)
+
+        conn = StompConnection(config, "tok")
+        conn.connect()
+
+        assert stomp_logger.level == original_level
+
+        conn.disconnect()
+
+
+# ── TestConnectFailures ──────────────────────────────────────────────
+
+
+class TestConnectFailures:
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_ws_connect_raises_stomp_error(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig
+    ) -> None:
+        """When ws_connect raises, it is wrapped in StompError."""
+        mock_ws_connect.side_effect = OSError("connection refused")
+
+        conn = StompConnection(config, "tok")
+        with pytest.raises(StompError, match="WebSocket connection failed"):
+            conn.connect()
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_no_connected_frame(self, mock_ws_connect: MagicMock, config: SFMCConfig) -> None:
+        """If the server sends a non-CONNECTED, non-ERROR frame, raise StompError."""
+        mock_ws = MagicMock()
+        # Return SockJS open, then a HEARTBEAT-only frame (no CONNECTED)
+        mock_ws.recv.side_effect = [
+            "o",
+            'a["RECEIPT\\nreceipt-id:0\\n\\n\\u0000"]',
+        ]
+        mock_ws_connect.return_value = mock_ws
+
+        conn = StompConnection(config, "tok")
+        with pytest.raises(StompError, match="Did not receive STOMP CONNECTED frame"):
+            conn.connect()
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_generic_exception_wraps_stomp_error(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig
+    ) -> None:
+        """A generic exception during handshake is wrapped in StompError."""
+        mock_ws = MagicMock()
+        mock_ws.recv.side_effect = [
+            "o",
+            RuntimeError("unexpected parse failure"),
+        ]
+        mock_ws_connect.return_value = mock_ws
+
+        conn = StompConnection(config, "tok")
+        with pytest.raises(StompError, match="handshake failed"):
+            conn.connect()
+
+
+# ── TestDisconnectEdgeCases ──────────────────────────────────────────
+
+
+class TestDisconnectEdgeCases:
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_disconnect_send_failure(self, mock_ws_connect: MagicMock, config: SFMCConfig) -> None:
+        """If sending the DISCONNECT frame fails, disconnect still completes."""
+        mock_ws = _make_connected_ws(mock_ws_connect)
+
+        conn = StompConnection(config, "tok")
+        conn.connect()
+
+        # Make the next send (DISCONNECT) raise
+        mock_ws.send.side_effect = OSError("broken pipe")
+
+        # Should NOT raise
+        conn.disconnect()
+        assert not conn._connected
+
+
+# ── TestUnsubscribeEdgeCases ─────────────────────────────────────────
+
+
+class TestUnsubscribeEdgeCases:
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_unsubscribe_send_failure(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig
+    ) -> None:
+        """If sending UNSUBSCRIBE frame fails, _unsubscribe still completes."""
+        mock_ws = _make_connected_ws(mock_ws_connect)
+
+        conn = StompConnection(config, "tok")
+        conn.connect()
+
+        # Subscribe first (this send works fine since side_effect not set yet)
+        mock_ws.recv.side_effect = [TimeoutError] * 100  # keep receiver loop alive
+        conn.subscribe("/topic/test")
+
+        # Now make send raise for the UNSUBSCRIBE
+        mock_ws.send.side_effect = OSError("broken pipe")
+
+        # Should NOT raise
+        conn._unsubscribe("sub-0")
+
+        # Verify the subscription was removed from the registry
+        assert "sub-0" not in conn._subscriptions
+
+        conn._closing = True  # stop receiver thread
+        conn._connected = False
+
+
+# ── TestReceiveLoop ──────────────────────────────────────────────────
+
+
+class TestReceiveLoop:
+    """Tests for _receive_loop MESSAGE/ERROR/HEARTBEAT/unknown dispatch."""
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_message_dispatched_to_subscription(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig
+    ) -> None:
+        """A MESSAGE frame with valid JSON is dispatched to the subscription queue."""
+        mock_ws = MagicMock()
+        message_frame = 'a["MESSAGE\\nsubscription:sub-0\\n\\n{\\"key\\":\\"val\\"}\\u0000"]'
+
+        gate = threading.Event()
+        call_count = 0
+
+        def gated_recv(timeout: float = 0) -> str:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _OPEN
+            if call_count == 2:
+                return _CONNECTED
+            # Block until subscription is registered
+            if call_count == 3:
+                gate.wait(timeout=5)
+                return message_frame
+            raise TimeoutError
+
+        mock_ws.recv.side_effect = gated_recv
+        mock_ws_connect.return_value = mock_ws
+
+        conn = StompConnection(config, "tok")
+        conn.connect()
+
+        sub = conn.subscribe("/topic/test")
+        gate.set()  # release the message
+
+        msg = sub.get(timeout=2)
+        assert msg == {"key": "val"}
+
+        conn.disconnect()
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_message_invalid_json_raw_fallback(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig
+    ) -> None:
+        """A MESSAGE with non-JSON body produces {"_raw": body}."""
+        mock_ws = MagicMock()
+        message_frame = 'a["MESSAGE\\nsubscription:sub-0\\n\\nnot-json-data\\u0000"]'
+
+        gate = threading.Event()
+        call_count = 0
+
+        def gated_recv(timeout: float = 0) -> str:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _OPEN
+            if call_count == 2:
+                return _CONNECTED
+            if call_count == 3:
+                gate.wait(timeout=5)
+                return message_frame
+            raise TimeoutError
+
+        mock_ws.recv.side_effect = gated_recv
+        mock_ws_connect.return_value = mock_ws
+
+        conn = StompConnection(config, "tok")
+        conn.connect()
+
+        sub = conn.subscribe("/topic/test")
+        gate.set()
+
+        msg = sub.get(timeout=2)
+        assert msg == {"_raw": "not-json-data"}
+
+        conn.disconnect()
+
+    @patch("sfmc_api.stomp.logger")
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_error_frame_logged(
+        self, mock_ws_connect: MagicMock, mock_logger: MagicMock, config: SFMCConfig
+    ) -> None:
+        """An ERROR frame in the receive loop triggers logger.error."""
+        mock_ws = MagicMock()
+        error_frame = 'a["ERROR\\nmessage:server error\\n\\nSome error body\\u0000"]'
+        mock_ws.recv.side_effect = [
+            _OPEN,
+            _CONNECTED,
+            error_frame,
+            TimeoutError,
+            TimeoutError,
+        ]
+        mock_ws_connect.return_value = mock_ws
+
+        conn = StompConnection(config, "tok")
+        conn.connect()
+        time.sleep(0.3)
+
+        mock_logger.error.assert_any_call("STOMP ERROR: %s", "Some error body")
+
+        conn.disconnect()
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_heartbeat_ignored(self, mock_ws_connect: MagicMock, config: SFMCConfig) -> None:
+        """A heartbeat SockJS frame is silently ignored."""
+        mock_ws = MagicMock()
+        mock_ws.recv.side_effect = [
+            _OPEN,
+            _CONNECTED,
+            "h",  # SockJS heartbeat
+            TimeoutError,
+            TimeoutError,
+        ]
+        mock_ws_connect.return_value = mock_ws
+
+        conn = StompConnection(config, "tok")
+        conn.connect()
+        time.sleep(0.2)
+
+        # No crash, connection still valid
+        assert conn._connected
+
+        conn.disconnect()
+
+    @patch("sfmc_api.stomp.logger")
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_unknown_frame_logged(
+        self, mock_ws_connect: MagicMock, mock_logger: MagicMock, config: SFMCConfig
+    ) -> None:
+        """An unknown STOMP command triggers a debug log."""
+        mock_ws = MagicMock()
+        unknown_frame = 'a["WEIRD_COMMAND\\n\\nsome body\\u0000"]'
+        mock_ws.recv.side_effect = [
+            _OPEN,
+            _CONNECTED,
+            unknown_frame,
+            TimeoutError,
+            TimeoutError,
+        ]
+        mock_ws_connect.return_value = mock_ws
+
+        conn = StompConnection(config, "tok")
+        conn.connect()
+        time.sleep(0.3)
+
+        mock_logger.debug.assert_any_call("STOMP frame: %s", "WEIRD_COMMAND")
+
+        conn.disconnect()
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_connection_closed_closes_subscriptions(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig
+    ) -> None:
+        """When recv raises ConnectionClosed, the loop exits and remaining subs are closed."""
+        mock_ws = MagicMock()
+
+        gate = threading.Event()
+        call_count = 0
+
+        def gated_recv(timeout: float = 0) -> str:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _OPEN
+            if call_count == 2:
+                return _CONNECTED
+            if call_count == 3:
+                gate.wait(timeout=5)
+                raise ConnectionClosed(None, None)
+            raise TimeoutError
+
+        mock_ws.recv.side_effect = gated_recv
+        mock_ws_connect.return_value = mock_ws
+
+        conn = StompConnection(config, "tok")
+        conn.connect()
+
+        sub = conn.subscribe("/topic/test")
+        gate.set()  # let the ConnectionClosed fire
+
+        # The subscription should have been closed (None sentinel in queue)
+        msg = sub.get(timeout=2)
+        assert msg is None
+
+        conn._closing = True
+        conn._connected = False
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_recv_error_breaks_loop(self, mock_ws_connect: MagicMock, config: SFMCConfig) -> None:
+        """A generic recv exception breaks the receive loop and closes subs."""
+        mock_ws = MagicMock()
+
+        gate = threading.Event()
+        call_count = 0
+
+        def gated_recv(timeout: float = 0) -> str:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _OPEN
+            if call_count == 2:
+                return _CONNECTED
+            if call_count == 3:
+                gate.wait(timeout=5)
+                raise RuntimeError("unexpected recv failure")
+            raise TimeoutError
+
+        mock_ws.recv.side_effect = gated_recv
+        mock_ws_connect.return_value = mock_ws
+
+        conn = StompConnection(config, "tok")
+        conn.connect()
+
+        sub = conn.subscribe("/topic/test")
+        gate.set()  # let the error fire
+
+        # The subscription should have been closed
+        msg = sub.get(timeout=2)
+        assert msg is None
+
+        conn._closing = True
+        conn._connected = False
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_message_to_unknown_subscription_ignored(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig
+    ) -> None:
+        """A MESSAGE for a subscription ID not in the registry is silently ignored."""
+        mock_ws = MagicMock()
+        # Message for sub-99 which doesn't exist
+        message_frame = 'a["MESSAGE\\nsubscription:sub-99\\n\\n{\\"x\\":1}\\u0000"]'
+        mock_ws.recv.side_effect = [
+            _OPEN,
+            _CONNECTED,
+            message_frame,
+            TimeoutError,
+            TimeoutError,
+        ]
+        mock_ws_connect.return_value = mock_ws
+
+        conn = StompConnection(config, "tok")
+        conn.connect()
+        time.sleep(0.3)
+
+        # No crash, connection is still up
+        assert conn._connected
+
+        conn.disconnect()
