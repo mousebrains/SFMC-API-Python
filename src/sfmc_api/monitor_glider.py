@@ -30,6 +30,8 @@ from collections.abc import Generator
 from sfmc_api import SFMCClient
 from sfmc_api.stomp import MAX_SEQUENCE, StompSubscription
 
+logger = logging.getLogger(__name__)
+
 # ── Sequence-ordered dialog output ───────────────────────────────────
 
 
@@ -75,7 +77,14 @@ def ordered_dialog(
 
             # If the gap is too large, the buffer is stale — flush and reset
             if len(pending) > 100:
+                logger.warning(
+                    "ordered_dialog: gap too large, flushing %d buffered",
+                    len(pending),
+                )
+                for seq_key in sorted(pending):
+                    yield pending[seq_key]
                 pending.clear()
+                next_expected = None
 
 
 # ── Logging setup ────────────────────────────────────────────────────
@@ -232,6 +241,12 @@ def main() -> None:
         default=None,
         help="SFMC server hostname (selects entry from multi-host credentials file)",
     )
+    parser.add_argument(
+        "--credentials",
+        default=None,
+        metavar="PATH",
+        help="Path to credentials JSON file (default: ~/.config/sfmc/credentials.json)",
+    )
     args = parser.parse_args()
 
     dialog_log, script_log = setup_logging(args.glider_name, args.logfile)
@@ -243,7 +258,7 @@ def main() -> None:
     for h in dialog_log.handlers:
         info_log.addHandler(h)
 
-    with SFMCClient(host=args.host) as client:
+    with SFMCClient(host=args.host, config_path=args.credentials) as client:
         details = client.get_glider_details(args.glider_name)
         try:
             glider_state = details["data"]["state"]
@@ -301,14 +316,18 @@ def main() -> None:
             dialog_thread.start()
             script_thread.start()
 
-            try:
-                # Block until Ctrl-C
-                stop.wait()
-            except KeyboardInterrupt:
-                info_log.info("Stopping...")
-                stop.set()
-                dialog_sub.close()
-                script_sub.close()
+            while not stop.is_set():
+                try:
+                    stop.wait(timeout=5)
+                except KeyboardInterrupt:
+                    info_log.info("Stopping...")
+                    stop.set()
+                    dialog_sub.close()
+                    script_sub.close()
+                    break
+                if not dialog_thread.is_alive() and not script_thread.is_alive():
+                    info_log.warning("Stream disconnected")
+                    break
 
         info_log.info("Disconnected.")
 
