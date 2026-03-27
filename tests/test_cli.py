@@ -676,6 +676,33 @@ class TestHandleAddHost:
         assert rc == 1
 
 
+# ── TestOSErrorHandling ──────────────────────────────────────────────
+
+
+class TestOSErrorHandling:
+    @patch("sfmc_api.cli._run")
+    @patch("sfmc_api.cli.SFMCClient")
+    @patch("sfmc_api.cli.build_parser")
+    def test_os_error_caught(
+        self,
+        mock_parser_fn: MagicMock,
+        mock_client_cls: MagicMock,
+        mock_run: MagicMock,
+    ) -> None:
+        args = MagicMock()
+        args.command = "auth"
+        args.credentials = None
+        args.host = None
+        args.download_path = None
+        mock_parser_fn.return_value.parse_args.return_value = args
+
+        mock_client_cls.return_value = MagicMock()
+        mock_run.side_effect = FileNotFoundError("No such file: test.json")
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+
+
 # ── TestMain ─────────────────────────────────────────────────────────
 
 

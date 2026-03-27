@@ -32,6 +32,13 @@ from .stomp import StompConnection, StompSubscription
 __all__ = ["SFMCClient"]
 
 
+def _validate_path_segment(value: str, name: str) -> str:
+    """Raise *ValueError* if *value* is unsuitable for a URL path segment."""
+    if not value or "/" in value or "\x00" in value or ".." in value:
+        raise ValueError(f"Invalid {name}: {value!r}")
+    return value
+
+
 class SFMCClient:
     """Client for the Slocum Fleet Management Center REST API.
 
@@ -230,6 +237,7 @@ class SFMCClient:
             ...     info = client.get_glider_details("osu680")
             ...     print(info)
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request("GET", f"/v1/gliders/{glider_name}")
         return self._json_or_empty(response)
 
@@ -250,6 +258,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request("GET", f"/v1/active-deployment/{glider_name}")
         return self._json_or_empty(response)
 
@@ -269,6 +278,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request("GET", f"/v1/newest-mission-details/{glider_name}")
         return self._json_or_empty(response)
 
@@ -300,6 +310,8 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
+        _validate_path_segment(sensor_type_name, "sensor_type_name")
         response = self._request(
             "GET",
             f"/v1/surface-sensor-samples/{glider_name}/{sensor_type_name}",
@@ -338,6 +350,8 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
+        _validate_path_segment(folder, "folder")
         params: dict[str, str | int] = {"page": page}
         if filter is not None:
             params["filter"] = filter
@@ -367,6 +381,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request("GET", f"/v1/scripts-for-glider/{glider_name}")
         return self._json_or_empty(response)
 
@@ -386,6 +401,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(str(connection_id), "connection_id")
         response = self._request("GET", f"/v1/zmodem-transfers/{connection_id}")
         return self._json_or_empty(response)
 
@@ -407,6 +423,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request("GET", f"/v1/glider-assigned-mission-plan/{glider_name}")
         return self._json_or_empty(response)
 
@@ -427,6 +444,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request("GET", f"/v1/glider-assigned-waypoint-plan/{glider_name}")
         return self._json_or_empty(response)
 
@@ -449,6 +467,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request("GET", f"/v1/glider-assigned-yo-plan/{glider_name}")
         return self._json_or_empty(response)
 
@@ -472,6 +491,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request("GET", f"/v1/glider-assigned-surface-plan/{glider_name}")
         return self._json_or_empty(response)
 
@@ -495,6 +515,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request("GET", f"/v1/glider-assigned-sampling-plan/{glider_name}")
         return self._json_or_empty(response)
 
@@ -517,6 +538,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request(
             "GET",
             f"/v1/glider-assigned-data-transmission-plan/{glider_name}",
@@ -540,6 +562,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request(
             "GET",
             f"/v1/glider-assigned-mission-sensor-plan/{glider_name}",
@@ -565,6 +588,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request("GET", f"/v1/glider-assigned-abort-plan/{glider_name}")
         return self._json_or_empty(response)
 
@@ -588,6 +612,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         return self._upload_plan_file(
             f"/v1/update-glider-waypoint-plan/{glider_name}",
             goto_file_path,
@@ -611,6 +636,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         return self._upload_plan_file(
             f"/v1/update-glider-yo-plan/{glider_name}",
             yo_file_path,
@@ -636,6 +662,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         return self._upload_plan_file(
             f"/v1/update-glider-surface-plan/{glider_name}",
             surface_file_path,
@@ -661,6 +688,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         return self._upload_plan_file(
             f"/v1/update-glider-sampling-plan/{glider_name}",
             sampling_file_path,
@@ -686,6 +714,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         return self._upload_plan_file(
             f"/v1/update-glider-flight-data-transmission-plan/{glider_name}",
             sbd_list_file_path,
@@ -711,6 +740,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         return self._upload_plan_file(
             f"/v1/update-glider-science-data-transmission-plan/{glider_name}",
             tbd_list_file_path,
@@ -753,6 +783,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request(
             "DELETE",
             f"/v1/delete-glider-hit-waypoint-surface-plan-rule/{glider_name}",
@@ -775,6 +806,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request(
             "DELETE",
             f"/v1/delete-glider-every-secs-surface-plan-rules/{glider_name}",
@@ -797,6 +829,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request(
             "DELETE",
             f"/v1/delete-glider-at-utc-time-surface-plan-rules/{glider_name}",
@@ -819,6 +852,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request(
             "DELETE",
             f"/v1/delete-glider-sampling-plan-rules/{glider_name}",
@@ -845,6 +879,8 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
+        _validate_path_segment(group_name, "group_name")
         response = self._request(
             "POST",
             f"/v1/register-glider/{group_name}",
@@ -869,6 +905,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request(
             "POST",
             f"/v1/obtain-or-create-active-deployment/{glider_name}",
@@ -895,6 +932,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request(
             "PUT",
             f"/v1/update-active-deployment-start/{glider_name}",
@@ -924,6 +962,9 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
+        _validate_path_segment(script_type, "script_type")
+        _validate_path_segment(script_name, "script_name")
         response = self._request(
             "PUT",
             f"/v1/set-assigned-script/{glider_name}/{script_type}/{script_name}",
@@ -946,6 +987,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request("PUT", f"/v1/clear-assigned-script/{glider_name}")
         return self._json_or_empty(response)
 
@@ -965,6 +1007,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request("PUT", f"/v1/pause-assigned-script/{glider_name}")
         return self._json_or_empty(response)
 
@@ -984,6 +1027,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request("PUT", f"/v1/resume-assigned-script/{glider_name}")
         return self._json_or_empty(response)
 
@@ -1003,6 +1047,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request("PUT", f"/v1/rewind-assigned-script/{glider_name}")
         return self._json_or_empty(response)
 
@@ -1025,6 +1070,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request(
             "PUT",
             f"/v1/submit-command/{glider_name}",
@@ -1054,6 +1100,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request("PUT", f"/v1/gen-and-deploy-glider-goto-file/{glider_name}")
         return self._json_or_empty(response)
 
@@ -1073,6 +1120,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request("PUT", f"/v1/gen-and-deploy-glider-yo-file/{glider_name}")
         return self._json_or_empty(response)
 
@@ -1092,6 +1140,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request(
             "PUT",
             f"/v1/gen-and-deploy-glider-surface-files/{glider_name}",
@@ -1114,6 +1163,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request(
             "PUT",
             f"/v1/gen-and-deploy-glider-sample-files/{glider_name}",
@@ -1139,6 +1189,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request(
             "PUT",
             f"/v1/gen-and-deploy-glider-sbd-list-file/{glider_name}",
@@ -1164,6 +1215,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         response = self._request(
             "PUT",
             f"/v1/gen-and-deploy-glider-tbd-list-file/{glider_name}",
@@ -1198,6 +1250,8 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
+        _validate_path_segment(folder, "folder")
         allowed = ("to-glider", "to-science", "from-glider")
         if folder not in allowed:
             raise ValueError(f"Upload folder must be one of {allowed}, got {folder!r}")
@@ -1229,6 +1283,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(group_name, "group_name")
         return self._upload_files(
             f"/v1/upload-cache-files/{group_name}",
             file_paths,
@@ -1275,6 +1330,9 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
+        _validate_path_segment(folder, "folder")
+        _validate_path_segment(file_name, "file_name")
         download_path = Path(download_path) if download_path else self.download_dir / file_name
         headers = self._auth_headers()
         with self._http.stream(
@@ -1326,6 +1384,8 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
+        _validate_path_segment(folder, "folder")
         if download_path is not None:
             download_path = Path(download_path)
         else:
@@ -1375,6 +1435,9 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
+        _validate_path_segment(folder, "folder")
+        _validate_path_segment(file_name, "file_name")
         allowed = ("to-glider", "to-science", "configuration")
         if folder not in allowed:
             raise ValueError(f"Delete folder must be one of {allowed}, got {folder!r}")
@@ -1449,6 +1512,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         glider_id = self._get_glider_id(glider_name)
         return stomp.subscribe(f"/topic/glider-connections-{glider_id}")
 
@@ -1477,6 +1541,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         glider_id = self._get_glider_id(glider_name)
         return stomp.subscribe(f"/topic/glider-link-output/{glider_id}")
 
@@ -1504,6 +1569,7 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         glider_id = self._get_glider_id(glider_name)
         return stomp.subscribe(f"/topic/glider-script-assignment-updates-{glider_id}")
 
@@ -1531,8 +1597,14 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         deployment = self.get_active_deployment_details(glider_name)
-        deployment_id = deployment["data"]["id"]
+        try:
+            deployment_id = deployment["data"]["id"]
+        except (KeyError, TypeError) as exc:
+            raise APIError(
+                0, "Unexpected response from get_active_deployment_details: missing data.id"
+            ) from exc
         return stomp.subscribe(f"/topic/new-and-updated-zmodem-transfers-{deployment_id}")
 
     def subscribe_deployment_events(
@@ -1556,11 +1628,23 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             AuthenticationError: If sign-in fails.
         """
+        _validate_path_segment(glider_name, "glider_name")
         deployment = self.get_active_deployment_details(glider_name)
-        deployment_id = deployment["data"]["id"]
+        try:
+            deployment_id = deployment["data"]["id"]
+        except (KeyError, TypeError) as exc:
+            raise APIError(
+                0, "Unexpected response from get_active_deployment_details: missing data.id"
+            ) from exc
         return stomp.subscribe(f"/topic/low-freq-glider-deployment-updates-{deployment_id}")
 
     def _get_glider_id(self, glider_name: str) -> int:
         """Look up the numeric glider ID from the glider name."""
+        _validate_path_segment(glider_name, "glider_name")
         details = self.get_glider_details(glider_name)
-        return int(details["data"]["id"])
+        try:
+            return int(details["data"]["id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise APIError(
+                0, "Unexpected response from get_glider_details: missing data.id"
+            ) from exc

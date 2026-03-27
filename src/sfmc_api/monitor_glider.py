@@ -227,6 +227,11 @@ def main() -> None:
         default=None,
         help="Log file path (default: stderr only)",
     )
+    parser.add_argument(
+        "--host",
+        default=None,
+        help="SFMC server hostname (selects entry from multi-host credentials file)",
+    )
     args = parser.parse_args()
 
     dialog_log, script_log = setup_logging(args.glider_name, args.logfile)
@@ -238,18 +243,27 @@ def main() -> None:
     for h in dialog_log.handlers:
         info_log.addHandler(h)
 
-    with SFMCClient() as client:
+    with SFMCClient(host=args.host) as client:
         details = client.get_glider_details(args.glider_name)
-        glider_state = details["data"]["state"]
+        try:
+            glider_state = details["data"]["state"]
+            glider_id = details["data"]["id"]
+        except (KeyError, TypeError) as exc:
+            info_log.error("Unexpected API response: %s", exc)
+            sys.exit(1)
         info_log.info(
             "Monitoring %s (id=%s, state=%s)",
             args.glider_name,
-            details["data"]["id"],
+            glider_id,
             glider_state,
         )
 
         deploy = client.get_active_deployment_details(args.glider_name)
-        d = deploy["data"]
+        try:
+            d = deploy["data"]
+        except (KeyError, TypeError) as exc:
+            info_log.error("Unexpected API response: %s", exc)
+            sys.exit(1)
         if d.get("currentScriptName"):
             info_log.info(
                 "Active script: %s (%s), running=%s",

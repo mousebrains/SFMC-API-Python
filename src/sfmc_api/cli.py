@@ -547,7 +547,7 @@ def main() -> None:
             download_path=args.download_path,
         ) as client:
             code = _run(client, args)
-    except SFMCError as exc:
+    except (SFMCError, OSError) as exc:
         sys.stderr.write(f"Error: {exc}\n")
         code = 1
     except KeyboardInterrupt:
