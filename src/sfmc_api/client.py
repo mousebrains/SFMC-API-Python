@@ -18,6 +18,8 @@ See :doc:`/docs/getting_started` for installation and configuration.
 from __future__ import annotations
 
 import contextlib
+import logging
+import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -30,6 +32,9 @@ from .exceptions import APIError, AuthenticationError
 from .stomp import StompConnection, StompSubscription
 
 __all__ = ["SFMCClient"]
+
+logger = logging.getLogger(__name__)
+_MAX_RETRIES = 3
 
 
 def _validate_path_segment(value: str, name: str) -> str:
@@ -187,12 +192,67 @@ class SFMCClient:
             RateLimitError: If the server returns HTTP 429.
             APIError: For other non-2xx responses or transport errors.
         """
-        headers = kwargs.pop("headers", {})
+        self._ensure_auth()
+        headers: dict[str, str] = kwargs.pop("headers", {})
         headers.update(self._auth_headers())
-        try:
-            response = self._http.request(method, path, headers=headers, **kwargs)
-        except httpx.HTTPError as exc:
-            raise APIError(0, str(exc)) from exc
+
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                response = self._http.request(
+                    method,
+                    path,
+                    headers=headers,
+                    **kwargs,
+                )
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                if attempt < _MAX_RETRIES - 1:
+                    delay = 2**attempt
+                    logger.warning(
+                        "%s %s failed (%s), retrying in %ds",
+                        method,
+                        path,
+                        exc,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise APIError(0, str(exc)) from exc
+
+            # Token expired — refresh once
+            if response.status_code == 401 and attempt == 0:
+                logger.debug("Got 401, refreshing auth token")
+                self._token = None
+                self.authenticate()
+                headers["Authorization"] = f"Bearer {self._token}"
+                continue
+
+            # Rate limited — use server-provided delay
+            if response.status_code == 429 and attempt < _MAX_RETRIES - 1:
+                raw_ms = response.headers.get(
+                    "x-rate-limit-retry-after-milliseconds",
+                    "0",
+                )
+                try:
+                    delay_s = int(raw_ms) / 1000
+                except (ValueError, TypeError):
+                    delay_s = 2.0
+                logger.warning(
+                    "Rate limited on %s %s, retrying in %.1fs",
+                    method,
+                    path,
+                    delay_s,
+                )
+                time.sleep(delay_s)
+                continue
+
+            check_response(response)
+            return response
+
+        # Final attempt exhausted
+        if last_exc is not None:
+            raise APIError(0, str(last_exc)) from last_exc
         check_response(response)
         return response
 

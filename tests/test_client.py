@@ -10,7 +10,7 @@ import pytest
 
 from sfmc_api.client import SFMCClient
 from sfmc_api.config import SFMCConfig
-from sfmc_api.exceptions import APIError, AuthenticationError
+from sfmc_api.exceptions import APIError, AuthenticationError, RateLimitError
 from tests.conftest import make_mock_response
 
 
@@ -829,3 +829,111 @@ class TestSubscriptionMethods:
             "/topic/low-freq-glider-deployment-updates-99"
         )
         assert result is mock_sub
+
+
+class TestRetryBehavior:
+    """Tests for _request() retry logic."""
+
+    @patch("sfmc_api.client.time")
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_retries_on_429(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        mock_time: MagicMock,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_build.return_value = mock_http
+        rate_resp = make_mock_response(
+            429,
+            {},
+            headers={"x-rate-limit-retry-after-milliseconds": "100"},
+        )
+        ok_resp = make_mock_response(200, {"data": {}})
+        mock_http.request.side_effect = [rate_resp, ok_resp]
+        client = SFMCClient(config=config)
+        result = client.get_glider_details("g1")
+        assert result == {"data": {}}
+        assert mock_http.request.call_count == 2
+        mock_time.sleep.assert_called_once_with(0.1)
+
+    @patch("sfmc_api.client.authenticate")
+    @patch("sfmc_api.client.build_http_client")
+    def test_refreshes_token_on_401(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        config: SFMCConfig,
+    ) -> None:
+        mock_auth.return_value = "tok"
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_build.return_value = mock_http
+        unauth_resp = make_mock_response(401, {})
+        ok_resp = make_mock_response(200, {"data": {}})
+        mock_http.request.side_effect = [unauth_resp, ok_resp]
+        client = SFMCClient(config=config)
+        result = client.get_glider_details("g1")
+        assert result == {"data": {}}
+        assert mock_auth.call_count == 2
+
+    @patch("sfmc_api.client.authenticate")
+    @patch("sfmc_api.client.build_http_client")
+    def test_401_only_retried_once(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        config: SFMCConfig,
+    ) -> None:
+        mock_auth.return_value = "tok"
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_build.return_value = mock_http
+        unauth_resp = make_mock_response(401, {})
+        mock_http.request.return_value = unauth_resp
+        client = SFMCClient(config=config)
+        with pytest.raises(APIError):
+            client.get_glider_details("g1")
+        assert mock_http.request.call_count == 2
+
+    @patch("sfmc_api.client.time")
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_retries_on_transport_error(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        mock_time: MagicMock,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_build.return_value = mock_http
+        ok_resp = make_mock_response(200, {"data": {}})
+        mock_http.request.side_effect = [httpx.ConnectError("fail"), ok_resp]
+        client = SFMCClient(config=config)
+        result = client.get_glider_details("g1")
+        assert result == {"data": {}}
+        mock_time.sleep.assert_called_once_with(1)
+
+    @patch("sfmc_api.client.time")
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_gives_up_after_max_retries(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        mock_time: MagicMock,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_build.return_value = mock_http
+        rate_resp = make_mock_response(
+            429,
+            {},
+            headers={"x-rate-limit-retry-after-milliseconds": "100"},
+        )
+        mock_http.request.return_value = rate_resp
+        client = SFMCClient(config=config)
+        with pytest.raises(RateLimitError):
+            client.get_glider_details("g1")
+        assert mock_http.request.call_count == 3
