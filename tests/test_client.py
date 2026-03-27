@@ -937,3 +937,114 @@ class TestRetryBehavior:
         with pytest.raises(RateLimitError):
             client.get_glider_details("g1")
         assert mock_http.request.call_count == 3
+
+
+class TestPlanUpdateMethods:
+    """Tests for plan update methods (multipart file upload)."""
+
+    @pytest.mark.parametrize(
+        ("method_name", "expected_path"),
+        [
+            ("update_waypoint_plan", "/v1/update-glider-waypoint-plan/tg"),
+            ("update_yo_plan", "/v1/update-glider-yo-plan/tg"),
+            ("update_surface_plan", "/v1/update-glider-surface-plan/tg"),
+            ("update_sampling_plan", "/v1/update-glider-sampling-plan/tg"),
+            (
+                "update_flight_data_transmission_plan",
+                "/v1/update-glider-flight-data-transmission-plan/tg",
+            ),
+            (
+                "update_science_data_transmission_plan",
+                "/v1/update-glider-science-data-transmission-plan/tg",
+            ),
+        ],
+    )
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_plan_upload(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        method_name: str,
+        expected_path: str,
+        config: SFMCConfig,
+        tmp_path: Path,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_build.return_value = mock_http
+        mock_http.request.return_value = make_mock_response(200, {})
+
+        plan_file = tmp_path / "plan.json"
+        plan_file.write_text('{"waypoints": []}')
+
+        with SFMCClient(config=config) as client:
+            method = getattr(client, method_name)
+            method("tg", str(plan_file))
+
+        call_args = mock_http.request.call_args
+        assert call_args[0][0] == "PUT"
+        assert call_args[0][1] == expected_path
+        # Verify files were passed (multipart upload)
+        assert "files" in call_args.kwargs
+
+
+class TestRegistrationAndDeployment:
+    """Tests for register_glider and update_active_deployment_start."""
+
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_register_glider_default_group(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_build.return_value = mock_http
+        mock_http.request.return_value = make_mock_response(200, {"data": {}})
+
+        with SFMCClient(config=config) as client:
+            client.register_glider("myglider")
+
+        call_args = mock_http.request.call_args
+        assert call_args[0][0] == "POST"
+        assert call_args[0][1] == "/v1/register-glider/default"
+
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_register_glider_custom_group(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_build.return_value = mock_http
+        mock_http.request.return_value = make_mock_response(200, {"data": {}})
+
+        with SFMCClient(config=config) as client:
+            client.register_glider("myglider", group_name="mygroup")
+
+        call_args = mock_http.request.call_args
+        assert call_args[0][1] == "/v1/register-glider/mygroup"
+
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_update_active_deployment_start(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_build.return_value = mock_http
+        mock_http.request.return_value = make_mock_response(200, {"data": {}})
+
+        with SFMCClient(config=config) as client:
+            client.update_active_deployment_start("tg", "2026-01-01T00:00:00")
+
+        call_args = mock_http.request.call_args
+        assert call_args[0][0] == "PUT"
+        assert call_args[0][1] == "/v1/update-active-deployment-start/tg"
+        # Check startDateTime param
+        assert "params" in call_args.kwargs
