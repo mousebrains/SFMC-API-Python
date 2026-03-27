@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -106,6 +107,7 @@ class SFMCClient:
         )
         self._http: httpx.Client = build_http_client(self._config)
         self._token: str | None = None
+        self._token_lock = threading.Lock()
 
     # ── Context manager ──────────────────────────────────────────────
 
@@ -118,6 +120,8 @@ class SFMCClient:
     def close(self) -> None:
         """Close the underlying HTTP connection pool."""
         self._http.close()
+        with self._token_lock:
+            self._token = None
 
     @property
     def download_dir(self) -> Path:
@@ -147,17 +151,22 @@ class SFMCClient:
         Raises:
             AuthenticationError: If sign-in fails.
         """
-        self._token = authenticate(self._http, self._config)
+        token = authenticate(self._http, self._config)
+        with self._token_lock:
+            self._token = token
 
     def _ensure_auth(self) -> None:
         """Sign in lazily — only if no token is cached yet."""
-        if self._token is None:
+        with self._token_lock:
+            needs_auth = self._token is None
+        if needs_auth:
             self.authenticate()
 
     def _auth_headers(self) -> dict[str, str]:
         """Return an ``Authorization: Bearer ...`` header dict."""
         self._ensure_auth()
-        return {"Authorization": f"Bearer {self._token}"}
+        with self._token_lock:
+            return {"Authorization": f"Bearer {self._token}"}
 
     # ── Internal request helper ──────────────────────────────────────
 
@@ -1532,9 +1541,10 @@ class SFMCClient:
             StompError: If the WebSocket or STOMP handshake fails.
         """
         self._ensure_auth()
-        if self._token is None:
-            raise AuthenticationError("Authentication succeeded but no token was returned")
-        conn = StompConnection(self._config, self._token)
+        with self._token_lock:
+            if self._token is None:
+                raise AuthenticationError("Authentication succeeded but no token was returned")
+            conn = StompConnection(self._config, self._token)
         conn.connect()
         return conn
 

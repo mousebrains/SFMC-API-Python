@@ -495,14 +495,15 @@ class TestPrompt:
 class TestPromptHostEntry:
     """Tests for _prompt_host_entry()."""
 
-    @patch("sfmc_api.cli.getpass.getpass", return_value="mysecret")
     def test_returns_hostname_and_entry(
         self,
-        mock_gp: MagicMock,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         inputs = iter(["sfmc.example.com", "myid", "", ""])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+        import getpass as _gp
+
+        monkeypatch.setattr(_gp, "getpass", lambda _prompt, stream=None: "mysecret")
         hostname, entry = _prompt_host_entry()
         assert hostname == "sfmc.example.com"
         assert entry["apiCredentials"]["clientId"] == "myid"
@@ -510,21 +511,21 @@ class TestPromptHostEntry:
         assert entry["tlsRejectUnauthorized"] == 1  # default is now "yes"
         assert "rootDownloadPath" not in entry
 
-    @patch("sfmc_api.cli.getpass.getpass", return_value="mysecret")
+    @patch("getpass.getpass", return_value="mysecret")
     def test_tls_yes(self, mock_gp: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
         inputs = iter(["sfmc.example.com", "myid", "yes", ""])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
         hostname, entry = _prompt_host_entry()
         assert entry["tlsRejectUnauthorized"] == 1
 
-    @patch("sfmc_api.cli.getpass.getpass", return_value="mysecret")
+    @patch("getpass.getpass", return_value="mysecret")
     def test_tls_no(self, mock_gp: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
         inputs = iter(["sfmc.example.com", "myid", "no", ""])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
         hostname, entry = _prompt_host_entry()
         assert entry["tlsRejectUnauthorized"] == 0
 
-    @patch("sfmc_api.cli.getpass.getpass", return_value="mysecret")
+    @patch("getpass.getpass", return_value="mysecret")
     def test_with_download_dir(
         self,
         mock_gp: MagicMock,

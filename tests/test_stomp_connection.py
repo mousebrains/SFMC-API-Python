@@ -6,7 +6,7 @@ import json
 import logging
 import threading
 import time
-from queue import Empty
+from queue import Empty, Queue
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -18,6 +18,7 @@ from sfmc_api.stomp import (
     StompConnection,
     StompError,
     StompSubscription,
+    _sockjs_decode,
     _sockjs_url,
 )
 
@@ -455,7 +456,7 @@ class TestUnsubscribeEdgeCases:
         # Verify the subscription was removed from the registry
         assert "sub-0" not in conn._subscriptions
 
-        conn._closing = True  # stop receiver thread
+        conn._closing.set()  # stop receiver thread
         conn._connected = False
 
 
@@ -647,7 +648,7 @@ class TestReceiveLoop:
         msg = sub.get(timeout=2)
         assert msg is None
 
-        conn._closing = True
+        conn._closing.set()
         conn._connected = False
 
     @patch("sfmc_api.stomp.ws_connect")
@@ -683,7 +684,7 @@ class TestReceiveLoop:
         msg = sub.get(timeout=2)
         assert msg is None
 
-        conn._closing = True
+        conn._closing.set()
         conn._connected = False
 
     @patch("sfmc_api.stomp.ws_connect")
@@ -709,5 +710,119 @@ class TestReceiveLoop:
 
         # No crash, connection is still up
         assert conn._connected
+
+        conn.disconnect()
+
+
+# ── TestSockJSCloseFrame ─────────────────────────────────────────────
+
+
+class TestSockJSCloseFrame:
+    def test_sockjs_close_returns_none(self) -> None:
+        result = _sockjs_decode('c[1000,"Normal closure"]')
+        assert result is None
+
+
+# ── TestErrorPropagation ─────────────────────────────────────────────
+
+
+class TestErrorPropagation:
+    def test_error_frame_raises_in_iteration(self) -> None:
+        q: Queue[dict[str, Any] | StompError | None] = Queue()
+        sub = StompSubscription("sub-0", "/topic/test", q, None)
+        err = StompError("test error")
+        q.put(err)
+        q.put(None)
+        with pytest.raises(StompError, match="test error"):
+            next(iter(sub))
+
+    def test_error_frame_raises_in_get(self) -> None:
+        q: Queue[dict[str, Any] | StompError | None] = Queue()
+        sub = StompSubscription("sub-0", "/topic/test", q, None)
+        err = StompError("get error")
+        q.put(err)
+        with pytest.raises(StompError, match="get error"):
+            sub.get(timeout=1)
+
+
+# ── TestBoundedQueue ─────────────────────────────────────────────────
+
+
+class TestBoundedQueue:
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_subscribe_with_maxsize(self, mock_ws_connect: MagicMock, config: SFMCConfig) -> None:
+        """Verify the maxsize parameter is accepted and applied."""
+        mock_ws = _make_connected_ws(mock_ws_connect)
+        mock_ws.recv.side_effect = [
+            _OPEN,
+            _CONNECTED,
+            TimeoutError,
+            TimeoutError,
+        ]
+
+        conn = StompConnection(config, "tok")
+        conn.connect()
+
+        sub = conn.subscribe("/topic/test", maxsize=5)
+        assert sub._queue.maxsize == 5
+
+        conn.disconnect()
+
+
+# ── TestDisconnectEvent ──────────────────────────────────────────────
+
+
+class TestDisconnectEvent:
+    def test_disconnected_initially_false(self, config: SFMCConfig) -> None:
+        conn = StompConnection(config, "tok")
+        assert not conn.disconnected
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_disconnected_after_close(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig
+    ) -> None:
+        mock_ws = _make_connected_ws(mock_ws_connect)
+        mock_ws.recv.side_effect = [
+            _OPEN,
+            _CONNECTED,
+            TimeoutError,
+        ]
+
+        conn = StompConnection(config, "tok")
+        conn.connect()
+        conn.disconnect()
+
+        assert conn.disconnected
+
+    def test_wait_disconnected_timeout(self, config: SFMCConfig) -> None:
+        conn = StompConnection(config, "tok")
+        result = conn.wait_disconnected(timeout=0.01)
+        assert result is False
+
+
+# ── TestHeartbeatInterval ────────────────────────────────────────────
+
+
+class TestHeartbeatInterval:
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_heartbeat_in_connect_frame(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig
+    ) -> None:
+        """Verify the heartbeat interval appears in the STOMP CONNECT frame."""
+        mock_ws = _make_connected_ws(mock_ws_connect)
+        mock_ws.recv.side_effect = [
+            _OPEN,
+            _CONNECTED,
+            TimeoutError,
+        ]
+
+        conn = StompConnection(config, "tok", heartbeat_interval=10000)
+        conn.connect()
+
+        # Find the STOMP CONNECT frame that was sent
+        calls = mock_ws.send.call_args_list
+        connect_call = calls[0]
+        sent = json.loads(connect_call[0][0])
+        assert "heart-beat:0,10000" in sent[0]
 
         conn.disconnect()

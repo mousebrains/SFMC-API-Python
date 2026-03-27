@@ -29,12 +29,13 @@ import random
 import ssl
 import string
 import threading
-from collections.abc import Generator
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from queue import Queue
 from typing import Any
 
 from websockets.exceptions import ConnectionClosed
+from websockets.sync.client import ClientConnection
 from websockets.sync.client import connect as ws_connect
 
 from .config import SFMCConfig
@@ -111,13 +112,7 @@ def _sockjs_url(config: SFMCConfig, token: str) -> str:
 
     The ``server_id`` is a random 3-digit number and ``session_id``
     is a random string.  The access token is passed as a query
-    parameter — this is a SockJS protocol requirement.
-
-    .. warning::
-
-        The returned URL contains the bearer token.  It must never
-        be logged in full.  See :meth:`StompConnection.connect`
-        which logs only the hostname.
+    parameter.
     """
     server_id = str(random.randint(100, 999))
     session_id = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
@@ -129,7 +124,7 @@ def _sockjs_url(config: SFMCConfig, token: str) -> str:
     )
 
 
-def _sockjs_decode(data: str) -> list[str]:
+def _sockjs_decode(data: str) -> list[str] | None:
     """Decode a SockJS message frame.
 
     SockJS wraps STOMP frames in JSON arrays preceded by a type
@@ -137,10 +132,11 @@ def _sockjs_decode(data: str) -> list[str]:
 
     * ``o`` — open frame (connection established)
     * ``h`` — heartbeat
-    * ``c`` — close frame
+    * ``c`` — close frame (returns ``None`` to signal closure)
     * ``a[...]`` — array of message strings
 
-    Returns a list of STOMP frame strings (may be empty).
+    Returns a list of STOMP frame strings (may be empty), or
+    ``None`` when a SockJS close frame is received.
     """
     if not data:
         return []
@@ -153,7 +149,7 @@ def _sockjs_decode(data: str) -> list[str]:
         return []
     if frame_type == "c":
         logger.debug("SockJS close frame: %s", data)
-        return []
+        return None
     if frame_type == "a":
         try:
             messages = json.loads(data[1:])
@@ -180,12 +176,12 @@ class StompSubscription:
         self,
         sub_id: str,
         topic: str,
-        queue: Queue[dict[str, Any] | None],
+        queue: Queue[dict[str, Any] | StompError | None],
         connection: StompConnection | None = None,
     ) -> None:
         self._id = sub_id
         self._topic = topic
-        self._queue: Queue[dict[str, Any] | None] = queue
+        self._queue: Queue[dict[str, Any] | StompError | None] = queue
         self._connection = connection
         self._closed = False
 
@@ -194,12 +190,14 @@ class StompSubscription:
         """The STOMP topic this subscription is listening to."""
         return self._topic
 
-    def __iter__(self) -> Generator[dict[str, Any], None, None]:
+    def __iter__(self) -> Iterator[dict[str, Any]]:
         """Yield parsed JSON messages until the subscription is closed."""
         while True:
             msg = self._queue.get()
             if msg is None:
                 break
+            if isinstance(msg, StompError):
+                raise msg
             yield msg
 
     def get(self, timeout: float | None = None) -> dict[str, Any] | None:
@@ -209,8 +207,14 @@ class StompSubscription:
             timeout: Seconds to wait.  ``None`` blocks indefinitely.
                 Raises :class:`queue.Empty` if *timeout* expires with
                 no message.
+
+        Raises:
+            StompError: If a STOMP ERROR frame was received.
         """
-        return self._queue.get(timeout=timeout)
+        msg = self._queue.get(timeout=timeout)
+        if isinstance(msg, StompError):
+            raise msg
+        return msg
 
     def close(self) -> None:
         """Unsubscribe from the topic and stop iteration.
@@ -245,20 +249,24 @@ class StompConnection:
                 print(event)
     """
 
-    def __init__(self, config: SFMCConfig, token: str) -> None:
+    def __init__(self, config: SFMCConfig, token: str, heartbeat_interval: int = 0) -> None:
         self._config = config
         self._token = token
-        self._ws: Any = None
+        self._heartbeat_interval = heartbeat_interval
+        self._ws: ClientConnection | None = None
         self._lock = threading.Lock()
         self._subscriptions: dict[str, StompSubscription] = {}
         self._sub_topics: dict[str, str] = {}  # sub_id → topic
         self._next_sub_id = 0
         self._receiver_thread: threading.Thread | None = None
         self._connected = False
-        self._closing = False
+        self._closing = threading.Event()
+        self._disconnect_event = threading.Event()
 
     def __enter__(self) -> StompConnection:
-        if not self._connected:
+        with self._lock:
+            connected = self._connected
+        if not connected:
             self.connect()
         return self
 
@@ -304,24 +312,27 @@ class StompConnection:
             # Send STOMP CONNECT
             connect_frame = _encode_frame(
                 "CONNECT",
-                {"accept-version": "1.2", "heart-beat": "0,0"},
+                {"accept-version": "1.2", "heart-beat": f"0,{self._heartbeat_interval}"},
             )
             self._ws.send(json.dumps([connect_frame]))
             logger.debug("Sent STOMP CONNECT")
 
             # Wait for STOMP CONNECTED
-            resp = self._ws.recv(timeout=10)
-            messages = _sockjs_decode(resp)
+            resp = str(self._ws.recv(timeout=10))
+            messages = _sockjs_decode(resp) or []
             for msg in messages:
                 frame = _parse_frame(msg)
                 if frame.command == "CONNECTED":
-                    self._connected = True
+                    with self._lock:
+                        self._connected = True
                     logger.debug("STOMP CONNECTED: %s", frame.headers)
                     break
                 elif frame.command == "ERROR":
                     raise StompError(f"STOMP connection refused: {frame.body}")
 
-            if not self._connected:
+            with self._lock:
+                connected = self._connected
+            if not connected:
                 raise StompError("Did not receive STOMP CONNECTED frame")
         except StompError:
             self._close_ws()
@@ -340,7 +351,7 @@ class StompConnection:
 
     def disconnect(self) -> None:
         """Send STOMP DISCONNECT and close the WebSocket."""
-        self._closing = True
+        self._closing.set()
 
         # Close all subscriptions
         with self._lock:
@@ -350,7 +361,9 @@ class StompConnection:
         for sub in subs:
             sub.close()
 
-        if self._ws is not None and self._connected:
+        with self._lock:
+            connected = self._connected
+        if self._ws is not None and connected:
             try:
                 disconnect_frame = _encode_frame("DISCONNECT", {"receipt": "disc-1"})
                 self._ws.send(json.dumps([disconnect_frame]))
@@ -358,7 +371,8 @@ class StompConnection:
                 pass  # best-effort disconnect
 
         self._close_ws()
-        self._connected = False
+        with self._lock:
+            self._connected = False
 
         if self._receiver_thread is not None:
             self._receiver_thread.join(timeout=5)
@@ -369,12 +383,30 @@ class StompConnection:
             with contextlib.suppress(Exception):
                 self._ws.close()
 
-    def subscribe(self, topic: str) -> StompSubscription:
+    def wait_disconnected(self, timeout: float | None = None) -> bool:
+        """Block until the connection drops.
+
+        Args:
+            timeout: Seconds to wait.  ``None`` blocks indefinitely.
+
+        Returns:
+            ``True`` if disconnected, ``False`` if the timeout expired.
+        """
+        return self._disconnect_event.wait(timeout=timeout)
+
+    @property
+    def disconnected(self) -> bool:
+        """True if the connection has been lost or closed."""
+        return self._disconnect_event.is_set()
+
+    def subscribe(self, topic: str, maxsize: int = 0) -> StompSubscription:
         """Subscribe to a STOMP topic.
 
         Args:
             topic: The STOMP destination
                 (e.g. ``"/topic/glider-connections-8"``).
+            maxsize: Maximum number of messages to buffer in the
+                subscription queue.  ``0`` (default) means unlimited.
 
         Returns:
             A :class:`StompSubscription` that yields parsed JSON
@@ -383,14 +415,14 @@ class StompConnection:
         Raises:
             StompError: If not connected.
         """
-        if not self._connected:
-            raise StompError("Not connected — call connect() first")
-
         with self._lock:
+            if not self._connected:
+                raise StompError("Not connected — call connect() first")
+
             sub_id = f"sub-{self._next_sub_id}"
             self._next_sub_id += 1
 
-            queue: Queue[dict[str, Any] | None] = Queue()
+            queue: Queue[dict[str, Any] | StompError | None] = Queue(maxsize=maxsize)
             sub = StompSubscription(sub_id, topic, queue, connection=self)
             self._subscriptions[sub_id] = sub
             self._sub_topics[sub_id] = topic
@@ -399,6 +431,7 @@ class StompConnection:
             "SUBSCRIBE",
             {"id": sub_id, "destination": topic},
         )
+        assert self._ws is not None  # guaranteed after connect()
         self._ws.send(json.dumps([subscribe_frame]))
         logger.debug("Subscribed %s to %s", sub_id, topic)
 
@@ -412,8 +445,9 @@ class StompConnection:
         with self._lock:
             self._subscriptions.pop(sub_id, None)
             self._sub_topics.pop(sub_id, None)
+            connected = self._connected
 
-        if self._connected and self._ws is not None:
+        if connected and self._ws is not None:
             try:
                 frame = _encode_frame("UNSUBSCRIBE", {"id": sub_id})
                 self._ws.send(json.dumps([frame]))
@@ -423,20 +457,25 @@ class StompConnection:
 
     def _receive_loop(self) -> None:
         """Background thread: receive WebSocket messages and dispatch."""
-        while not self._closing:
+        assert self._ws is not None  # guaranteed: thread starts after connect()
+        while not self._closing.is_set():
             try:
-                raw = self._ws.recv(timeout=1)
+                raw = str(self._ws.recv(timeout=1))
             except TimeoutError:
                 continue
             except ConnectionClosed:
                 logger.debug("WebSocket connection closed")
                 break
             except Exception as exc:
-                if not self._closing:
+                if not self._closing.is_set():
                     logger.warning("WebSocket recv error: %s", exc)
                 break
 
-            for msg_str in _sockjs_decode(raw):
+            decoded = _sockjs_decode(raw)
+            if decoded is None:
+                logger.info("SockJS close frame received")
+                break
+            for msg_str in decoded:
                 frame = _parse_frame(msg_str)
 
                 if frame.command == "MESSAGE":
@@ -451,10 +490,18 @@ class StompConnection:
                         sub._queue.put(payload)
                 elif frame.command == "ERROR":
                     logger.error("STOMP ERROR: %s", frame.body)
+                    err = StompError(f"STOMP server error: {frame.body}")
+                    with self._lock:
+                        subs = list(self._subscriptions.values())
+                    for sub in subs:
+                        sub._queue.put(err)
                 elif frame.command == "HEARTBEAT":
                     pass
                 else:
                     logger.debug("STOMP frame: %s", frame.command)
+
+        # Signal disconnection
+        self._disconnect_event.set()
 
         # Signal all subscriptions that the connection is gone
         with self._lock:

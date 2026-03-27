@@ -52,7 +52,7 @@ class TestSockJSDecode:
         assert _sockjs_decode("h") == []
 
     def test_close_frame(self) -> None:
-        assert _sockjs_decode('c[1000,"normal"]') == []
+        assert _sockjs_decode('c[1000,"normal"]') is None
 
     def test_array_frame(self) -> None:
         msgs = _sockjs_decode('a["CONNECTED\\nversion:1.2\\n\\n\\u0000"]')
