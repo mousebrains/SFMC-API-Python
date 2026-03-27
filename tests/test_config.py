@@ -230,3 +230,17 @@ class TestMultiHost:
         p = _write_config(tmp_path, {})
         with pytest.raises(ConfigError, match="empty"):
             SFMCConfig.from_file(p)
+
+
+class TestRepr:
+    def test_secret_redacted(self) -> None:
+        cfg = SFMCConfig(host="h", client_id="cid", secret="s3cret_value")
+        r = repr(cfg)
+        assert "s3cret_value" not in r
+        assert "***" in r
+
+    def test_other_fields_present(self) -> None:
+        cfg = SFMCConfig(host="myhost", client_id="cid", secret="sec")
+        r = repr(cfg)
+        assert "myhost" in r
+        assert "cid" in r

@@ -111,7 +111,13 @@ def _sockjs_url(config: SFMCConfig, token: str) -> str:
 
     The ``server_id`` is a random 3-digit number and ``session_id``
     is a random string.  The access token is passed as a query
-    parameter.
+    parameter — this is a SockJS protocol requirement.
+
+    .. warning::
+
+        The returned URL contains the bearer token.  It must never
+        be logged in full.  See :meth:`StompConnection.connect`
+        which logs only the hostname.
     """
     server_id = str(random.randint(100, 999))
     session_id = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))

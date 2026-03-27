@@ -14,6 +14,7 @@ Run ``sfmc-api --help`` for the full list of subcommands.
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import sys
 from pathlib import Path
@@ -449,8 +450,10 @@ def _prompt_host_entry() -> tuple[str, dict[str, Any]]:
         f"\n  Credentials page: https://{hostname}/sfmc/api-access-pages/api-access\n\n"
     )
     client_id = _prompt("Client ID")
-    secret = _prompt("Secret")
-    tls_input = _prompt("Verify TLS certificates? (yes/no)", default="no")
+    secret = getpass.getpass("Secret: ")
+    while not secret:
+        secret = getpass.getpass("Secret: ")
+    tls_input = _prompt("Verify TLS certificates? (yes/no)", default="yes")
     tls_reject = 1 if tls_input.lower() in ("yes", "y", "true", "1") else 0
     download = _prompt("Download directory", required=False)
 

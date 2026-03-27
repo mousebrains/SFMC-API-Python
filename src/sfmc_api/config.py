@@ -63,6 +63,14 @@ class SFMCConfig:
     root_download_path: Path | None = None
     stomp_debug: bool = False
 
+    def __repr__(self) -> str:
+        return (
+            f"SFMCConfig(host={self.host!r}, client_id={self.client_id!r}, "
+            f"secret='***', tls_verify={self.tls_verify!r}, "
+            f"root_download_path={self.root_download_path!r}, "
+            f"stomp_debug={self.stomp_debug!r})"
+        )
+
     @classmethod
     def from_file(
         cls,

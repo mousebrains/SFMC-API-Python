@@ -496,24 +496,34 @@ class TestPromptHostEntry:
     """Tests for _prompt_host_entry()."""
 
     def test_returns_hostname_and_entry(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        inputs = iter(["sfmc.example.com", "myid", "mysecret", "", ""])
+        inputs = iter(["sfmc.example.com", "myid", "", ""])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+        monkeypatch.setattr("getpass.getpass", lambda _: "mysecret")
         hostname, entry = _prompt_host_entry()
         assert hostname == "sfmc.example.com"
         assert entry["apiCredentials"]["clientId"] == "myid"
         assert entry["apiCredentials"]["secret"] == "mysecret"
-        assert entry["tlsRejectUnauthorized"] == 0
+        assert entry["tlsRejectUnauthorized"] == 1  # default is now "yes"
         assert "rootDownloadPath" not in entry
 
     def test_tls_yes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        inputs = iter(["sfmc.example.com", "myid", "mysecret", "yes", ""])
+        inputs = iter(["sfmc.example.com", "myid", "yes", ""])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+        monkeypatch.setattr("getpass.getpass", lambda _: "mysecret")
         hostname, entry = _prompt_host_entry()
         assert entry["tlsRejectUnauthorized"] == 1
 
-    def test_with_download_dir(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        inputs = iter(["sfmc.example.com", "myid", "mysecret", "", "/tmp/downloads"])
+    def test_tls_no(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        inputs = iter(["sfmc.example.com", "myid", "no", ""])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+        monkeypatch.setattr("getpass.getpass", lambda _: "mysecret")
+        hostname, entry = _prompt_host_entry()
+        assert entry["tlsRejectUnauthorized"] == 0
+
+    def test_with_download_dir(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        inputs = iter(["sfmc.example.com", "myid", "", "/tmp/downloads"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+        monkeypatch.setattr("getpass.getpass", lambda _: "mysecret")
         hostname, entry = _prompt_host_entry()
         assert entry["rootDownloadPath"] == "/tmp/downloads"
 
