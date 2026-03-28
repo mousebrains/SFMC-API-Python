@@ -108,6 +108,7 @@ class SFMCClient:
         self._http: httpx.Client = build_http_client(self._config)
         self._token: str | None = None
         self._token_lock = threading.Lock()
+        self._auth_lock = threading.Lock()
 
     # ── Context manager ──────────────────────────────────────────────
 
@@ -156,10 +157,21 @@ class SFMCClient:
             self._token = token
 
     def _ensure_auth(self) -> None:
-        """Sign in lazily — only if no token is cached yet."""
+        """Sign in lazily — only if no token is cached yet.
+
+        Uses an ``_auth_lock`` to ensure only one thread performs
+        sign-in when multiple threads race on an unauthenticated client.
+        """
+        # Fast path ��� already authenticated.
         with self._token_lock:
-            needs_auth = self._token is None
-        if needs_auth:
+            if self._token is not None:
+                return
+        # Slow path — serialize authentication attempts.
+        with self._auth_lock:
+            # Double-check after acquiring the auth lock.
+            with self._token_lock:
+                if self._token is not None:
+                    return
             self.authenticate()
 
     def _auth_headers(self) -> dict[str, str]:

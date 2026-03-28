@@ -447,7 +447,7 @@ class TestHandleStream:
         client.open_stream.return_value.__enter__ = MagicMock(return_value=stomp)
         client.open_stream.return_value.__exit__ = MagicMock(return_value=False)
 
-        def raise_interrupt():
+        def raise_interrupt() -> None:
             raise KeyboardInterrupt
 
         sub = MagicMock()
@@ -515,14 +515,14 @@ class TestPromptHostEntry:
     def test_tls_yes(self, mock_gp: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
         inputs = iter(["sfmc.example.com", "myid", "yes", ""])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
-        hostname, entry = _prompt_host_entry()
+        _hostname, entry = _prompt_host_entry()
         assert entry["tlsRejectUnauthorized"] == 1
 
     @patch("getpass.getpass", return_value="mysecret")
     def test_tls_no(self, mock_gp: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
         inputs = iter(["sfmc.example.com", "myid", "no", ""])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
-        hostname, entry = _prompt_host_entry()
+        _hostname, entry = _prompt_host_entry()
         assert entry["tlsRejectUnauthorized"] == 0
 
     @patch("getpass.getpass", return_value="mysecret")
@@ -533,7 +533,7 @@ class TestPromptHostEntry:
     ) -> None:
         inputs = iter(["sfmc.example.com", "myid", "", "/tmp/downloads"])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
-        hostname, entry = _prompt_host_entry()
+        _hostname, entry = _prompt_host_entry()
         assert entry["rootDownloadPath"] == "/tmp/downloads"
 
 

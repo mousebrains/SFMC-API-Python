@@ -38,6 +38,16 @@ sfmc-api --compact get-glider-details osusim     # single-line JSON
 sfmc-api --help                                  # see all subcommands
 ```
 
+### Additional Tools
+
+```bash
+# Monitor a glider's real-time dialog output and script events
+sfmc-monitor-glider --host gliderfmc1.ceoas.oregonstate.edu osusim dialog.log
+
+# Run live integration tests against an SFMC server
+sfmc-api-test --host gliderfmc1.ceoas.oregonstate.edu --glider osusim
+```
+
 ## Configuration
 
 Credentials are loaded from `~/.config/sfmc/credentials.json` by default.
@@ -50,8 +60,7 @@ Credentials are loaded from `~/.config/sfmc/credentials.json` by default.
         "apiCredentials": {
             "clientId": "YOUR_CLIENT_ID",
             "secret": "YOUR_SECRET"
-        },
-        "tlsRejectUnauthorized": 0
+        }
     },
     "sfmc-backup.example.com": {
         "apiCredentials": {

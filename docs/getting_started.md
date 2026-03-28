@@ -26,9 +26,7 @@ by hostname:
             "clientId": "YOUR_CLIENT_ID",
             "secret": "YOUR_SECRET"
         },
-        "tlsRejectUnauthorized": 0,
-        "rootDownloadPath": "/tmp/sfmc-downloads",
-        "stompDebug": false
+        "rootDownloadPath": "/tmp/sfmc-downloads"
     }
 }
 ```

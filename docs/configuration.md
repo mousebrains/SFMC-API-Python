@@ -47,8 +47,7 @@ The credentials file supports multiple SFMC servers, keyed by hostname:
         "apiCredentials": {
             "clientId": "your-client-id",
             "secret": "your-secret"
-        },
-        "tlsRejectUnauthorized": 0
+        }
     },
     "sfmc-backup.example.com": {
         "apiCredentials": {

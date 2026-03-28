@@ -56,6 +56,7 @@ class TestSockJSDecode:
 
     def test_array_frame(self) -> None:
         msgs = _sockjs_decode('a["CONNECTED\\nversion:1.2\\n\\n\\u0000"]')
+        assert msgs is not None
         assert len(msgs) == 1
         assert "CONNECTED" in msgs[0]
 

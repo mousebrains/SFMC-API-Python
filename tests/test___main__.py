@@ -1,10 +1,10 @@
 """Tests for ``python -m sfmc_api`` entry point."""
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 @patch("sfmc_api.cli.main")
-def test_main_module_calls_cli_main(mock_main):
+def test_main_module_calls_cli_main(mock_main: MagicMock) -> None:
     """Running ``python -m sfmc_api`` calls cli.main()."""
     import importlib
 

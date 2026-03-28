@@ -40,7 +40,7 @@ class TestStompSubscription:
     def test_iterate_messages(self) -> None:
         from queue import Queue
 
-        q: Queue[dict[str, Any] | None] = Queue()
+        q: Queue[dict[str, Any] | StompError | None] = Queue()
         sub = StompSubscription("sub-0", "/topic/test", q)
 
         q.put({"event": "a"})
@@ -55,7 +55,7 @@ class TestStompSubscription:
     def test_get_with_timeout(self) -> None:
         from queue import Queue
 
-        q: Queue[dict[str, Any] | None] = Queue()
+        q: Queue[dict[str, Any] | StompError | None] = Queue()
         sub = StompSubscription("sub-0", "/topic/test", q)
 
         with pytest.raises(Empty):
@@ -64,7 +64,7 @@ class TestStompSubscription:
     def test_get_returns_message(self) -> None:
         from queue import Queue
 
-        q: Queue[dict[str, Any] | None] = Queue()
+        q: Queue[dict[str, Any] | StompError | None] = Queue()
         sub = StompSubscription("sub-0", "/topic/test", q)
         q.put({"data": "hello"})
 
@@ -75,7 +75,7 @@ class TestStompSubscription:
     def test_close_signals_none(self) -> None:
         from queue import Queue
 
-        q: Queue[dict[str, Any] | None] = Queue()
+        q: Queue[dict[str, Any] | StompError | None] = Queue()
         sub = StompSubscription("sub-0", "/topic/test", q)
 
         sub.close()
@@ -85,7 +85,7 @@ class TestStompSubscription:
     def test_close_idempotent(self) -> None:
         from queue import Queue
 
-        q: Queue[dict[str, Any] | None] = Queue()
+        q: Queue[dict[str, Any] | StompError | None] = Queue()
         sub = StompSubscription("sub-0", "/topic/test", q)
 
         sub.close()
@@ -95,7 +95,7 @@ class TestStompSubscription:
     def test_topic_property(self) -> None:
         from queue import Queue
 
-        q: Queue[dict[str, Any] | None] = Queue()
+        q: Queue[dict[str, Any] | StompError | None] = Queue()
         sub = StompSubscription("sub-0", "/topic/glider-connections-8", q)
         assert sub.topic == "/topic/glider-connections-8"
 
@@ -104,7 +104,7 @@ class TestStompSubscription:
         from queue import Queue
 
         conn = MagicMock()
-        q: Queue[dict[str, Any] | None] = Queue()
+        q: Queue[dict[str, Any] | StompError | None] = Queue()
         sub = StompSubscription("sub-7", "/topic/test", q, connection=conn)
         sub.close()
         conn._unsubscribe.assert_called_once_with("sub-7")
@@ -113,7 +113,7 @@ class TestStompSubscription:
         """close() works when no connection is set (e.g. during disconnect)."""
         from queue import Queue
 
-        q: Queue[dict[str, Any] | None] = Queue()
+        q: Queue[dict[str, Any] | StompError | None] = Queue()
         sub = StompSubscription("sub-0", "/topic/test", q, connection=None)
         sub.close()
         assert q.get_nowait() is None

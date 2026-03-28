@@ -527,7 +527,10 @@ class TestUploadFiles:
 # ── Download single file ─────────────────────────────────────────
 
 
-def _make_stream_context(chunks: list[bytes] | None = None, raise_on_iter: bool = False):
+def _make_stream_context(
+    chunks: list[bytes] | None = None,
+    raise_on_iter: bool = False,
+) -> MagicMock:
     """Build a mock stream context manager for self._http.stream()."""
     mock_stream_response = MagicMock()
     mock_stream_response.is_success = True

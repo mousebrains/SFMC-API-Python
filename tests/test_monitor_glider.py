@@ -9,12 +9,12 @@ from queue import Queue
 from typing import Any
 
 from sfmc_api.monitor_glider import _log_with_time, monitor_dialog, ordered_dialog
-from sfmc_api.stomp import StompSubscription
+from sfmc_api.stomp import StompError, StompSubscription
 
 
 def _make_sub(messages: list[dict[str, Any]]) -> StompSubscription:
     """Create a StompSubscription with pre-loaded messages."""
-    q: Queue[dict[str, Any] | None] = Queue()
+    q: Queue[dict[str, Any] | StompError | None] = Queue()
     for msg in messages:
         q.put(msg)
     q.put(None)  # sentinel
@@ -131,7 +131,7 @@ class TestLogWithTime:
 
 class TestMonitorDialogReassembly:
     def test_reassembles_lines(self) -> None:
-        q: Queue[dict[str, Any] | None] = Queue()
+        q: Queue[dict[str, Any] | StompError | None] = Queue()
         sub = StompSubscription("sub-0", "/topic/test", q)
 
         # Simulate fragmented data: "hello world\r\n" split across chunks
