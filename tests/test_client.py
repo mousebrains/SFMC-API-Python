@@ -1048,3 +1048,24 @@ class TestRegistrationAndDeployment:
         assert call_args[0][1] == "/v1/update-active-deployment-start/tg"
         # Check startDateTime param
         assert "params" in call_args.kwargs
+
+
+class TestPathValidation:
+    """Tests for _validate_path_segment."""
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        ["../../etc", "foo/bar", "", "ok\x00bad", "../passwd"],
+    )
+    def test_rejects_bad_path_segments(self, bad_value: str) -> None:
+        from sfmc_api.client import _validate_path_segment
+
+        with pytest.raises(ValueError):
+            _validate_path_segment(bad_value, "test")
+
+    def test_accepts_valid_segment(self) -> None:
+        from sfmc_api.client import _validate_path_segment
+
+        assert _validate_path_segment("osusim", "glider") == "osusim"
+        assert _validate_path_segment("from-glider", "folder") == "from-glider"
+        assert _validate_path_segment("data.sbd", "file") == "data.sbd"

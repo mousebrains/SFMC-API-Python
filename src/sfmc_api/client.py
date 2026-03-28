@@ -232,9 +232,11 @@ class SFMCClient:
             # Token expired — refresh once
             if response.status_code == 401 and attempt == 0:
                 logger.debug("Got 401, refreshing auth token")
-                self._token = None
+                with self._token_lock:
+                    self._token = None
                 self.authenticate()
-                headers["Authorization"] = f"Bearer {self._token}"
+                with self._token_lock:
+                    headers["Authorization"] = f"Bearer {self._token}"
                 continue
 
             # Rate limited — use server-provided delay

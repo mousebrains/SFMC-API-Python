@@ -31,7 +31,7 @@ import string
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from queue import Queue
+from queue import Full, Queue
 from typing import Any
 
 from websockets.exceptions import ConnectionClosed
@@ -487,14 +487,21 @@ class StompConnection:
                             payload: dict[str, Any] = json.loads(frame.body)
                         except json.JSONDecodeError:
                             payload = {"_raw": frame.body}
-                        sub._queue.put(payload)
+                        try:
+                            sub._queue.put_nowait(payload)
+                        except Full:
+                            logger.warning(
+                                "Subscription %s queue full, dropping message",
+                                sub._id,
+                            )
                 elif frame.command == "ERROR":
                     logger.error("STOMP ERROR: %s", frame.body)
                     err = StompError(f"STOMP server error: {frame.body}")
                     with self._lock:
                         subs = list(self._subscriptions.values())
                     for sub in subs:
-                        sub._queue.put(err)
+                        with contextlib.suppress(Full):
+                            sub._queue.put_nowait(err)
                 elif frame.command == "HEARTBEAT":
                     pass
                 else:

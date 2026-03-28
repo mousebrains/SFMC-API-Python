@@ -325,7 +325,7 @@ def main() -> None:
                     dialog_sub.close()
                     script_sub.close()
                     break
-                if not dialog_thread.is_alive() and not script_thread.is_alive():
+                if not dialog_thread.is_alive() or not script_thread.is_alive():
                     info_log.warning("Stream disconnected")
                     break
 
