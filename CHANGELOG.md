@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `sfmc-follow` CLI command and `follow_glider()` API for autonomous
+  glider navigation using pluggable follower classes
+- `BaseFollower` abstract class and `load_follower_class()` for writing
+  and dynamically loading follower plugins from Python files
+- `DialogParser` state-machine that parses glider dialog output into
+  structured `SurfacingEvent` objects (vehicle name, GPS, sensors,
+  timestamps)
+- `generate_goto_ma()` for generating `goto_l*.ma` waypoint files
+  matching the Slocum glider firmware format
+- Coordinate conversion utilities: `dddmm_to_decimal()`,
+  `decimal_to_dddmm()`, `km_to_degrees()`
+- `SFMCClient.upload_glider_file_contents()` for uploading
+  programmatically generated files (in-memory content via `io.BytesIO`)
+- Simulation modes for `sfmc-follow`:
+  - `--replay LOGFILE` replays dialog from `sfmc-monitor-glider` logs
+  - `--dry-run` prints generated files instead of uploading
+  - Combined `--replay --dry-run` for fully offline development
+- Unified pipeline: both live STOMP and replay feed through the same
+  `StompSubscription` -> `ordered_dialog` -> `DialogParser` path
+- Drifter follower example (`examples/drifter_follower.py`) with
+  current-compensated waypoint generation from NetCDF drifter positions
+- Rotating log file support (`--logfile`, `--log-max-size`,
+  `--log-backup-count`, `--log-level`)
+- Data-flow SVG diagram (`docs/follow_dataflow.svg`)
+- Optional dependency groups: `[follow]` (pyyaml), `[drifter]`
+  (pyyaml + netCDF4 + numpy)
+- 120+ new tests (415 total), 87% coverage
+
 ## [0.1.0] - 2026-03-26
 
 ### Added

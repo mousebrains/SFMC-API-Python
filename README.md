@@ -38,12 +38,41 @@ sfmc-api --compact get-glider-details osusim     # single-line JSON
 sfmc-api --help                                  # see all subcommands
 ```
 
-### Additional Tools
+### Monitor a Glider
+
+Stream a glider's real-time dialog output and script state transitions
+to the console and/or a log file:
 
 ```bash
-# Monitor a glider's real-time dialog output and script events
-sfmc-monitor-glider --host gliderfmc1.ceoas.oregonstate.edu osusim dialog.log
+sfmc-monitor-glider osusim dialog.log
+sfmc-monitor-glider --host gliderfmc1.ceoas.oregonstate.edu osusim
+```
 
+See [docs/monitor_glider.md](docs/monitor_glider.md) for details.
+
+### Follow a Glider (Autonomous Navigation)
+
+Run a follower plugin that watches each surfacing, generates new
+navigation files (e.g. waypoint plans), and uploads them to SFMC:
+
+```bash
+# Offline test: replay a log file, print what the follower generates
+sfmc-follow --glider osu685 --follower examples/drifter_follower.py \
+            --config examples/drifter_config.yaml \
+            --replay dialog.log --dry-run
+
+# Live: monitor the glider and upload generated files
+sfmc-follow --glider osu685 --follower examples/drifter_follower.py \
+            --config examples/drifter_config.yaml
+```
+
+The included drifter follower example tracks a drifting target using
+a NetCDF position file and generates `goto_l*.ma` waypoint plans.
+See [docs/follow_glider.md](docs/follow_glider.md) for the full guide.
+
+### Integration Tests
+
+```bash
 # Run live integration tests against an SFMC server
 sfmc-api-test --host gliderfmc1.ceoas.oregonstate.edu --glider osusim
 ```
@@ -92,6 +121,8 @@ See [docs/configuration.md](docs/configuration.md) for full details.
 - [Script Control](docs/script_control.md) -- script assignment and commands
 - [File Operations](docs/file_operations.md) -- upload, download, and delete
 - [Real-Time Streaming](docs/streaming.md) -- STOMP over SockJS event streaming
+- [Monitor Glider](docs/monitor_glider.md) -- real-time dialog and script monitoring
+- [Follow Glider](docs/follow_glider.md) -- autonomous follower plugins and simulation modes
 
 ## License
 
