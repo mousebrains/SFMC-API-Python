@@ -52,4 +52,4 @@ __all__ = [
     "load_follower_class",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
