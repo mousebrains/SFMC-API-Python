@@ -186,7 +186,57 @@ def _parse_log_line(line: str) -> str | None:
     return stripped
 
 
-# ── Dialog reader thread (live STOMP) ───────────────────────────────
+# ── File replay subscription ────────────────────────────────────────
+
+
+def _file_reader(
+    replay_path: str | Path,
+    queue: Queue[dict[str, Any] | None],
+    stop: threading.Event,
+) -> None:
+    """Background thread: read a log file and feed lines into a queue.
+
+    Each dialog line is wrapped as ``{"data": "line\\r\\n"}`` — the
+    same format that the STOMP subscription produces — so the
+    downstream pipeline (:func:`ordered_dialog`, :func:`_read_dialog`)
+    works identically for both live and replay modes.
+
+    Non-DIALOG lines (SCRIPT, INFO, etc.) are filtered out here.
+    """
+    with open(replay_path, encoding="utf-8", errors="replace") as f:
+        for raw_line in f:
+            if stop.is_set():
+                break
+            dialog_text = _parse_log_line(raw_line)
+            if dialog_text is None:
+                continue
+            queue.put({"data": dialog_text + "\r\n"})
+    queue.put(None)  # Sentinel — signals end of stream.
+
+
+def _open_replay(
+    replay_path: str | Path,
+    stop: threading.Event,
+) -> tuple[StompSubscription, threading.Thread]:
+    """Create a StompSubscription backed by a log-file reader thread.
+
+    Returns the subscription (which can be iterated exactly like a
+    live STOMP subscription) and the reader thread (already started).
+    """
+    from sfmc_api.stomp import StompError
+
+    q: Queue[dict[str, Any] | StompError | None] = Queue()
+    thread = threading.Thread(
+        target=_file_reader,
+        args=(replay_path, q, stop),
+        daemon=True,
+        name="file-reader",
+    )
+    thread.start()
+    return StompSubscription("replay-0", "/replay", q), thread
+
+
+# ── Dialog reader thread (shared by live and replay) ────────────────
 
 
 def _read_dialog(
@@ -195,13 +245,27 @@ def _read_dialog(
     queue_in: Queue[SurfacingEvent | None],
     dialog_log: logging.Logger | None,
     stop: threading.Event,
+    event_interval: float = 0.0,
 ) -> None:
-    """Read STOMP dialog output, parse surfacings, and feed the follower.
+    """Read dialog output, parse surfacings, and feed the follower.
 
     This function runs in its own thread.  It reassembles fragmented
     dialog lines (same logic as :func:`monitor_glider.monitor_dialog`),
     logs each line, and feeds them to *parser*.  When *parser* produces
     a :class:`SurfacingEvent`, it is put on *queue_in* for the follower.
+
+    The *sub* parameter can be either a live STOMP subscription or a
+    replay subscription from :func:`_open_replay` — the downstream
+    logic is identical.
+
+    Args:
+        sub: A :class:`StompSubscription` (live or replay).
+        parser: The :class:`DialogParser` instance.
+        queue_in: Queue to deliver :class:`SurfacingEvent` objects.
+        dialog_log: Logger for raw dialog lines (or ``None``).
+        stop: Event to signal shutdown.
+        event_interval: Seconds to wait after each surfacing event
+            (used in replay mode to simulate real-time pacing).
     """
     buf = ""
     line_start: float = 0.0
@@ -223,6 +287,8 @@ def _read_dialog(
                 event = parser.feed_line(line)
                 if event is not None:
                     queue_in.put(event)
+                    if event_interval > 0 and not stop.is_set():
+                        stop.wait(timeout=event_interval)
             line_start = time.time()
 
     # Flush remaining buffer.
@@ -237,61 +303,6 @@ def _read_dialog(
     event = parser.flush()
     if event is not None:
         queue_in.put(event)
-
-
-# ── Replay reader thread (log file) ────────────────────────────────
-
-
-def _replay_dialog(
-    replay_path: str | Path,
-    parser: DialogParser,
-    queue_in: Queue[SurfacingEvent | None],
-    info_log: logging.Logger,
-    interval: float,
-    stop: threading.Event,
-) -> None:
-    """Read dialog lines from a log file and feed them to the parser.
-
-    Surfacing events are delivered with *interval* seconds between
-    each one, simulating real-time surfacings.
-
-    The log file can be a ``sfmc-monitor-glider`` output file (with
-    timestamp + logger prefix) or a raw dialog text file.
-    """
-    event_count = 0
-    with open(replay_path, encoding="utf-8", errors="replace") as f:
-        for raw_line in f:
-            if stop.is_set():
-                break
-            dialog_text = _parse_log_line(raw_line)
-            if dialog_text is None:
-                continue
-            event = parser.feed_line(dialog_text)
-            if event is not None:
-                event_count += 1
-                info_log.info(
-                    "Replay event %d: %s at %.4f, %.4f",
-                    event_count,
-                    event.vehicle_name or "?",
-                    event.gps_lat or 0.0,
-                    event.gps_lon or 0.0,
-                )
-                queue_in.put(event)
-                if not stop.is_set():
-                    stop.wait(timeout=interval)
-
-    # Flush any remaining partial surfacing.
-    event = parser.flush()
-    if event is not None:
-        event_count += 1
-        info_log.info(
-            "Replay event %d (final flush): %s",
-            event_count,
-            event.vehicle_name or "?",
-        )
-        queue_in.put(event)
-
-    info_log.info("Replay complete: %d surfacing events", event_count)
 
 
 # ── Upload thread ───────────────────────────────────────────────────
@@ -556,103 +567,68 @@ def follow_glider(
 
     parser = DialogParser()
 
-    # ── Replay mode ─────────────────────────────────────────────
+    # ── Create the dialog subscription (live or replay) ─────────
+    #
+    # Both paths produce a StompSubscription that yields dicts with
+    # a "data" key.  The downstream pipeline (_read_dialog →
+    # ordered_dialog → DialogParser) is identical for both.
+    #
+    file_reader_thread: threading.Thread | None = None
+    stomp_ctx: Any = None
+
     if replay:
-        replay_thread = threading.Thread(
-            target=_replay_dialog,
-            args=(replay, parser, queue_in, info_log, replay_interval, stop),
-            daemon=True,
-            name="dialog-replay",
-        )
-
-        if dry_run:
-            output_thread = threading.Thread(
-                target=_print_files,
-                args=(queue_out, upload_log, stop),
-                daemon=True,
-                name="dry-run-printer",
-            )
-        else:
-            output_thread = threading.Thread(
-                target=_upload_files,
-                args=(client, glider_name, queue_out, upload_log, stop),
-                daemon=True,
-                name="file-uploader",
-            )
-
-        replay_thread.start()
-        follower.start()
-        output_thread.start()
-
-        info_log.info("Replay started. Press Ctrl-C to stop.")
-
-        while not stop.is_set():
-            try:
-                stop.wait(timeout=5)
-            except KeyboardInterrupt:
-                info_log.info("Stopping...")
-                stop.set()
-                break
-            if not replay_thread.is_alive():
-                # Replay finished naturally -- let pipeline drain.
-                info_log.info("Replay file exhausted, draining pipeline...")
-                follower.shutdown()
-                follower.join(timeout=10)
-                queue_out.put(None)
-                output_thread.join(timeout=10)
-                break
-            if not follower.is_alive():
-                info_log.warning("Follower thread died")
-                stop.set()
-                break
-
-        if stop.is_set():
-            follower.shutdown()
-            queue_out.put(None)
-            replay_thread.join(timeout=5)
-            follower.join(timeout=5)
-            output_thread.join(timeout=5)
-
-        info_log.info("Done.")
-        return
-
-    # ── Live mode ───────────────────────────────────────────────
-    assert client is not None
-    info_log.info("Opening STOMP stream...")
-    with client.open_stream() as stomp:
+        if not Path(replay).is_file():
+            info_log.error("Replay file not found: %s", replay)
+            return
+        dialog_sub, file_reader_thread = _open_replay(replay, stop)
+        info_log.info("Replaying from %s", replay)
+    else:
+        assert client is not None
+        info_log.info("Opening STOMP stream...")
+        stomp_ctx = client.open_stream()
+        stomp = stomp_ctx.__enter__()
         dialog_sub = client.subscribe_glider_output(glider_name, stomp)
         info_log.info("Subscribed to dialog output")
 
-        dialog_thread = threading.Thread(
-            target=_read_dialog,
-            args=(dialog_sub, parser, queue_in, dialog_log, stop),
+    # ── Start the unified pipeline ──────────────────────────────
+    dialog_thread = threading.Thread(
+        target=_read_dialog,
+        args=(
+            dialog_sub,
+            parser,
+            queue_in,
+            dialog_log,
+            stop,
+            replay_interval if replay else 0.0,
+        ),
+        daemon=True,
+        name="dialog-reader",
+    )
+
+    if dry_run:
+        output_thread = threading.Thread(
+            target=_print_files,
+            args=(queue_out, upload_log, stop),
             daemon=True,
-            name="dialog-reader",
+            name="dry-run-printer",
+        )
+    else:
+        output_thread = threading.Thread(
+            target=_upload_files,
+            args=(client, glider_name, queue_out, upload_log, stop),
+            daemon=True,
+            name="file-uploader",
         )
 
-        if dry_run:
-            output_thread = threading.Thread(
-                target=_print_files,
-                args=(queue_out, upload_log, stop),
-                daemon=True,
-                name="dry-run-printer",
-            )
-        else:
-            output_thread = threading.Thread(
-                target=_upload_files,
-                args=(client, glider_name, queue_out, upload_log, stop),
-                daemon=True,
-                name="file-uploader",
-            )
-
+    try:
         dialog_thread.start()
         follower.start()
         output_thread.start()
 
-        info_log.info(
-            "All threads started%s. Press Ctrl-C to stop.",
-            " (dry-run)" if dry_run else "",
-        )
+        mode_desc = "replay" if replay else "live"
+        if dry_run:
+            mode_desc += " + dry-run"
+        info_log.info("Pipeline started (%s). Press Ctrl-C to stop.", mode_desc)
 
         # ── Wait loop ───────────────────────────────────────────
         while not stop.is_set():
@@ -662,25 +638,41 @@ def follow_glider(
                 info_log.info("Stopping...")
                 stop.set()
                 break
+
             if not dialog_thread.is_alive():
-                info_log.warning("Dialog stream disconnected")
-                stop.set()
+                if replay:
+                    # Replay finished naturally — drain the pipeline.
+                    info_log.info("Replay exhausted, draining pipeline...")
+                    follower.shutdown()
+                    follower.join(timeout=10)
+                    queue_out.put(None)
+                    output_thread.join(timeout=10)
+                else:
+                    info_log.warning("Dialog stream disconnected")
+                    stop.set()
                 break
+
             if not follower.is_alive():
                 info_log.warning("Follower thread died")
                 stop.set()
                 break
 
         # ── Cleanup ─────────────────────────────────────────────
-        dialog_sub.close()
-        follower.shutdown()
-        queue_out.put(None)
+        if stop.is_set():
+            dialog_sub.close()
+            follower.shutdown()
+            queue_out.put(None)
+            dialog_thread.join(timeout=5)
+            if file_reader_thread is not None:
+                file_reader_thread.join(timeout=5)
+            follower.join(timeout=5)
+            output_thread.join(timeout=5)
 
-        dialog_thread.join(timeout=5)
-        follower.join(timeout=5)
-        output_thread.join(timeout=5)
+    finally:
+        if stomp_ctx is not None:
+            stomp_ctx.__exit__(None, None, None)
 
-    info_log.info("Disconnected.")
+    info_log.info("Done.")
 
 
 # ── CLI ─────────────────────────────────────────────────────────────

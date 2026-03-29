@@ -15,10 +15,10 @@ import pytest
 from sfmc_api import SFMCClient
 from sfmc_api.dialog_parser import DialogParser, SurfacingEvent
 from sfmc_api.follow_glider import (
+    _open_replay,
     _parse_log_line,
     _print_files,
     _read_dialog,
-    _replay_dialog,
     _upload_files,
     build_parser,
     follow_glider,
@@ -203,23 +203,26 @@ class TestReadDialog:
         assert event.vehicle_name == "frag"
 
 
-# ── Replay reader tests ────────────────────────────────────────────
+# ── Replay subscription tests ──────────────────────────────────────
 
 
-class TestReplayDialog:
-    """Test the _replay_dialog thread function."""
+class TestOpenReplay:
+    """Test _open_replay: log file → StompSubscription via shared pipeline."""
 
-    def test_produces_event_from_log_file(self, tmp_path: Path) -> None:
+    def test_replay_through_full_pipeline(self, tmp_path: Path) -> None:
+        """Log file → _open_replay → _read_dialog → SurfacingEvent."""
         log_file = tmp_path / "dialog.log"
         log_file.write_text(SAMPLE_LOG_LINES)
 
+        stop = threading.Event()
+        sub, reader_thread = _open_replay(log_file, stop)
+
+        # Feed through the same _read_dialog used by live mode.
         parser = DialogParser()
         q_in: Queue[SurfacingEvent | None] = Queue()
-        stop = threading.Event()
-        info_log = logging.getLogger("test.replay")
+        _read_dialog(sub, parser, q_in, None, stop)
 
-        _replay_dialog(log_file, parser, q_in, info_log, interval=0.0, stop=stop)
-
+        reader_thread.join(timeout=5)
         event = q_in.get(timeout=2)
         assert event is not None
         assert event.vehicle_name == "testbot"
@@ -241,19 +244,19 @@ class TestReplayDialog:
         log_file = tmp_path / "raw.log"
         log_file.write_text(raw)
 
+        stop = threading.Event()
+        sub, reader_thread = _open_replay(log_file, stop)
         parser = DialogParser()
         q_in: Queue[SurfacingEvent | None] = Queue()
-        stop = threading.Event()
-        info_log = logging.getLogger("test.replay.raw")
+        _read_dialog(sub, parser, q_in, None, stop)
 
-        _replay_dialog(log_file, parser, q_in, info_log, interval=0.0, stop=stop)
-
+        reader_thread.join(timeout=5)
         event = q_in.get(timeout=2)
         assert event is not None
         assert event.vehicle_name == "rawbot"
 
     def test_skips_non_dialog_lines(self, tmp_path: Path) -> None:
-        """SCRIPT, INFO, FOLLOW lines are filtered out."""
+        """SCRIPT, INFO, FOLLOW lines are filtered out by _file_reader."""
         log = (
             "2026-03-28T20:40:38 sfmc.g.FOLLOW  info\n"
             "2026-03-28T20:40:38 sfmc.g.SCRIPT  script\n"
@@ -267,51 +270,49 @@ class TestReplayDialog:
         log_file = tmp_path / "mixed.log"
         log_file.write_text(log)
 
+        stop = threading.Event()
+        sub, reader_thread = _open_replay(log_file, stop)
         parser = DialogParser()
         q_in: Queue[SurfacingEvent | None] = Queue()
-        stop = threading.Event()
-        info_log = logging.getLogger("test.replay.filter")
+        _read_dialog(sub, parser, q_in, None, stop)
 
-        _replay_dialog(log_file, parser, q_in, info_log, interval=0.0, stop=stop)
-
+        reader_thread.join(timeout=5)
         event = q_in.get(timeout=2)
         assert event is not None
         assert event.vehicle_name == "filtered"
-
-    def test_respects_stop_event(self, tmp_path: Path) -> None:
-        # Write a large log to ensure the replay doesn't finish instantly.
-        lines = SAMPLE_LOG_LINES * 100
-        log_file = tmp_path / "big.log"
-        log_file.write_text(lines)
-
-        parser = DialogParser()
-        q_in: Queue[SurfacingEvent | None] = Queue()
-        stop = threading.Event()
-        info_log = logging.getLogger("test.replay.stop")
-
-        # Use a long interval so stop has time to fire.
-        thread = threading.Thread(
-            target=_replay_dialog,
-            args=(log_file, parser, q_in, info_log, 60.0, stop),
-        )
-        thread.start()
-        time.sleep(0.2)
-        stop.set()
-        thread.join(timeout=5)
-        assert not thread.is_alive()
 
     def test_empty_log_file(self, tmp_path: Path) -> None:
         log_file = tmp_path / "empty.log"
         log_file.write_text("")
 
+        stop = threading.Event()
+        sub, reader_thread = _open_replay(log_file, stop)
         parser = DialogParser()
         q_in: Queue[SurfacingEvent | None] = Queue()
-        stop = threading.Event()
-        info_log = logging.getLogger("test.replay.empty")
+        _read_dialog(sub, parser, q_in, None, stop)
 
-        _replay_dialog(log_file, parser, q_in, info_log, interval=0.0, stop=stop)
-
+        reader_thread.join(timeout=5)
         assert q_in.empty()
+
+    def test_event_interval_delays_events(self, tmp_path: Path) -> None:
+        """event_interval causes a pause after each SurfacingEvent."""
+        # Two surfacings in the log.
+        two_events = SAMPLE_LOG_LINES + SAMPLE_LOG_LINES
+        log_file = tmp_path / "two.log"
+        log_file.write_text(two_events)
+
+        stop = threading.Event()
+        sub, reader_thread = _open_replay(log_file, stop)
+        parser = DialogParser()
+        q_in: Queue[SurfacingEvent | None] = Queue()
+
+        start = time.monotonic()
+        _read_dialog(sub, parser, q_in, None, stop, event_interval=0.5)
+        elapsed = time.monotonic() - start
+
+        reader_thread.join(timeout=5)
+        # Should have waited ~0.5s after the first event.
+        assert elapsed >= 0.4
 
 
 # ── Dry-run printer tests ──────────────────────────────────────────
