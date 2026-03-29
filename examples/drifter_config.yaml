@@ -1,0 +1,49 @@
+# Drifter follower configuration for sfmc-follow.
+#
+# Usage:
+#   sfmc-follow --glider osu685 \
+#               --follower examples/drifter_follower.py \
+#               --config examples/drifter_config.yaml
+#
+# Requires: pip install 'sfmc-api[drifter]'
+
+# Path to the NetCDF file containing drifter positions.
+# The file must have variables: time, latitude, longitude.
+# Time should be in a format recognized by netCDF4 (e.g. seconds since epoch,
+# or CF-convention calendar dates).
+input: drifter.nc
+
+# Sequence number for the generated goto_l{N}.ma file.
+# Must match the args_from_file slot in the glider's mission file (.mi).
+# For example, if the .mi file has:
+#   behavior: goto_list
+#       b_arg: args_from_file(enum) 30
+# then set sequence_number to 30.
+sequence_number: 30
+
+# Waypoint pattern around the drifter, in the drifter's reference frame.
+# Each entry is [east_km, north_km] — the offset from the predicted
+# drifter position in kilometres.
+#
+# This example creates a diamond pattern:
+#       N
+#       *
+#  W *     * E
+#       *
+#       S
+geometry:
+  - [1, 0]     # 1 km east of drifter
+  - [0, 1]     # 1 km north of drifter
+  - [-1, 0]    # 1 km west of drifter
+  - [0, -1]    # 1 km south of drifter
+
+# Glider performance parameters.
+glider:
+  # Horizontal through-water speed in m/s.
+  # Typical Slocum values: 0.25–0.50 m/s.
+  speed_horizontal: 0.5
+
+# Waypoint distance threshold in metres.
+# The glider considers a waypoint "reached" when it is within this distance.
+# Default: 100 m.  Increase for rough seas or strong currents.
+list_when_wpt_dist: 100.0

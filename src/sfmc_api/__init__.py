@@ -15,6 +15,8 @@ credentials.
 
 from .client import SFMCClient
 from .config import SFMCConfig
+from .coordinates import dddmm_to_decimal, decimal_to_dddmm, km_to_degrees
+from .dialog_parser import DialogParser, SensorReading, SurfacingEvent
 from .exceptions import (
     APIError,
     AuthenticationError,
@@ -22,20 +24,31 @@ from .exceptions import (
     RateLimitError,
     SFMCError,
 )
+from .follower import BaseFollower, load_follower_class
+from .ma_writer import generate_goto_ma
 from .stomp import MAX_SEQUENCE, StompConnection, StompError, StompSubscription
 
 __all__ = [
     "MAX_SEQUENCE",
     "APIError",
     "AuthenticationError",
+    "BaseFollower",
     "ConfigError",
+    "DialogParser",
     "RateLimitError",
     "SFMCClient",
     "SFMCConfig",
     "SFMCError",
+    "SensorReading",
     "StompConnection",
     "StompError",
     "StompSubscription",
+    "SurfacingEvent",
+    "dddmm_to_decimal",
+    "decimal_to_dddmm",
+    "generate_goto_ma",
+    "km_to_degrees",
+    "load_follower_class",
 ]
 
 __version__ = "0.1.0"
