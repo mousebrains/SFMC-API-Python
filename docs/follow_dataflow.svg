@@ -1,0 +1,162 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 720" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="10" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,3 L0,6 Z" fill="#475569"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="10" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,3 L0,6 Z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="10" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,3 L0,6 Z" fill="#16a34a"/>
+    </marker>
+    <marker id="arrow-orange" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="10" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,3 L0,6 Z" fill="#ea580c"/>
+    </marker>
+  </defs>
+
+  <!-- Title -->
+  <text x="480" y="30" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">sfmc-follow Data Flow</text>
+  <text x="480" y="50" text-anchor="middle" font-size="12" fill="#64748b">How telemetry flows from the glider to your follower and back</text>
+
+  <!-- ══════════════ LIVE MODE (left column) ══════════════ -->
+  <text x="220" y="80" text-anchor="middle" font-size="14" font-weight="bold" fill="#2563eb">Live Mode (STOMP)</text>
+
+  <!-- Glider / Iridium -->
+  <rect x="120" y="95" width="200" height="44" rx="8" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="220" y="114" text-anchor="middle" font-weight="600" fill="#1e40af">Glider via Iridium</text>
+  <text x="220" y="130" text-anchor="middle" font-size="11" fill="#3b82f6">raw dialog text chunks</text>
+
+  <!-- Arrow down -->
+  <line x1="220" y1="139" x2="220" y2="158" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+
+  <!-- SFMC Server -->
+  <rect x="120" y="162" width="200" height="44" rx="8" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="220" y="181" text-anchor="middle" font-weight="600" fill="#1e40af">SFMC Server</text>
+  <text x="220" y="197" text-anchor="middle" font-size="11" fill="#3b82f6">STOMP over WebSocket</text>
+
+  <!-- Arrow down -->
+  <line x1="220" y1="206" x2="220" y2="225" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+
+  <!-- stomp.py -->
+  <rect x="120" y="229" width="200" height="44" rx="8" fill="#eff6ff" stroke="#93c5fd" stroke-width="1"/>
+  <text x="220" y="248" text-anchor="middle" font-weight="600" fill="#1e40af">StompSubscription</text>
+  <text x="220" y="264" text-anchor="middle" font-size="10" fill="#60a5fa">stomp.py — delivers JSON messages</text>
+
+  <!-- Arrow down -->
+  <line x1="220" y1="273" x2="220" y2="292" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+
+  <!-- ordered_dialog -->
+  <rect x="120" y="296" width="200" height="44" rx="8" fill="#eff6ff" stroke="#93c5fd" stroke-width="1"/>
+  <text x="220" y="315" text-anchor="middle" font-weight="600" fill="#1e40af">ordered_dialog()</text>
+  <text x="220" y="331" text-anchor="middle" font-size="10" fill="#60a5fa">reorders by sequence number</text>
+
+  <!-- Arrow down -->
+  <line x1="220" y1="340" x2="220" y2="359" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+
+  <!-- Line reassembly -->
+  <rect x="120" y="363" width="200" height="44" rx="8" fill="#eff6ff" stroke="#93c5fd" stroke-width="1"/>
+  <text x="220" y="382" text-anchor="middle" font-weight="600" fill="#1e40af">Line Reassembly</text>
+  <text x="220" y="398" text-anchor="middle" font-size="10" fill="#60a5fa">_read_dialog() — splits on \r\n</text>
+
+  <!-- ══════════════ REPLAY MODE (right of live) ══════════════ -->
+  <text x="740" y="80" text-anchor="middle" font-size="14" font-weight="bold" fill="#16a34a">Replay Mode (--replay)</text>
+
+  <!-- Log File -->
+  <rect x="640" y="95" width="200" height="44" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="740" y="114" text-anchor="middle" font-weight="600" fill="#166534">Log File</text>
+  <text x="740" y="130" text-anchor="middle" font-size="11" fill="#22c55e">from sfmc-monitor-glider</text>
+
+  <!-- Arrow down -->
+  <line x1="740" y1="139" x2="740" y2="225" stroke="#16a34a" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+
+  <!-- _parse_log_line -->
+  <rect x="640" y="229" width="200" height="44" rx="8" fill="#f0fdf4" stroke="#86efac" stroke-width="1"/>
+  <text x="740" y="248" text-anchor="middle" font-weight="600" fill="#166534">_parse_log_line()</text>
+  <text x="740" y="264" text-anchor="middle" font-size="10" fill="#4ade80">strips timestamp + logger prefix</text>
+
+  <!-- Arrow down -->
+  <line x1="740" y1="273" x2="740" y2="359" stroke="#16a34a" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+  <text x="745" y="320" font-size="10" fill="#16a34a">filters DIALOG lines only</text>
+
+  <!-- ══════════════ SHARED PIPELINE (center) ══════════════ -->
+
+  <!-- Merge arrows into DialogParser -->
+  <line x1="220" y1="407" x2="220" y2="440" stroke="#475569" stroke-width="1.5"/>
+  <line x1="740" y1="363" x2="740" y2="430" stroke="#475569" stroke-width="1.5"/>
+  <line x1="220" y1="440" x2="480" y2="440" stroke="#475569" stroke-width="1.5"/>
+  <line x1="740" y1="430" x2="480" y2="430" stroke="#475569" stroke-width="1.5"/>
+  <line x1="480" y1="430" x2="480" y2="452" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- DialogParser -->
+  <rect x="350" y="456" width="260" height="52" rx="8" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+  <text x="480" y="477" text-anchor="middle" font-weight="700" fill="#92400e">DialogParser.feed_line()</text>
+  <text x="480" y="497" text-anchor="middle" font-size="11" fill="#b45309">dialog_parser.py — builds SurfacingEvent</text>
+
+  <!-- Data label -->
+  <rect x="600" y="462" width="180" height="40" rx="6" fill="#fff7ed" stroke="#fdba74" stroke-width="1"/>
+  <text x="690" y="478" text-anchor="middle" font-size="10" fill="#9a3412">Extracts: vehicle_name,</text>
+  <text x="690" y="492" text-anchor="middle" font-size="10" fill="#9a3412">GPS, sensors, timestamp</text>
+
+  <!-- Arrow down to queue -->
+  <line x1="480" y1="508" x2="480" y2="535" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="495" y="527" font-size="11" font-weight="bold" fill="#475569">SurfacingEvent</text>
+
+  <!-- Queue In -->
+  <rect x="415" y="539" width="130" height="32" rx="16" fill="#e2e8f0" stroke="#475569" stroke-width="1.5"/>
+  <text x="480" y="560" text-anchor="middle" font-weight="600" fill="#334155">queue_in</text>
+
+  <!-- Arrow down -->
+  <line x1="480" y1="571" x2="480" y2="595" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- YOUR FOLLOWER (big, prominent) -->
+  <rect x="330" y="599" width="300" height="56" rx="10" fill="#fae8ff" stroke="#a855f7" stroke-width="2.5"/>
+  <text x="480" y="622" text-anchor="middle" font-size="16" font-weight="700" fill="#7e22ce">Your Follower</text>
+  <text x="480" y="642" text-anchor="middle" font-size="11" fill="#a855f7">on_surfacing() → send_files()</text>
+
+  <!-- Arrow down -->
+  <line x1="480" y1="655" x2="480" y2="678" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="495" y="672" font-size="11" font-weight="bold" fill="#475569">{"to-glider": {"goto_l30.ma": "..."}}</text>
+
+  <!-- Queue Out -->
+  <rect x="415" y="682" width="130" height="32" rx="16" fill="#e2e8f0" stroke="#475569" stroke-width="1.5"/>
+  <text x="480" y="703" text-anchor="middle" font-weight="600" fill="#334155">queue_out</text>
+
+  <!-- Split to upload and dry-run -->
+  <line x1="480" y1="714" x2="480" y2="726" stroke="#475569" stroke-width="1"/>
+  <line x1="300" y1="726" x2="660" y2="726" stroke="#475569" stroke-width="1"/>
+
+  <!-- Upload path (left) -->
+  <line x1="300" y1="726" x2="300" y2="748" stroke="#ea580c" stroke-width="1.5" marker-end="url(#arrow-orange)"/>
+  <rect x="195" y="752" width="210" height="44" rx="8" fill="#fff7ed" stroke="#ea580c" stroke-width="1.5"/>
+  <text x="300" y="771" text-anchor="middle" font-weight="600" fill="#9a3412">Upload to SFMC</text>
+  <text x="300" y="787" text-anchor="middle" font-size="10" fill="#ea580c">upload_glider_file_contents()</text>
+
+  <!-- Dry-run path (right) -->
+  <line x1="660" y1="726" x2="660" y2="748" stroke="#16a34a" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+  <rect x="555" y="752" width="210" height="44" rx="8" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="660" y="771" text-anchor="middle" font-weight="600" fill="#166534">Print (--dry-run)</text>
+  <text x="660" y="787" text-anchor="middle" font-size="10" fill="#16a34a">_print_files() — log to console</text>
+
+  <!-- Thread labels -->
+  <rect x="12" y="225" width="90" height="20" rx="4" fill="#bfdbfe" stroke="none"/>
+  <text x="57" y="239" text-anchor="middle" font-size="10" font-weight="600" fill="#1e40af">dialog thread</text>
+
+  <rect x="12" y="456" width="90" height="20" rx="4" fill="#fef3c7" stroke="none"/>
+  <text x="57" y="470" text-anchor="middle" font-size="10" font-weight="600" fill="#92400e">dialog thread</text>
+
+  <rect x="12" y="599" width="90" height="20" rx="4" fill="#f3e8ff" stroke="none"/>
+  <text x="57" y="613" text-anchor="middle" font-size="10" font-weight="600" fill="#7e22ce">follower thread</text>
+
+  <rect x="12" y="752" width="90" height="20" rx="4" fill="#ffedd5" stroke="none"/>
+  <text x="57" y="766" text-anchor="middle" font-size="10" font-weight="600" fill="#9a3412">upload thread</text>
+
+  <!-- Legend -->
+  <rect x="15" y="85" width="90" height="70" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="60" y="100" text-anchor="middle" font-size="10" font-weight="700" fill="#334155">Legend</text>
+  <line x1="25" y1="112" x2="45" y2="112" stroke="#2563eb" stroke-width="2"/>
+  <text x="52" y="116" font-size="10" fill="#475569">Live</text>
+  <line x1="25" y1="128" x2="45" y2="128" stroke="#16a34a" stroke-width="2"/>
+  <text x="52" y="132" font-size="10" fill="#475569">Replay</text>
+  <line x1="25" y1="144" x2="45" y2="144" stroke="#475569" stroke-width="2"/>
+  <text x="52" y="148" font-size="10" fill="#475569">Shared</text>
+</svg>
