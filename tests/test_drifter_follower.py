@@ -1,4 +1,9 @@
-"""Tests for examples/drifter_follower.py — drifter tracking algorithm."""
+"""Tests for examples/drifter_follower.py — drifter tracking algorithm.
+
+These tests require ``netCDF4`` and ``numpy`` (the ``[drifter]`` extra).
+They are automatically skipped when those packages are not installed,
+so CI does not need to install heavy scientific dependencies.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +12,12 @@ from pathlib import Path
 from queue import Queue
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from sfmc_api.dialog_parser import SensorReading, SurfacingEvent
+
+# Skip the entire module if netCDF4 is not installed.
+pytest.importorskip("netCDF4", reason="netCDF4 not installed (pip install 'sfmc-api[drifter]')")
 
 # Add examples/ to sys.path so we can import drifter_follower.
 _examples_dir = str(Path(__file__).resolve().parent.parent / "examples")
