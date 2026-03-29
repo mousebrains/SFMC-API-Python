@@ -1,49 +1,185 @@
-# Drifter follower configuration for sfmc-follow.
+# ===================================================================
+# Drifter follower configuration for sfmc-follow
+# ===================================================================
+#
+# This file controls how the drifter follower generates waypoints.
+# Every time the glider surfaces, the follower reads this config,
+# reads the drifter NetCDF file, and creates a new goto_l{N}.ma
+# file with waypoints placed around the predicted drifter position.
 #
 # Usage:
 #   sfmc-follow --glider osu685 \
 #               --follower examples/drifter_follower.py \
 #               --config examples/drifter_config.yaml
 #
+# To test offline (no SFMC connection needed):
+#   sfmc-follow --glider osu685 \
+#               --follower examples/drifter_follower.py \
+#               --config examples/drifter_config.yaml \
+#               --replay dialog.log --dry-run
+#
 # Requires: pip install 'sfmc-api[drifter]'
+# ===================================================================
 
-# Path to the NetCDF file containing drifter positions.
-# The file must have variables: time, latitude, longitude.
-# Time should be in a format recognized by netCDF4 (e.g. seconds since epoch,
-# or CF-convention calendar dates).
+
+# -------------------------------------------------------------------
+# input: Path to the NetCDF file with drifter positions
+# -------------------------------------------------------------------
+# The file must have three variables:
+#   - time      (with 'units' and 'calendar' attributes, e.g.
+#                "seconds since 1970-01-01", calendar "standard")
+#   - latitude  (decimal degrees, 1-D array)
+#   - longitude (decimal degrees, 1-D array)
+#
+# The file needs at least 2 time points so velocity can be estimated
+# from the difference between the last two positions.
+#
+# This file is re-read on every surfacing, so you can have a
+# shore-side script update it (e.g. from satellite tracking or a
+# drifter data service) while the follower is running.
 input: drifter.nc
 
-# Sequence number for the generated goto_l{N}.ma file.
-# Must match the args_from_file slot in the glider's mission file (.mi).
-# For example, if the .mi file has:
+
+# -------------------------------------------------------------------
+# sequence_number: Which "slot" on the glider reads this file
+# -------------------------------------------------------------------
+# Slocum gliders can load mission-argument (.ma) files from numbered
+# slots.  The number here determines the filename: sequence_number 30
+# produces "goto_l30.ma".
+#
+# This number MUST match the args_from_file slot configured in your
+# glider's active mission (.mi) file.  For example, if the .mi file
+# contains:
+#
 #   behavior: goto_list
 #       b_arg: args_from_file(enum) 30
+#
 # then set sequence_number to 30.
+#
+# Common values and how to find yours:
+#   - Look at your .mi file's goto_list behavior for the
+#     args_from_file value.  SFMC's default missions often use 90
+#     (e.g. goto_l90.ma).  Custom missions may use 10, 20, 30, etc.
+#   - If you are not sure, ask the glider pilot who set up the
+#     mission, or download the .mi file from SFMC and search for
+#     "args_from_file".
+#   - The number does not have intrinsic meaning -- it is just a
+#     filing slot.  Just make sure it matches what the mission
+#     expects.
 sequence_number: 30
 
-# Waypoint pattern around the drifter, in the drifter's reference frame.
-# Each entry is [east_km, north_km] — the offset from the predicted
-# drifter position in kilometres.
+
+# -------------------------------------------------------------------
+# geometry: The pattern of waypoints around the drifter
+# -------------------------------------------------------------------
+# Each entry is [east_km, north_km] -- the offset from the predicted
+# drifter position, in kilometres.
 #
-# This example creates a diamond pattern:
-#       N
-#       *
-#  W *     * E
-#       *
-#       S
+# The follower visits these waypoints in order.  The glider firmware
+# supports up to 7 waypoints in a single goto_list.
+#
+# Think of the drifter as sitting at the origin (0, 0).  Positive
+# east_km is to the right (east), positive north_km is up (north).
+#
+# --- Diamond (4 waypoints, ~2 km across) ---
+#
+#            N (0,1)
+#            *
+#           / \
+#  W(-1,0) *   * E(1,0)
+#           \ /
+#            *
+#            S (0,-1)
+#
+# geometry:
+#   - [1, 0]
+#   - [0, 1]
+#   - [-1, 0]
+#   - [0, -1]
+#
+# --- Triangle (3 waypoints, ~2 km across) ---
+#
+#        N (0,1)
+#        *
+#       / \
+#      *---*
+#  (-1,-0.5) (1,-0.5)
+#
+# geometry:
+#   - [1, -0.5]
+#   - [0, 1]
+#   - [-1, -0.5]
+#
+# --- Star / butterfly (5 waypoints, ~3 km across) ---
+#
+# geometry:
+#   - [1.5, 0]
+#   - [-0.5, 1.2]
+#   - [0.5, -1.2]
+#   - [-0.5, -1.2]
+#   - [0.5, 1.2]
+#
+# --- Line / transect (2 waypoints, crosses the drifter) ---
+#
+# Good for repeated cross-drifter sections:
+#
+#   W *-----------*-----------* E
+#    (-2,0)    drifter      (2,0)
+#
+# geometry:
+#   - [-2, 0]
+#   - [2, 0]
+#
+# The active pattern (diamond, 1 km offset):
 geometry:
   - [1, 0]     # 1 km east of drifter
   - [0, 1]     # 1 km north of drifter
   - [-1, 0]    # 1 km west of drifter
   - [0, -1]    # 1 km south of drifter
 
-# Glider performance parameters.
+
+# -------------------------------------------------------------------
+# glider: Performance parameters for the glider
+# -------------------------------------------------------------------
 glider:
   # Horizontal through-water speed in m/s.
-  # Typical Slocum values: 0.25–0.50 m/s.
+  #
+  # This is the glider's average horizontal speed through the water
+  # (not over ground -- currents are handled separately).  The
+  # follower uses this to estimate how long the glider will take to
+  # reach each waypoint, which determines how far to extrapolate
+  # the drifter's position.
+  #
+  # Typical Slocum values:
+  #   - 0.25 m/s -- slow, deep dives, conservative battery use
+  #   - 0.35 m/s -- moderate, common for coastal deployments
+  #   - 0.50 m/s -- fast, shallow dives, higher power consumption
+  #
+  # How to estimate yours:
+  #   - Check your glider's m_speed or m_avg_speed sensor in the
+  #     dialog output or flight data files.
+  #   - Or calculate: horizontal_speed = distance / dive_cycle_time.
+  #   - When in doubt, 0.35 m/s is a safe starting point for
+  #     shallow-water coastal gliders.
   speed_horizontal: 0.5
 
-# Waypoint distance threshold in metres.
-# The glider considers a waypoint "reached" when it is within this distance.
-# Default: 100 m.  Increase for rough seas or strong currents.
+
+# -------------------------------------------------------------------
+# list_when_wpt_dist: When does the glider "reach" a waypoint?
+# -------------------------------------------------------------------
+# The glider considers a waypoint "reached" when it comes within
+# this many metres of it.  Once reached, it moves to the next
+# waypoint in the list.
+#
+# Guidance:
+#   - 100 m (default) -- works well in calm conditions.  The glider
+#     surfaces close to the target before moving on.
+#   - 200-500 m -- better in strong currents or rough seas where the
+#     glider may struggle to close the last 100 m.  Prevents the
+#     glider from circling endlessly near a waypoint it cannot quite
+#     reach.
+#   - 50 m -- very tight; only use in calm water with weak currents.
+#
+# If you notice the glider spending many dive cycles near one
+# waypoint without moving on, increase this value.
 list_when_wpt_dist: 100.0

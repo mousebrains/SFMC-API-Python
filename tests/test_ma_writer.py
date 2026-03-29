@@ -177,6 +177,20 @@ class TestValidation:
         wpt_lines = _extract_waypoint_lines(content)
         assert len(wpt_lines) == MAX_WAYPOINTS
 
+    def test_sequence_number_zero(self) -> None:
+        filename, _ = generate_goto_ma(
+            waypoints=[(-117.697, 33.167)],
+            sequence_number=0,
+        )
+        assert filename == "goto_l0.ma"
+
+    def test_single_waypoint(self) -> None:
+        _, content = generate_goto_ma(
+            waypoints=[(-117.697, 33.167)],
+            sequence_number=30,
+        )
+        assert "\tb_arg: num_waypoints(nodim) 1\n" in content
+
     def test_matches_goto_l90_structure(self) -> None:
         """Output structure should match the real goto_l90.ma from maFiles/."""
         _, content = generate_goto_ma(

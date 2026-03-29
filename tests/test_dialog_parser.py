@@ -86,6 +86,15 @@ class TestRegexPatterns:
             is None
         )
 
+    def test_gps_location_does_not_match_invalid(self) -> None:
+        """GPS Invalid lines should not be matched by the GPS regex."""
+        assert (
+            GPS_LOCATION_RE.search(
+                "GPS Invalid :  3310.066 N -11741.666 E measured    154.415 secs ago"
+            )
+            is None
+        )
+
     def test_sensor_normal(self) -> None:
         m = SENSOR_RE.search("   sensor:m_battery(volts)=15.2327964879377         51.99 secs ago")
         assert m is not None

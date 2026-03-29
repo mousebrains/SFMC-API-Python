@@ -1,9 +1,64 @@
 """Parse Slocum glider dialog output into structured surfacing events.
 
-When a glider surfaces and connects via Iridium, it transmits a block of
-text that includes its vehicle name, current time, GPS fix, and sensor
-readings.  This module provides a state-machine parser that converts raw
-dialog lines into :class:`SurfacingEvent` objects.
+When a Slocum glider surfaces and connects to shore via Iridium
+satellite, it transmits a block of plain text called "dialog output."
+This text contains the glider's name, current time, GPS fix, and a
+list of sensor readings.  This module provides a state-machine parser
+that converts that raw text into :class:`SurfacingEvent` objects you
+can work with in Python.
+
+What glider dialog output looks like
+-------------------------------------
+
+Here is a simplified sample of what the glider transmits each time
+it surfaces (the real output has more lines, but these are the key
+ones the parser extracts)::
+
+    Carrier Detect found
+    Vehicle Name: osu685
+    Curr Time: Sat Mar 28 20:40:38 2026 MT:  169339
+    GPS Location:  4439.300 N -12406.120 E measured     64.746 secs ago
+    sensor:m_water_vx(m/s)=0.040895           68.915 secs ago
+    sensor:m_water_vy(m/s)=-0.018732          68.915 secs ago
+    sensor:m_battery(volts)=10.5117           10.000 secs ago
+    sensor:m_vacuum(inHg)=7.89100              2.000 secs ago
+    ABORT HISTORY: ...
+
+The parser watches for these patterns:
+
+``Carrier Detect found``
+    Signals the start of a new surfacing.  The parser begins
+    collecting data.
+
+``Vehicle Name: osu685``
+    The glider's self-reported name.  Stored in
+    ``event.vehicle_name``.
+
+``Curr Time: Sat Mar 28 20:40:38 2026 MT:  169339``
+    The glider's onboard clock (UTC) and mission elapsed time in
+    seconds.  Stored in ``event.timestamp`` (a ``datetime``) and
+    ``event.mission_time`` (a float).
+
+``GPS Location:  4439.300 N -12406.120 E measured  64.746 secs ago``
+    The GPS fix in DDMM.MMMM format.  The parser converts this to
+    decimal degrees and stores it in ``event.gps_lat`` and
+    ``event.gps_lon``.  The raw DDMM values are also available as
+    ``event.gps_lat_ddmm`` and ``event.gps_lon_ddmm``.  The fix
+    age (how many seconds ago the GPS was acquired) is stored in
+    ``event.gps_age_secs``.
+
+``sensor:m_water_vx(m/s)=0.040895  68.915 secs ago``
+    A sensor reading.  The parser extracts the sensor name
+    (``m_water_vx``), unit (``m/s``), numeric value (``0.040895``),
+    and age (``68.915``).  All sensor readings are stored in
+    ``event.sensors`` as a dict mapping sensor name to
+    :class:`SensorReading`.
+
+The parser emits a :class:`SurfacingEvent` once it has collected a
+GPS fix and at least one sensor reading, and then encounters a
+non-sensor line (such as ``ABORT HISTORY``).  Partial surfacings
+(e.g. if the Iridium connection drops before the GPS line) are
+silently discarded.
 
 Typical usage::
 
@@ -12,10 +67,6 @@ Typical usage::
         event = parser.feed_line(line)
         if event is not None:
             print(event.vehicle_name, event.gps_lat, event.gps_lon)
-
-The parser detects the start of a surfacing from the ``Carrier Detect
-found`` connection event and emits a :class:`SurfacingEvent` once a GPS
-fix and sensor readings have been collected.
 """
 
 from __future__ import annotations

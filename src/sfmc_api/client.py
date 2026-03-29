@@ -1385,14 +1385,17 @@ class SFMCClient:
         if not file_contents:
             raise ValueError("file_contents must not be empty")
 
-        files = []
-        for name, content in file_contents.items():
-            data = content.encode("utf-8") if isinstance(content, str) else content
-            files.append(("files", (name, io.BytesIO(data))))
+        with contextlib.ExitStack() as stack:
+            files = []
+            for name, content in file_contents.items():
+                data = content.encode("utf-8") if isinstance(content, str) else content
+                bio = io.BytesIO(data)
+                stack.callback(bio.close)
+                files.append(("files", (name, bio)))
 
-        path = f"/v1/upload-glider-files/{glider_name}/{folder}"
-        response = self._request("PUT", path, files=files)
-        return self._json_or_empty(response)
+            path = f"/v1/upload-glider-files/{glider_name}/{folder}"
+            response = self._request("PUT", path, files=files)
+            return self._json_or_empty(response)
 
     def upload_cache_files(
         self,

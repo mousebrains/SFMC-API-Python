@@ -552,9 +552,9 @@ class TestUploadFiles:
         assert len(files_kwarg) == 1
         assert files_kwarg[0][0] == "files"
         assert files_kwarg[0][1][0] == "goto_l30.ma"
-        # Content should be a BytesIO with UTF-8 encoded data.
+        # BytesIO is properly closed after the request completes.
         bio = files_kwarg[0][1][1]
-        assert bio.read() == b"behavior_name=goto_list\n"
+        assert bio.closed
 
     @patch("sfmc_api.client.authenticate", return_value="tok")
     @patch("sfmc_api.client.build_http_client")

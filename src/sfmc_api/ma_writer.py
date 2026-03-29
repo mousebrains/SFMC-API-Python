@@ -1,10 +1,48 @@
 """Generate Slocum glider mission-argument (``.ma``) files.
 
-This module creates ``goto_l{N}.ma`` files that tell a glider's
-``goto_list`` behavior where to navigate.  The output matches the
-format produced by SFMC and consumed by the Slocum glider firmware.
+What are .ma files?
+-------------------
+
+A ``.ma`` (mission-argument) file is a small text file that supplies
+parameters to one of the glider's built-in behaviors.  Think of it
+as a configuration file that tells the glider *where to go* or *how
+to dive*.
+
+The most common .ma file is a **goto list**: a file named
+``goto_l{N}.ma`` that contains a list of waypoints for the
+``goto_list`` behavior.  When SFMC delivers this file to the glider,
+the ``goto_list`` behavior reads it and starts navigating to the
+waypoints in sequence.
+
+How goto_list works on the glider
+---------------------------------
+
+The ``goto_list`` behavior is one of several built-in navigation
+behaviors in the Slocum firmware.  Here is what happens when the
+glider receives a new ``goto_l{N}.ma`` file:
+
+1. On the next dive cycle, the glider's mission file (``.mi``)
+   triggers the ``goto_list`` behavior with an ``args_from_file``
+   directive that points to slot *N*.
+2. The behavior reads the ``.ma`` file and gets the list of
+   waypoints plus parameters like ``num_legs_to_run`` and
+   ``initial_wpt``.
+3. By default (``initial_wpt = -2``), the glider heads for the
+   *closest* waypoint first.
+4. Once the glider comes within ``list_when_wpt_dist`` metres of a
+   waypoint, it considers that waypoint "reached" and moves on to
+   the next one.
+5. After traversing all waypoints (with ``num_legs_to_run = -2``,
+   meaning "once through"), the behavior completes and the glider
+   follows whatever the mission says to do next (often: surface and
+   check for new files).
+
+This means your follower can update the waypoints every surfacing,
+and the glider will always fly the freshest set of waypoints.
 
 Example::
+
+    from sfmc_api.ma_writer import generate_goto_ma
 
     filename, content = generate_goto_ma(
         waypoints=[(-117.6967, 33.1670), (-117.6900, 33.1750)],
@@ -15,6 +53,7 @@ Example::
 
 File format reference
 ---------------------
+
 See ``maFiles/goto_l90.ma`` in this repository for a real example
 written by SFMC.  The structure is::
 
@@ -33,7 +72,8 @@ written by SFMC.  The structure is::
 
 Waypoints are tab-separated ``longitude  latitude`` in DDDMM.MMMM /
 DDMM.MMMM format (the same format used by sensor values ``c_wpt_lon``
-and ``c_wpt_lat``).
+and ``c_wpt_lat``).  This module handles the conversion from decimal
+degrees to DDDMM format automatically.
 """
 
 from __future__ import annotations

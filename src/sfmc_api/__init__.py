@@ -25,11 +25,12 @@ from .exceptions import (
     SFMCError,
 )
 from .follower import BaseFollower, load_follower_class
-from .ma_writer import generate_goto_ma
+from .ma_writer import MAX_WAYPOINTS, generate_goto_ma
 from .stomp import MAX_SEQUENCE, StompConnection, StompError, StompSubscription
 
 __all__ = [
     "MAX_SEQUENCE",
+    "MAX_WAYPOINTS",
     "APIError",
     "AuthenticationError",
     "BaseFollower",

@@ -71,6 +71,13 @@ class TestDecimalToDddmm:
         original = -11741.800
         assert decimal_to_dddmm(dddmm_to_decimal(original)) == pytest.approx(original, abs=1e-6)
 
+    def test_near_60_minutes(self) -> None:
+        # 33 deg 59.999 min should be just under 34 degrees.
+        assert dddmm_to_decimal(3359.999) == pytest.approx(33.99998333, abs=1e-6)
+
+    def test_equator(self) -> None:
+        assert decimal_to_dddmm(0.5) == pytest.approx(30.0, abs=1e-6)
+
 
 # ── km_to_degrees ───────────────────────────────────────────────────
 

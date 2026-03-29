@@ -42,6 +42,7 @@ def _make_sub(messages: list[dict[str, Any]]) -> StompSubscription:
 class RecordingFollower(BaseFollower):
     """Follower that records received events and echoes a file."""
 
+    # Class-level mutable shared state; safe here because tests run sequentially.
     received: list[SurfacingEvent]
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -116,8 +117,8 @@ class TestParseLogLine:
 
     def test_sensor_line_with_prefix(self) -> None:
         line = (
-            "2026-03-28T20:40:38.500000 sfmc.osu685.DIALOG"
-            "     sensor:m_battery(volts)=15.0  50.0 secs ago"
+            "2026-03-28T20:40:38.500000 sfmc.osu685.DIALOG  "
+            "   sensor:m_battery(volts)=15.0  50.0 secs ago"
         )
         result = _parse_log_line(line)
         assert result is not None
@@ -744,3 +745,61 @@ class TestFollowGliderLiveDryRun:
         mock_upload_log.info.assert_called()
         logged = str(mock_upload_log.info.call_args_list)
         assert "dry-run" in logged
+
+
+class TestFollowGliderErrorPaths:
+    """Test error paths where client is None but required."""
+
+    @patch("sfmc_api.follow_glider.setup_logging")
+    def test_live_mode_without_client_returns(
+        self,
+        mock_setup_logging: MagicMock,
+    ) -> None:
+        """Live mode (no replay, no dry-run) with client=None should return."""
+        mock_info_log = MagicMock(spec=logging.Logger)
+        mock_info_log.name = "test.info"
+        mock_setup_logging.return_value = (
+            MagicMock(spec=logging.Logger),
+            MagicMock(spec=logging.Logger),
+            mock_info_log,
+        )
+
+        follow_glider(
+            client=None,
+            glider_name="g1",
+            follower_class=RecordingFollower,
+            follower_config={},
+        )
+
+        mock_info_log.error.assert_called_once()
+        assert "client is required" in str(mock_info_log.error.call_args)
+
+    @patch("sfmc_api.follow_glider.setup_logging")
+    def test_replay_upload_without_client_returns(
+        self,
+        mock_setup_logging: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Replay + upload (no dry-run) with client=None should return."""
+        mock_info_log = MagicMock(spec=logging.Logger)
+        mock_info_log.name = "test.info"
+        mock_setup_logging.return_value = (
+            MagicMock(spec=logging.Logger),
+            MagicMock(spec=logging.Logger),
+            mock_info_log,
+        )
+
+        log_file = tmp_path / "dialog.log"
+        log_file.write_text("some data\n")
+
+        follow_glider(
+            client=None,
+            glider_name="g1",
+            follower_class=RecordingFollower,
+            follower_config={},
+            replay=str(log_file),
+            dry_run=False,
+        )
+
+        mock_info_log.error.assert_called_once()
+        assert "client is required" in str(mock_info_log.error.call_args)

@@ -1,37 +1,161 @@
 """Drifter-following follower for sfmc-follow.
 
-This follower reads drifter positions from a NetCDF file, predicts
-where the drifter will be in the near future, and generates a
-``goto_l{N}.ma`` waypoint file that keeps the glider flying a
-geometric pattern (e.g. a diamond) around the drifter.
+What this follower does
+-----------------------
 
-The waypoints are placed in the drifter's reference frame — as the
-drifter moves, the pattern moves with it.  Ocean currents measured
-by the glider (``m_water_vx``, ``m_water_vy``) are used to improve
-transit time estimates.
+Imagine you have deployed a drifting instrument (a surface drifter,
+a sediment trap, a float) in the ocean, and you want your Slocum
+glider to keep flying near it.  The drifter moves with the currents,
+so you cannot just give the glider a fixed set of waypoints -- the
+target is always moving.
 
-Requirements::
+This follower solves that problem.  Every time the glider surfaces,
+it:
 
-    pip install 'sfmc-api[drifter]'   # installs netCDF4, numpy, pyyaml
+1. Reads the drifter's latest known position and velocity from a
+   NetCDF file that you update externally (e.g. from satellite
+   tracking, a shore-side script, or an operational model).
+2. Reads the glider's GPS position and depth-average current from
+   the surfacing telemetry.
+3. Predicts where the drifter will be by the time the glider reaches
+   each waypoint, accounting for both drifter drift and ocean
+   currents affecting the glider's ground speed.
+4. Places waypoints in a geometric pattern (diamond, triangle, line,
+   etc.) around the *predicted* drifter position -- not where the
+   drifter is now, but where it will be when the glider arrives.
+5. Writes a ``goto_l{N}.ma`` file and queues it for upload to SFMC.
 
-Configuration (YAML)::
+The glider picks up the new ``.ma`` file the next time it calls in,
+and starts flying the updated pattern.
 
-    input: drifter.nc         # NetCDF with time, latitude, longitude
-    sequence_number: 30       # slot number → goto_l30.ma
-    geometry:                 # pattern offsets in km [east, north]
-      - [1, 0]
-      - [0, 1]
-      - [-1, 0]
-      - [0, -1]
-    glider:
-      speed_horizontal: 0.5  # m/s through-water
-    list_when_wpt_dist: 100.0 # metres
+The algorithm step by step
+--------------------------
 
-Usage::
+For each waypoint in the configured geometry pattern:
+
+a. Start from the glider's current position (for the first waypoint)
+   or from the previous waypoint (for subsequent ones).
+b. Add the geometry offset (e.g. "1 km east of the drifter") to the
+   drifter's position extrapolated forward by the cumulative transit
+   time so far.  This gives a candidate waypoint.
+c. Estimate how long the glider will take to swim from its previous
+   position to this candidate waypoint, using the configured
+   through-water speed adjusted by the ocean current projected along
+   the transit direction.
+d. Re-extrapolate the drifter position using the updated cumulative
+   time and re-place the waypoint.  This second pass corrects for
+   the drifter motion that occurs during this specific transit leg.
+
+The result is a set of waypoints that "lead" the drifter, so the
+glider arrives at the right place at the right time.
+
+How ocean currents are compensated
+----------------------------------
+
+The glider reports depth-average current (``m_water_vx`` and
+``m_water_vy``, in m/s east and north) at each surfacing.  These
+values describe the net current the glider experienced over its last
+dive cycle.
+
+When estimating transit time to a waypoint, the algorithm projects
+this current vector onto the direction of travel.  If the current
+is favorable (pushing the glider toward the waypoint), the effective
+ground speed is higher and transit time is shorter.  If the current
+is adverse, transit time increases.  This makes the drifter-position
+prediction more accurate.
+
+If the glider has no current data (e.g. first dive, or the sensor
+is not configured), the algorithm assumes zero current.
+
+Configuration parameters
+-------------------------
+
+The YAML config file (see ``examples/drifter_config.yaml``) contains:
+
+``input`` (str)
+    Path to a NetCDF file with at least three variables: ``time``,
+    ``latitude``, and ``longitude``.  This file is re-read on every
+    surfacing, so an external process can update it while the
+    follower is running.
+
+``sequence_number`` (int, default 30)
+    The slot number *N* in the glider's mission file.  The generated
+    file will be named ``goto_l{N}.ma``.  This must match the
+    ``args_from_file`` slot in the ``goto_list`` behavior of the
+    glider's active ``.mi`` mission.
+
+``geometry`` (list of [east_km, north_km])
+    The pattern of waypoints to fly around the drifter.  Each entry
+    is an offset in kilometres: ``[east_km, north_km]``.  A diamond
+    pattern might be ``[[1,0], [0,1], [-1,0], [0,-1]]``.  See the
+    config file for more examples.
+
+``glider.speed_horizontal`` (float, default 0.5)
+    The glider's horizontal through-water speed in m/s.  Used to
+    estimate transit times.  Typical Slocum values: 0.25-0.50 m/s.
+
+``list_when_wpt_dist`` (float, default 100.0)
+    The distance in metres at which the glider considers a waypoint
+    "reached" and moves on to the next one.
+
+What the generated file does on the glider
+------------------------------------------
+
+The output is a ``goto_l{N}.ma`` file -- a mission-argument file for
+the ``goto_list`` behavior.  It contains a list of waypoints in the
+glider's native DDDMM.MMMM coordinate format plus parameters like
+"traverse the list once" and "consider a waypoint reached at 100 m
+distance."  When SFMC delivers this file to the glider, the
+``goto_list`` behavior reads it and starts navigating to the first
+(closest) waypoint, then the second, and so on.
+
+Setting up the NetCDF file
+--------------------------
+
+The NetCDF file must have these variables:
+
+- ``time`` -- a 1-D array with a ``units`` attribute that
+  ``netCDF4.num2date`` can parse (e.g. ``"seconds since 1970-01-01"``
+  or any CF-convention calendar string), and a ``calendar`` attribute
+  (e.g. ``"standard"``).
+- ``latitude`` -- a 1-D array of latitudes in decimal degrees.
+- ``longitude`` -- a 1-D array of longitudes in decimal degrees.
+
+The file must contain at least 2 time points so that velocity can be
+estimated from the last two positions.
+
+Example: creating a minimal drifter NetCDF with Python::
+
+    import netCDF4, numpy as np
+    ds = netCDF4.Dataset("drifter.nc", "w")
+    ds.createDimension("time", None)  # unlimited
+    t = ds.createVariable("time", "f8", ("time",))
+    t.units = "hours since 2026-01-01"
+    t.calendar = "standard"
+    lat = ds.createVariable("latitude", "f8", ("time",))
+    lon = ds.createVariable("longitude", "f8", ("time",))
+    t[:] = [0.0, 1.0, 2.0]
+    lat[:] = [44.60, 44.61, 44.62]
+    lon[:] = [-124.50, -124.51, -124.52]
+    ds.close()
+
+Running it
+----------
+
+Install the optional dependencies and run::
+
+    pip install 'sfmc-api[drifter]'   # installs netCDF4, numpy
 
     sfmc-follow --glider osu685 \\
                 --follower examples/drifter_follower.py \\
                 --config examples/drifter_config.yaml
+
+To test offline with a recorded dialog log::
+
+    sfmc-follow --glider osu685 \\
+                --follower examples/drifter_follower.py \\
+                --config examples/drifter_config.yaml \\
+                --replay dialog.log --dry-run
 """
 
 from __future__ import annotations
@@ -67,20 +191,48 @@ def _get_drifter_state(
 ) -> tuple[float, float, float, float] | None:
     """Read the latest drifter position and velocity from a NetCDF file.
 
-    The file must contain variables ``time``, ``latitude``, and
-    ``longitude``.  Time is converted to hours via ``netCDF4.num2date``.
+    Opens the file at *nc_path*, reads the ``time``, ``latitude``, and
+    ``longitude`` variables, and estimates the drifter's current
+    velocity from the last two recorded positions.  The velocity is
+    returned in metres per second (east and north components).
+
+    The function needs at least two time points to compute a velocity.
+    If the file has only one point, or if the time difference between
+    the last two points is zero or negative, the function returns
+    ``None`` (meaning "I cannot determine where the drifter is
+    heading").
+
+    This function is called once per surfacing, so the NetCDF file
+    can be updated by an external process between surfacings.
+
+    Args:
+        nc_path: Filesystem path to the drifter NetCDF file.
 
     Returns:
-        ``(lat, lon, vel_east_m_s, vel_north_m_s)`` or ``None`` if the
-        file has fewer than 2 positions (velocity cannot be estimated).
+        A tuple ``(lat, lon, vel_east_m_s, vel_north_m_s)`` where
+        lat/lon are the most recent position in decimal degrees and
+        vel_east/vel_north are the estimated drift velocity in m/s.
+        Returns ``None`` if velocity cannot be estimated.
     """
-    with netCDF4.Dataset(nc_path, "r") as ds:
+    try:
+        ds = netCDF4.Dataset(nc_path, "r")
+    except (OSError, FileNotFoundError) as exc:
+        logger.warning("Cannot open NetCDF file %s: %s", nc_path, exc)
+        return None
+
+    with ds:
+        for var_name in ("time", "latitude", "longitude"):
+            if var_name not in ds.variables:
+                logger.warning("Missing variable %r in %s", var_name, nc_path)
+                return None
+
         time_var = ds.variables["time"]
         lat = np.array(ds.variables["latitude"][:])
         lon = np.array(ds.variables["longitude"][:])
 
         # Convert time to datetime objects, then to hours since first.
-        times = netCDF4.num2date(time_var[:], time_var.units, time_var.calendar)
+        calendar = getattr(time_var, "calendar", "standard")
+        times = netCDF4.num2date(time_var[:], time_var.units, calendar)
         if len(times) < 2:
             return None
 
@@ -113,20 +265,34 @@ def _estimate_transit_time(
     current_vx: float,
     current_vy: float,
 ) -> float:
-    """Estimate transit time in seconds between two points.
+    """Estimate how long the glider needs to swim between two points.
 
-    Accounts for ocean currents by projecting them onto the transit
-    direction to get effective ground speed.
+    The glider moves through the water at a known speed, but ocean
+    currents push it sideways and along its track.  This function
+    projects the current vector onto the direction of travel to get
+    the effective speed over ground toward the waypoint.
+
+    For example, if the glider swims at 0.5 m/s and there is a
+    0.1 m/s current pushing it toward the waypoint, the effective
+    ground speed is 0.6 m/s.  If the current opposes the glider,
+    effective speed drops.  A minimum effective speed of 0.05 m/s
+    is enforced to avoid division by near-zero when the glider can
+    barely make headway.
 
     Args:
-        from_lat, from_lon: Start position in decimal degrees.
-        to_lat, to_lon: End position in decimal degrees.
-        glider_speed: Through-water horizontal speed in m/s.
-        current_vx: Eastward ocean current in m/s.
-        current_vy: Northward ocean current in m/s.
+        from_lat: Start latitude in decimal degrees.
+        from_lon: Start longitude in decimal degrees.
+        to_lat: End latitude in decimal degrees.
+        to_lon: End longitude in decimal degrees.
+        glider_speed: Through-water horizontal speed in m/s
+            (typically 0.25--0.50 for a Slocum).
+        current_vx: Eastward component of ocean current in m/s
+            (from ``m_water_vx``).
+        current_vy: Northward component of ocean current in m/s
+            (from ``m_water_vy``).
 
     Returns:
-        Estimated transit time in seconds (minimum 1.0).
+        Estimated transit time in seconds.  Never less than 1.0.
     """
     mean_lat = (from_lat + to_lat) / 2.0
     m_per_deg_lat = 111320.0
@@ -152,27 +318,51 @@ def _estimate_transit_time(
         # Avoid division by near-zero; glider can barely make headway.
         effective_speed = 0.05
 
-    return distance / effective_speed
+    max_transit = 86400.0  # 24-hour ceiling
+    return min(distance / effective_speed, max_transit)
 
 
 class DrifterFollower(BaseFollower):
-    """Follow a drifter by generating waypoints around its predicted position.
+    """Follow a drifting object by generating waypoints around it.
 
-    On each glider surfacing, this follower:
+    This is the main class you use.  It subclasses
+    :class:`~sfmc_api.follower.BaseFollower` and implements the
+    :meth:`on_surfacing` method.
 
-    1. Reads the latest drifter position and velocity from a NetCDF file.
-    2. Gets the glider's current position and ocean currents from telemetry.
-    3. For each waypoint in the configured geometry pattern, estimates
-       the transit time and advances the drifter position prediction.
-    4. Generates a ``goto_l{N}.ma`` file and queues it for upload.
+    On each glider surfacing the follower performs these steps:
 
-    Configuration keys (from the YAML --config file):
+    1. Opens the NetCDF file and reads the drifter's latest position
+       and estimated velocity (see :func:`_get_drifter_state`).
+    2. Reads the glider's GPS fix and depth-average current from the
+       :class:`~sfmc_api.dialog_parser.SurfacingEvent`.
+    3. Iterates over the geometry pattern from the config.  For each
+       offset (e.g. "1 km east"), it predicts the drifter's future
+       position at the estimated arrival time, places the waypoint
+       relative to that predicted position, and estimates the transit
+       time to the waypoint using :func:`_estimate_transit_time`.
+    4. Calls :func:`~sfmc_api.ma_writer.generate_goto_ma` to build a
+       ``goto_l{N}.ma`` file with all the waypoints.
+    5. Calls :meth:`send_files` to queue the file for upload.
 
-    - ``input`` (str): Path to drifter NetCDF file.
-    - ``sequence_number`` (int): Slot number for the .ma filename.
-    - ``geometry`` (list of [east_km, north_km]): Pattern around drifter.
-    - ``glider.speed_horizontal`` (float): Through-water speed in m/s.
-    - ``list_when_wpt_dist`` (float, optional): Waypoint distance in metres.
+    Configuration keys (loaded from your ``--config`` YAML file):
+
+    ``input`` (str)
+        Path to the drifter NetCDF file.
+    ``sequence_number`` (int, default 30)
+        Slot number for the ``.ma`` filename (e.g. 30 produces
+        ``goto_l30.ma``).
+    ``geometry`` (list of [east_km, north_km])
+        Waypoint offsets around the drifter in kilometres.
+    ``glider.speed_horizontal`` (float, default 0.5)
+        Through-water speed in m/s.
+    ``list_when_wpt_dist`` (float, default 100.0)
+        Waypoint-reached distance threshold in metres.
+
+    Example usage from the command line::
+
+        sfmc-follow --glider osu685 \\
+                    --follower examples/drifter_follower.py \\
+                    --config examples/drifter_config.yaml
     """
 
     def on_surfacing(self, event: SurfacingEvent) -> None:

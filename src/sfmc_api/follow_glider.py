@@ -8,12 +8,15 @@ any files the follower generates back to SFMC.
 Simulation modes
 ----------------
 
-Two orthogonal flags control simulation behaviour:
+Two orthogonal flags control simulation behaviour.  They can be
+combined to produce four distinct modes, each useful in a different
+stage of development and operations.
 
 ``--replay LOGFILE``
-    Read dialog lines from a log file (produced by ``sfmc-monitor-glider``)
-    instead of connecting to a live STOMP stream.  Events are replayed
-    with a configurable delay (``--replay-interval``, default 10 s).
+    Read dialog lines from a log file (produced by
+    ``sfmc-monitor-glider``) instead of connecting to a live STOMP
+    stream.  Events are replayed with a configurable delay
+    (``--replay-interval``, default 10 s).
 
 ``--dry-run``
     Print the files the follower would generate instead of uploading
@@ -30,41 +33,99 @@ Replay + upload            yes            no
 Replay + print (offline)   yes            yes
 =========================  =============  ==========
 
-CLI usage::
+When to use each mode
+~~~~~~~~~~~~~~~~~~~~~
 
-    # Full live mode (default)
-    sfmc-follow --glider osu685 --follower drifter_follower.py \\
-                --config drifter.yaml
+**Replay + print (offline development)**
+    Use this when you are *writing* your follower and want to iterate
+    quickly.  No SFMC connection or credentials are needed.  Feed a
+    recorded dialog log and inspect the files your code generates::
 
-    # Offline replay: no SFMC connection needed
-    sfmc-follow --glider osu685 --follower drifter_follower.py \\
-                --config drifter.yaml --replay dialog.log --dry-run
+        sfmc-follow --glider osu685 --follower my_follower.py \\
+                    --config my_config.yaml \\
+                    --replay dialog.log --dry-run
 
-    # Replay and upload to SFMC
-    sfmc-follow --glider osu685 --follower drifter_follower.py \\
-                --config drifter.yaml --replay dialog.log
+    This is the fastest feedback loop: edit your follower, re-run,
+    see the output.  You can capture a dialog log from a live glider
+    using ``sfmc-monitor-glider --logfile dialog.log``.
 
-    # Live monitor, print only (no upload)
-    sfmc-follow --glider osu685 --follower drifter_follower.py \\
-                --config drifter.yaml --dry-run
+**Replay + upload (integration testing)**
+    Use this to verify that your follower correctly uploads files to
+    SFMC, without waiting for a real glider to surface.  The dialog
+    is read from a log file, but the generated files are actually
+    pushed to the SFMC server.  This requires valid SFMC credentials::
 
-Programmatic usage::
+        sfmc-follow --glider osu685 --follower my_follower.py \\
+                    --config my_config.yaml --replay dialog.log
+
+    Check the SFMC web interface or the glider's ``to-glider`` folder
+    listing to confirm the files arrived.
+
+**Live + print only (monitoring without interfering)**
+    Use this during a real deployment when you want to *watch* what
+    your follower would do, but you are not ready to let it send
+    files to the glider.  The follower receives real surfacing data
+    from the live STOMP stream, runs your algorithm, and prints the
+    files it would generate -- but nothing is uploaded::
+
+        sfmc-follow --glider osu685 --follower my_follower.py \\
+                    --config my_config.yaml --dry-run
+
+    This is a good "shadow mode" for the first day of a deployment,
+    so you can verify the output before going fully live.
+
+**Live + upload (production)**
+    The default mode for operational use.  The follower is connected
+    to the live dialog stream and uploads files to SFMC for real::
+
+        sfmc-follow --glider osu685 --follower my_follower.py \\
+                    --config my_config.yaml
+
+    Press Ctrl-C to stop.
+
+Programmatic usage
+------------------
+
+You can also call the :func:`follow_glider` function directly from
+Python, which is useful for integrating into larger scripts or
+running multiple followers in one process::
 
     from sfmc_api import SFMCClient
     from sfmc_api.follow_glider import follow_glider
     from my_follower import MyFollower
 
+    # Live mode with upload.
     with SFMCClient() as client:
-        follow_glider(client, "osu685", MyFollower, config={"key": "val"})
+        follow_glider(
+            client, "osu685", MyFollower,
+            follower_config={"key": "val"},
+        )
 
-    # Offline replay
+    # Offline replay + dry-run (no client needed).
     follow_glider(
-        client=None, glider_name="osu685",
+        client=None,
+        glider_name="osu685",
         follower_class=MyFollower,
-        replay="dialog.log", dry_run=True,
+        follower_config={"key": "val"},
+        replay="dialog.log",
+        dry_run=True,
     )
 
-Press Ctrl-C to stop.
+    # Replay + upload (needs a client for SFMC access).
+    with SFMCClient() as client:
+        follow_glider(
+            client, "osu685", MyFollower,
+            follower_config={"key": "val"},
+            replay="dialog.log",
+        )
+
+    # Stop externally using a threading.Event:
+    import threading
+    stop = threading.Event()
+    # ... in another thread: stop.set()
+    follow_glider(client, "osu685", MyFollower, stop=stop)
+
+Press Ctrl-C to stop in any mode.
 """
 
 from __future__ import annotations
@@ -80,6 +141,7 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import Any
 
+from sfmc_api.client import SFMCClient
 from sfmc_api.dialog_parser import DialogParser, SurfacingEvent
 from sfmc_api.follower import BaseFollower, load_follower_class
 from sfmc_api.monitor_glider import _LINE_SEP, _log_with_time, ordered_dialog
@@ -90,12 +152,7 @@ logger = logging.getLogger(__name__)
 
 # ── Log line regex ──────────────────────────────────────────────────
 
-#: Matches a sfmc-monitor-glider log line and captures the dialog text.
-#: Format: ``2026-03-26T19:14:41.123456 sfmc.NAME.DIALOG  dialog text``
-#: Also accepts lines without the logger prefix (raw dialog).
-_LOG_LINE_RE = re.compile(
-    r"^(?:\d{4}-\d{2}-\d{2}T[\d:.]+\s+\S+\s{2})?(.*)",
-)
+_TS_LOGGER_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T[\d:.]+\s+(\S+)\s{2}(.*)")
 
 
 def _parse_log_line(line: str) -> str | None:
@@ -118,10 +175,7 @@ def _parse_log_line(line: str) -> str | None:
     # If the line has a logger prefix, only keep DIALOG lines.
     # Pattern: timestamp + space + logger_name + double-space + message
     # e.g.: "2026-03-26T19:14:41.123456 sfmc.osu685.DIALOG  Vehicle Name: osu685"
-    ts_logger_match = re.match(
-        r"^\d{4}-\d{2}-\d{2}T[\d:.]+\s+(\S+)\s{2}(.*)",
-        stripped,
-    )
+    ts_logger_match = _TS_LOGGER_RE.match(stripped)
     if ts_logger_match:
         logger_name = ts_logger_match.group(1)
         if ".DIALOG" not in logger_name:
@@ -244,7 +298,7 @@ def _replay_dialog(
 
 
 def _upload_files(
-    client: Any,  # SFMCClient, but Any to avoid import at module level
+    client: SFMCClient,
     glider_name: str,
     queue_out: Queue[dict[str, dict[str, str | bytes]] | None],
     upload_log: logging.Logger,
@@ -310,14 +364,16 @@ def _print_files(
                 continue
             for filename, content in files.items():
                 if isinstance(content, bytes):
+                    byte_count = len(content)
                     display = content.decode("utf-8", errors="replace")
                 else:
+                    byte_count = len(content.encode("utf-8"))
                     display = content
                 output_log.info(
                     "[dry-run] %s/%s (%d bytes):\n%s",
                     folder,
                     filename,
-                    len(display),
+                    byte_count,
                     display,
                 )
 
@@ -354,7 +410,7 @@ def setup_logging(
     def format_time_usec(record: logging.LogRecord, datefmt: str | None = None) -> str:
         import datetime
 
-        dt = datetime.datetime.fromtimestamp(record.created)
+        dt = datetime.datetime.fromtimestamp(record.created, tz=datetime.UTC)
         return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")
 
     fmt.formatTime = format_time_usec  # type: ignore[method-assign]
@@ -381,6 +437,7 @@ def setup_logging(
 
     def _make_logger(suffix: str) -> logging.Logger:
         log = logging.getLogger(f"sfmc.{glider_name}.{suffix}")
+        log.handlers.clear()
         log.setLevel(level)
         log.propagate = False
         for h in handlers:
@@ -398,7 +455,7 @@ def setup_logging(
 
 
 def follow_glider(
-    client: Any | None,
+    client: SFMCClient | None,
     glider_name: str,
     follower_class: type[BaseFollower],
     follower_config: dict[str, Any] | None = None,
@@ -776,8 +833,6 @@ def main() -> None:
 
     try:
         if need_client:
-            from sfmc_api import SFMCClient
-
             with SFMCClient(
                 host=args.hostname,
                 config_path=args.credentials,
