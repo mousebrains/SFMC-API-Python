@@ -18,6 +18,7 @@ See :doc:`/docs/getting_started` for installation and configuration.
 from __future__ import annotations
 
 import contextlib
+import io
 import logging
 import threading
 import time
@@ -1343,6 +1344,58 @@ class SFMCClient:
             f"/v1/upload-glider-files/{glider_name}/{folder}",
             file_paths,
         )
+
+    def upload_glider_file_contents(
+        self,
+        glider_name: str,
+        folder: str,
+        file_contents: dict[str, str | bytes],
+    ) -> dict[str, Any]:
+        """Upload in-memory file contents to a glider folder.
+
+        Like :meth:`upload_glider_files` but accepts file contents
+        directly instead of file paths.  Useful for programmatically
+        generated files (e.g. waypoint plans from a follower).
+
+        Calls ``PUT /v1/upload-glider-files/{glider_name}/{folder}``
+        with multipart form data.
+
+        Args:
+            glider_name: The registered name of the glider.
+            folder: Target folder — must be one of ``"to-glider"``
+                or ``"to-science"``.
+            file_contents: Mapping of filenames to their contents.
+                String values are UTF-8 encoded automatically.
+
+        Returns:
+            Server response confirming the upload.
+
+        Raises:
+            ValueError: If *folder* is not an allowed upload target,
+                or *file_contents* is empty.
+            APIError: If the server returns a non-success response.
+            RateLimitError: If the server returns HTTP 429.
+            AuthenticationError: If sign-in fails.
+        """
+        _validate_path_segment(glider_name, "glider_name")
+        _validate_path_segment(folder, "folder")
+        allowed = ("to-glider", "to-science")
+        if folder not in allowed:
+            raise ValueError(f"Upload folder must be one of {allowed}, got {folder!r}")
+        if not file_contents:
+            raise ValueError("file_contents must not be empty")
+
+        with contextlib.ExitStack() as stack:
+            files = []
+            for name, content in file_contents.items():
+                data = content.encode("utf-8") if isinstance(content, str) else content
+                bio = io.BytesIO(data)
+                stack.callback(bio.close)
+                files.append(("files", (name, bio)))
+
+            path = f"/v1/upload-glider-files/{glider_name}/{folder}"
+            response = self._request("PUT", path, files=files)
+            return self._json_or_empty(response)
 
     def upload_cache_files(
         self,

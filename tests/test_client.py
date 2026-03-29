@@ -523,6 +523,95 @@ class TestUploadFiles:
 
         assert mock_http.request.call_args[0][1] == "/v1/upload-glider-files/osu680/to-science"
 
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_upload_glider_file_contents_str(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        resp = make_mock_response(200, {"uploaded": 1})
+        resp.content = b'{"uploaded": 1}'
+        mock_http.request.return_value = resp
+        mock_build.return_value = mock_http
+
+        with SFMCClient(config=config) as client:
+            result = client.upload_glider_file_contents(
+                "g1",
+                "to-glider",
+                {"goto_l30.ma": "behavior_name=goto_list\n"},
+            )
+
+        assert result == {"uploaded": 1}
+        call_args = mock_http.request.call_args
+        assert call_args[0][0] == "PUT"
+        assert call_args[0][1] == "/v1/upload-glider-files/g1/to-glider"
+        files_kwarg = call_args.kwargs["files"]
+        assert len(files_kwarg) == 1
+        assert files_kwarg[0][0] == "files"
+        assert files_kwarg[0][1][0] == "goto_l30.ma"
+        # BytesIO is properly closed after the request completes.
+        bio = files_kwarg[0][1][1]
+        assert bio.closed
+
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_upload_glider_file_contents_bytes(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        resp = make_mock_response(200, {"uploaded": 1})
+        resp.content = b'{"uploaded": 1}'
+        mock_http.request.return_value = resp
+        mock_build.return_value = mock_http
+
+        with SFMCClient(config=config) as client:
+            result = client.upload_glider_file_contents(
+                "g1",
+                "to-science",
+                {"data.bin": b"\x00\x01\x02"},
+            )
+
+        assert result == {"uploaded": 1}
+        call_args = mock_http.request.call_args
+        assert call_args[0][1] == "/v1/upload-glider-files/g1/to-science"
+
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_upload_glider_file_contents_bad_folder(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_build.return_value = mock_http
+
+        with SFMCClient(config=config) as client, pytest.raises(ValueError, match="Upload folder"):
+            client.upload_glider_file_contents("g1", "from-glider", {"f": "x"})
+
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_upload_glider_file_contents_empty_raises(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_build.return_value = mock_http
+
+        with (
+            SFMCClient(config=config) as client,
+            pytest.raises(ValueError, match="must not be empty"),
+        ):
+            client.upload_glider_file_contents("g1", "to-glider", {})
+
 
 # ── Download single file ─────────────────────────────────────────
 

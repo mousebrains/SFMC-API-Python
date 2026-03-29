@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sfmc-api"
-version = "0.1.0"
+version = "0.1.1"
 description = "Python client for the Slocum Fleet Management Center (SFMC) REST API"
 readme = "README.md"
 license = "GPL-3.0-or-later"
@@ -32,19 +32,30 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+follow = [
+    "pyyaml>=6",
+]
+drifter = [
+    "pyyaml>=6",
+    "netCDF4>=1.6",
+    "numpy>=1.24",
+]
 dev = [
     "mypy>=1.10",
     "pre-commit>=3",
     "pytest>=8",
     "pytest-cov>=5",
     "pytest-httpx>=0.34",
+    "pyyaml>=6",
     "ruff>=0.4",
+    "types-PyYAML>=6",
 ]
 
 [project.scripts]
 sfmc-api = "sfmc_api.cli:main"
 sfmc-api-test = "sfmc_api.test_runner:main"
 sfmc-monitor-glider = "sfmc_api.monitor_glider:main"
+sfmc-follow = "sfmc_api.follow_glider:main"
 
 [project.urls]
 Homepage = "https://github.com/mousebrains/SFMC-API-Python"

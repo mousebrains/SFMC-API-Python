@@ -1,0 +1,162 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 850" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="10" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,3 L0,6 Z" fill="#475569"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="10" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,3 L0,6 Z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="10" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,3 L0,6 Z" fill="#16a34a"/>
+    </marker>
+    <marker id="arrow-orange" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="10" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,3 L0,6 Z" fill="#ea580c"/>
+    </marker>
+  </defs>
+
+  <!-- Title -->
+  <text x="480" y="30" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">sfmc-follow Data Flow</text>
+  <text x="480" y="50" text-anchor="middle" font-size="12" fill="#64748b">Both live and replay produce a StompSubscription, then share the same pipeline</text>
+
+  <!-- ══════════════ SOURCE THREADS (Thread 1a / 1b) ══════════════ -->
+
+  <!-- Live source (left) -->
+  <text x="220" y="80" text-anchor="middle" font-size="14" font-weight="bold" fill="#2563eb">Live Mode</text>
+
+  <rect x="120" y="95" width="200" height="44" rx="8" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="220" y="114" text-anchor="middle" font-weight="600" fill="#1e40af">Glider via Iridium</text>
+  <text x="220" y="130" text-anchor="middle" font-size="11" fill="#3b82f6">raw dialog text chunks</text>
+
+  <line x1="220" y1="139" x2="220" y2="158" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+
+  <rect x="120" y="162" width="200" height="44" rx="8" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="220" y="181" text-anchor="middle" font-weight="600" fill="#1e40af">SFMC Server</text>
+  <text x="220" y="197" text-anchor="middle" font-size="11" fill="#3b82f6">STOMP over WebSocket</text>
+
+  <line x1="220" y1="206" x2="220" y2="225" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+
+  <rect x="120" y="229" width="200" height="44" rx="8" fill="#eff6ff" stroke="#93c5fd" stroke-width="1"/>
+  <text x="220" y="248" text-anchor="middle" font-weight="600" fill="#1e40af">_receive_loop()</text>
+  <text x="220" y="264" text-anchor="middle" font-size="10" fill="#60a5fa">stomp.py — Thread 1a</text>
+
+  <!-- Replay source (right) -->
+  <text x="700" y="80" text-anchor="middle" font-size="14" font-weight="bold" fill="#16a34a">Replay Mode (--replay)</text>
+
+  <rect x="600" y="95" width="200" height="44" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="700" y="114" text-anchor="middle" font-weight="600" fill="#166534">Log File</text>
+  <text x="700" y="130" text-anchor="middle" font-size="11" fill="#22c55e">from sfmc-monitor-glider</text>
+
+  <line x1="700" y1="139" x2="700" y2="225" stroke="#16a34a" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+
+  <rect x="600" y="229" width="200" height="44" rx="8" fill="#f0fdf4" stroke="#86efac" stroke-width="1"/>
+  <text x="700" y="248" text-anchor="middle" font-weight="600" fill="#166534">_file_reader()</text>
+  <text x="700" y="264" text-anchor="middle" font-size="10" fill="#4ade80">filters DIALOG lines — Thread 1b</text>
+
+  <!-- ══════════════ MERGE AT StompSubscription._queue ══════════════ -->
+
+  <!-- Arrows converging -->
+  <line x1="220" y1="273" x2="220" y2="310" stroke="#475569" stroke-width="1.5"/>
+  <line x1="700" y1="273" x2="700" y2="310" stroke="#475569" stroke-width="1.5"/>
+  <line x1="220" y1="310" x2="460" y2="310" stroke="#475569" stroke-width="1.5"/>
+  <line x1="700" y1="310" x2="500" y2="310" stroke="#475569" stroke-width="1.5"/>
+
+  <!-- StompSubscription queue (the merge point) -->
+  <rect x="370" y="296" width="220" height="32" rx="16" fill="#e2e8f0" stroke="#475569" stroke-width="2"/>
+  <text x="480" y="317" text-anchor="middle" font-weight="700" fill="#334155">StompSubscription._queue</text>
+
+  <!-- Label: {"data": "line\r\n"} -->
+  <text x="480" y="345" text-anchor="middle" font-size="11" fill="#64748b">{"data": "line\r\n"} — same format from both sources</text>
+
+  <!-- Arrow down -->
+  <line x1="480" y1="350" x2="480" y2="372" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ══════════════ SHARED PIPELINE (Thread 2: dialog thread) ══════════════ -->
+
+  <rect x="12" y="376" width="100" height="20" rx="4" fill="#fef3c7" stroke="none"/>
+  <text x="62" y="390" text-anchor="middle" font-size="10" font-weight="600" fill="#92400e">Thread 2: dialog</text>
+
+  <!-- ordered_dialog -->
+  <rect x="350" y="376" width="260" height="40" rx="8" fill="#fefce8" stroke="#facc15" stroke-width="1"/>
+  <text x="480" y="393" text-anchor="middle" font-weight="600" fill="#854d0e">ordered_dialog()</text>
+  <text x="480" y="408" text-anchor="middle" font-size="10" fill="#a16207">reorder by sequence number</text>
+
+  <line x1="480" y1="416" x2="480" y2="432" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Line reassembly -->
+  <rect x="350" y="436" width="260" height="40" rx="8" fill="#fefce8" stroke="#facc15" stroke-width="1"/>
+  <text x="480" y="453" text-anchor="middle" font-weight="600" fill="#854d0e">Line Reassembly</text>
+  <text x="480" y="468" text-anchor="middle" font-size="10" fill="#a16207">_read_dialog() — splits on \r\n</text>
+
+  <line x1="480" y1="476" x2="480" y2="492" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- DialogParser -->
+  <rect x="350" y="496" width="260" height="48" rx="8" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+  <text x="480" y="516" text-anchor="middle" font-weight="700" fill="#92400e">DialogParser.feed_line()</text>
+  <text x="480" y="534" text-anchor="middle" font-size="11" fill="#b45309">state machine: GPS + sensors → event</text>
+
+  <!-- Extracted data label -->
+  <rect x="620" y="500" width="180" height="40" rx="6" fill="#fff7ed" stroke="#fdba74" stroke-width="1"/>
+  <text x="710" y="516" text-anchor="middle" font-size="10" fill="#9a3412">Extracts: vehicle_name,</text>
+  <text x="710" y="530" text-anchor="middle" font-size="10" fill="#9a3412">GPS, sensors, timestamp</text>
+
+  <!-- Arrow down to queue_in -->
+  <line x1="480" y1="544" x2="480" y2="570" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="495" y="564" font-size="11" font-weight="bold" fill="#475569">SurfacingEvent</text>
+
+  <!-- queue_in -->
+  <rect x="415" y="574" width="130" height="32" rx="16" fill="#e2e8f0" stroke="#475569" stroke-width="1.5"/>
+  <text x="480" y="595" text-anchor="middle" font-weight="600" fill="#334155">queue_in</text>
+
+  <!-- ══════════════ FOLLOWER (Thread 3) ══════════════ -->
+
+  <line x1="480" y1="606" x2="480" y2="630" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="12" y="636" width="100" height="20" rx="4" fill="#f3e8ff" stroke="none"/>
+  <text x="62" y="650" text-anchor="middle" font-size="10" font-weight="600" fill="#7e22ce">Thread 3: follower</text>
+
+  <rect x="330" y="634" width="300" height="56" rx="10" fill="#fae8ff" stroke="#a855f7" stroke-width="2.5"/>
+  <text x="480" y="657" text-anchor="middle" font-size="16" font-weight="700" fill="#7e22ce">Your Follower</text>
+  <text x="480" y="677" text-anchor="middle" font-size="11" fill="#a855f7">on_surfacing() → send_files()</text>
+
+  <!-- Arrow down -->
+  <line x1="480" y1="690" x2="480" y2="714" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="495" y="708" font-size="10" font-weight="bold" fill="#475569">{"to-glider": {"goto_l30.ma": "..."}}</text>
+
+  <!-- queue_out -->
+  <rect x="415" y="718" width="130" height="32" rx="16" fill="#e2e8f0" stroke="#475569" stroke-width="1.5"/>
+  <text x="480" y="739" text-anchor="middle" font-weight="600" fill="#334155">queue_out</text>
+
+  <!-- ══════════════ OUTPUT (Thread 4) ══════════════ -->
+
+  <line x1="480" y1="750" x2="480" y2="762" stroke="#475569" stroke-width="1"/>
+  <line x1="300" y1="762" x2="660" y2="762" stroke="#475569" stroke-width="1"/>
+
+  <rect x="12" y="772" width="100" height="20" rx="4" fill="#ffedd5" stroke="none"/>
+  <text x="62" y="786" text-anchor="middle" font-size="10" font-weight="600" fill="#9a3412">Thread 4: output</text>
+
+  <!-- Upload path -->
+  <line x1="300" y1="762" x2="300" y2="784" stroke="#ea580c" stroke-width="1.5" marker-end="url(#arrow-orange)"/>
+  <rect x="195" y="788" width="210" height="44" rx="8" fill="#fff7ed" stroke="#ea580c" stroke-width="1.5"/>
+  <text x="300" y="807" text-anchor="middle" font-weight="600" fill="#9a3412">Upload to SFMC</text>
+  <text x="300" y="823" text-anchor="middle" font-size="10" fill="#ea580c">upload_glider_file_contents()</text>
+
+  <!-- Dry-run path -->
+  <line x1="660" y1="762" x2="660" y2="784" stroke="#16a34a" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+  <rect x="555" y="788" width="210" height="44" rx="8" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="660" y="807" text-anchor="middle" font-weight="600" fill="#166534">Print (--dry-run)</text>
+  <text x="660" y="823" text-anchor="middle" font-size="10" fill="#16a34a">_print_files() — log to console</text>
+
+  <!-- OR label between upload/dry-run -->
+  <rect x="462" y="797" width="36" height="20" rx="10" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1"/>
+  <text x="480" y="811" text-anchor="middle" font-size="11" font-weight="600" fill="#64748b">OR</text>
+
+  <!-- Legend -->
+  <rect x="835" y="85" width="110" height="90" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="890" y="102" text-anchor="middle" font-size="10" font-weight="700" fill="#334155">Legend</text>
+  <line x1="845" y1="116" x2="870" y2="116" stroke="#2563eb" stroke-width="2"/>
+  <text x="878" y="120" font-size="10" fill="#475569">Live only</text>
+  <line x1="845" y1="134" x2="870" y2="134" stroke="#16a34a" stroke-width="2"/>
+  <text x="878" y="138" font-size="10" fill="#475569">Replay only</text>
+  <line x1="845" y1="152" x2="870" y2="152" stroke="#475569" stroke-width="2"/>
+  <text x="878" y="156" font-size="10" fill="#475569">Shared pipeline</text>
+</svg>
