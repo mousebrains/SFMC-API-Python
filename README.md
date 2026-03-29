@@ -38,7 +38,7 @@ sfmc-api --compact get-glider-details osusim     # single-line JSON
 sfmc-api --help                                  # see all subcommands
 ```
 
-### Monitor a Glider
+### [Monitor a Glider](docs/monitor_glider.md)
 
 Stream a glider's real-time dialog output and script state transitions
 to the console and/or a log file:
@@ -50,7 +50,7 @@ sfmc-monitor-glider --host gliderfmc1.ceoas.oregonstate.edu osusim
 
 See [docs/monitor_glider.md](docs/monitor_glider.md) for details.
 
-### Follow a Glider (Autonomous Navigation)
+### [Follow a Glider (Autonomous Navigation)](docs/follow_glider.md)
 
 Run a follower plugin that watches each surfacing, generates new
 navigation files (e.g. waypoint plans), and uploads them to SFMC:
