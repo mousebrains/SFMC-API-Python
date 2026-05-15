@@ -26,6 +26,22 @@ deleting files.
 | `from-glider` | yes | yes | no |
 | `configuration` | no | yes | yes |
 
+`from-glider` is read-only because it contains data the glider has
+already uploaded — deleting would lose mission science.  Download a
+copy first if you need to clear space.  `to-glider` and `to-science`
+hold files you've queued for the glider; deletions are allowed.
+
+A typical workflow:
+
+1. Generate or fetch plan files (e.g. `goto_l30.ma`).
+2. Upload them to `to-glider`.
+3. The glider downloads them on its next surfacing.
+4. The glider records data into `from-glider`.
+5. You download data from `from-glider` for analysis.
+
+See [glossary.md](glossary.md) for the file-type abbreviations
+(`.ma`, `.mi`, `.sbd`, `.tbd`).
+
 ## Data Flow: Upload Files
 
 ```
@@ -59,10 +75,10 @@ When no explicit path is given, downloads go to the client's
 
 ```python
 # Explicit path
-client.download_glider_file("osusim", "from-glider", "data.sbd", "/tmp/data.sbd")
+client.download_glider_file("osu685", "from-glider", "data.sbd", "/tmp/data.sbd")
 
 # Default: saves to download_dir/data.sbd
-client.download_glider_file("osusim", "from-glider", "data.sbd")
+client.download_glider_file("osu685", "from-glider", "data.sbd")
 ```
 
 ## Data Flow: Download a Single File

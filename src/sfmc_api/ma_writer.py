@@ -79,6 +79,7 @@ degrees to DDDMM format automatically.
 from __future__ import annotations
 
 import datetime
+import math
 
 from sfmc_api.coordinates import decimal_to_dddmm
 
@@ -86,6 +87,34 @@ from sfmc_api.coordinates import decimal_to_dddmm
 #: The firmware allows up to 8 (indices 0-7), but slot 7 is sometimes
 #: reserved for special use, so we cap at 7 by default.
 MAX_WAYPOINTS = 7
+
+
+def _validate_waypoints(waypoints: list[tuple[float, float]]) -> None:
+    """Validate every waypoint is a finite (lon, lat) pair in range.
+
+    Catches the most common follower bugs before they reach the glider:
+    swapped lat/lon, NaN/inf from a divide-by-zero, or out-of-range
+    values from a unit-conversion mistake.
+    """
+    for i, wpt in enumerate(waypoints):
+        try:
+            lon_deg, lat_deg = wpt
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Waypoint {i} must be a (longitude, latitude) pair, got {wpt!r}"
+            ) from exc
+        if not (math.isfinite(lon_deg) and math.isfinite(lat_deg)):
+            raise ValueError(f"Waypoint {i} contains NaN or infinity: ({lon_deg}, {lat_deg})")
+        if not -180.0 <= lon_deg <= 180.0:
+            raise ValueError(
+                f"Waypoint {i} longitude {lon_deg} is outside [-180, 180]. "
+                "Tuples are (longitude, latitude) — check for swapped values."
+            )
+        if not -90.0 <= lat_deg <= 90.0:
+            raise ValueError(
+                f"Waypoint {i} latitude {lat_deg} is outside [-90, 90]. "
+                "Tuples are (longitude, latitude) — check for swapped values."
+            )
 
 
 def generate_goto_ma(
@@ -123,13 +152,15 @@ def generate_goto_ma(
         ``"goto_l{N}.ma"`` and *content* is the complete file text.
 
     Raises:
-        ValueError: If *waypoints* is empty or exceeds
-            :data:`MAX_WAYPOINTS`.
+        ValueError: If *waypoints* is empty, exceeds
+            :data:`MAX_WAYPOINTS`, or contains a value with an
+            out-of-range latitude/longitude or NaN/inf.
     """
     if not waypoints:
         raise ValueError("At least one waypoint is required")
     if len(waypoints) > MAX_WAYPOINTS:
         raise ValueError(f"Too many waypoints: {len(waypoints)} (maximum is {MAX_WAYPOINTS})")
+    _validate_waypoints(waypoints)
 
     filename = f"goto_l{sequence_number}.ma"
     now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")

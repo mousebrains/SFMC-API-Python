@@ -3,6 +3,11 @@
 The `sfmc-api` command provides access to all SFMC REST API operations
 from the terminal.
 
+> **New to glider operations?**  Many commands refer to *plans*, *yos*,
+> *waypoints*, and *deployments*.  See [glossary.md](glossary.md) for
+> plain-language definitions.  When stuck, also see
+> [troubleshooting.md](troubleshooting.md).
+
 ## Installation
 
 The CLI is installed automatically with the package:
@@ -26,7 +31,28 @@ python -m sfmc_api --help
 | `--host HOSTNAME` | Select host from a multi-host credentials file |
 | `--download-path DIR` | Default directory for downloads (overrides config `rootDownloadPath`) |
 | `--compact` | Single-line JSON output (default: pretty-printed) |
+| `-y` / `--yes` | Skip confirmation prompts for destructive commands |
 | `--version` | Show version and exit |
+
+### Destructive commands
+
+The following commands modify or remove server-side state:
+
+- `delete-glider-file`
+- `delete-hit-waypoint-surface-plan-rule`
+- `delete-every-secs-surface-plan-rules`
+- `delete-at-utc-time-surface-plan-rules`
+- `delete-sampling-plan-rules`
+- `clear-assigned-script`
+
+They prompt for confirmation when run interactively, and refuse in a
+non-TTY (pipe / cron / service) unless one of these is set:
+
+- Pass `--yes` on the command line.
+- Or set the env var `SFMC_ASSUME_YES=1` in your environment.
+
+See [troubleshooting.md](troubleshooting.md#running-from-a-service--cron--unattended)
+for systemd / cron examples.
 
 ## Setup
 
@@ -54,22 +80,22 @@ URL to the API credentials page for each server:
 sfmc-api auth
 
 # Query a glider
-sfmc-api get-glider-details osusim
+sfmc-api get-glider-details osu685
 
 # Select a specific host
-sfmc-api --host gliderfmc1.ceoas.oregonstate.edu get-glider-details osusim
+sfmc-api --host gliderfmc1.ceoas.oregonstate.edu get-glider-details osu685
 
 # Use a different credentials file
 sfmc-api --credentials /path/to/creds.json auth
 
 # List files with filtering
-sfmc-api get-folder-file-listing osusim from-glider --filter "*.sbd" --page 0
+sfmc-api get-folder-file-listing osu685 from-glider --filter "*.sbd" --page 0
 
 # Stream events (Ctrl-C to stop)
-sfmc-api subscribe-connection-events osusim
+sfmc-api subscribe-connection-events osu685
 
 # Compact output for piping
-sfmc-api --compact get-glider-details osusim | jq .data.state
+sfmc-api --compact get-glider-details osu685 | jq .data.state
 ```
 
 ## Commands

@@ -9,10 +9,10 @@ Usage::
     sfmc-monitor-glider <glider-name> [logfile]
 
     # Log to file (also prints to stderr)
-    sfmc-monitor-glider osusim osusim.log
+    sfmc-monitor-glider osu685 osu685.log
 
     # Log to stdout only
-    sfmc-monitor-glider osusim
+    sfmc-monitor-glider osu685
 
 Press Ctrl-C to stop.
 
@@ -34,6 +34,12 @@ logger = logging.getLogger(__name__)
 
 # ── Sequence-ordered dialog output ───────────────────────────────────
 
+#: Maximum number of out-of-order messages we buffer before giving up
+#: and yielding what we have.  100 covers typical Iridium reordering
+#: while still bounding memory if a sequence number is permanently
+#: lost.
+_ORDER_BUFFER_MAX = 100
+
 
 def ordered_dialog(
     sub: StompSubscription,
@@ -44,6 +50,14 @@ def ordered_dialog(
     Messages may arrive out of order.  This generator buffers
     out-of-order messages and yields them in correct sequence,
     matching the Node.js reference implementation's reordering logic.
+
+    Recovery: if the out-of-order buffer grows past
+    ``_ORDER_BUFFER_MAX``, we assume a sequence number is permanently
+    lost (e.g. a dropped Iridium frame) and flush every buffered
+    message in sequence-number order, then resume from whatever
+    arrives next.  Messages are never silently discarded — they may
+    just be yielded out of natural order across a flush boundary.
+    A WARNING is logged when this happens so operators can see it.
 
     Yields:
         Each dialog data string, in sequence order.
@@ -75,11 +89,18 @@ def ordered_dialog(
             # Out of order — buffer it
             pending[seq] = data
 
-            # If the gap is too large, the buffer is stale — flush and reset
-            if len(pending) > 100:
+            # If the gap is too large, the buffer is stale — flush and reset.
+            if len(pending) > _ORDER_BUFFER_MAX:
+                lowest = min(pending)
+                highest = max(pending)
                 logger.warning(
-                    "ordered_dialog: gap too large, flushing %d buffered",
+                    "ordered_dialog: sequence gap exceeded buffer (%d msgs, "
+                    "expected=%s, buffered range [%d, %d]). Flushing in "
+                    "sequence-number order and resuming.",
                     len(pending),
+                    next_expected,
+                    lowest,
+                    highest,
                 )
                 for seq_key in sorted(pending):
                     yield pending[seq_key]
@@ -229,7 +250,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Monitor a glider's dialog output and script state transitions.",
     )
-    parser.add_argument("glider_name", help="Registered glider name (e.g. osusim)")
+    parser.add_argument("glider_name", help="Registered glider name (e.g. osu685)")
     parser.add_argument(
         "logfile",
         nargs="?",

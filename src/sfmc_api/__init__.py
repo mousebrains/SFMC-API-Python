@@ -24,6 +24,7 @@ from .exceptions import (
     RateLimitError,
     SFMCError,
 )
+from .follow_glider import RunStats, follow_glider
 from .follower import BaseFollower, load_follower_class
 from .ma_writer import MAX_WAYPOINTS, generate_goto_ma
 from .stomp import MAX_SEQUENCE, StompConnection, StompError, StompSubscription
@@ -37,6 +38,7 @@ __all__ = [
     "ConfigError",
     "DialogParser",
     "RateLimitError",
+    "RunStats",
     "SFMCClient",
     "SFMCConfig",
     "SFMCError",
@@ -47,9 +49,10 @@ __all__ = [
     "SurfacingEvent",
     "dddmm_to_decimal",
     "decimal_to_dddmm",
+    "follow_glider",
     "generate_goto_ma",
     "km_to_degrees",
     "load_follower_class",
 ]
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"

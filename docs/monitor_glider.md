@@ -3,20 +3,23 @@
 `sfmc-monitor-glider` streams a glider's real-time dialog output and
 script state transitions to the console and/or a log file.
 
+If terms like "dialog output," "script," or "deployment" are
+unfamiliar, see the [glossary](glossary.md).
+
 ## Usage
 
 ```bash
 # Log to file and stderr
-sfmc-monitor-glider osusim dialog.log
+sfmc-monitor-glider osu685 dialog.log
 
 # Stderr only
-sfmc-monitor-glider osusim
+sfmc-monitor-glider osu685
 
 # Specify host (for multi-host credentials files)
-sfmc-monitor-glider --host gliderfmc1.ceoas.oregonstate.edu osusim
+sfmc-monitor-glider --host gliderfmc1.ceoas.oregonstate.edu osu685
 
 # Custom credentials file
-sfmc-monitor-glider --credentials /path/to/creds.json osusim
+sfmc-monitor-glider --credentials /path/to/creds.json osu685
 ```
 
 Press **Ctrl-C** to stop.
@@ -55,7 +58,7 @@ from sfmc_api.monitor_glider import ordered_dialog
 
 with SFMCClient() as client:
     with client.open_stream() as stomp:
-        sub = client.subscribe_glider_output("osusim", stomp)
+        sub = client.subscribe_glider_output("osu685", stomp)
         for data in ordered_dialog(sub):
             print(data, end="")
 ```

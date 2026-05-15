@@ -145,10 +145,10 @@ File downloads use a default directory resolved in this order:
 client = SFMCClient(download_path="/data/gliders")
 
 # Downloads default to /data/gliders/<filename>
-client.download_glider_file("osusim", "from-glider", "data.sbd")
+client.download_glider_file("osu685", "from-glider", "data.sbd")
 
 # CLI equivalent
-# sfmc-api --download-path /data/gliders download-glider-file osusim from-glider data.sbd
+# sfmc-api --download-path /data/gliders download-glider-file osu685 from-glider data.sbd
 ```
 
 The directory is created automatically if it does not exist.

@@ -419,30 +419,54 @@ class DrifterFollower(BaseFollower):
         )
 
         # ── Build waypoints ─────────────────────────────────────
+        #
+        # The drifter is moving, so naive "drifter position + offset"
+        # waypoints would be stale by the time the glider arrived.
+        # We compensate in two passes per waypoint:
+        #
+        #   Pass 1: assume the drifter has advected to "now + cumulative
+        #           time so far", place a candidate waypoint, estimate
+        #           the transit time to reach it, and update the
+        #           cumulative time.
+        #   Pass 2: redo the drifter prediction using that updated
+        #           cumulative time and re-place the waypoint at the
+        #           drifter's actual expected position when the glider
+        #           is expected to arrive.
+        #
+        # A single pass is enough when transits are short relative to
+        # the drifter's velocity; the second pass matters most for
+        # waypoints far from the glider or when currents are strong.
         waypoints: list[tuple[float, float]] = []
         cumulative_time = 0.0
         prev_lat = glider_lat
         prev_lon = glider_lon
 
+        # Mean Earth metres per degree latitude.  Longitude scales with
+        # cos(latitude); we use the drifter's reference latitude.  Good
+        # to ~0.5 % within a few hundred km, which is plenty for these
+        # short transits.
+        m_per_deg_lat = 111320.0
+        m_per_deg_lon = 111320.0 * math.cos(math.radians(drifter_lat))
+
         for offset in geometry:
             east_km = float(offset[0])
             north_km = float(offset[1])
 
-            # Estimate transit time from previous position to this waypoint.
-            # First, predict where the drifter will be after transit.
-            m_per_deg_lat = 111320.0
-            m_per_deg_lon = 111320.0 * math.cos(math.radians(drifter_lat))
-
-            # Advance drifter position by cumulative time so far.
+            # Pass 1: where will the drifter be after the transits we
+            # have already scheduled?  Place a candidate waypoint there.
             pred_lat = drifter_lat + (drift_vy * cumulative_time) / m_per_deg_lat
             pred_lon = drifter_lon + (drift_vx * cumulative_time) / m_per_deg_lon
 
-            # Apply geometry offset.
+            # Apply the geometry pattern offset around the predicted
+            # drifter position.  km_to_degrees handles the cos(lat)
+            # correction for the east-km → degrees conversion.
             dlon_offset, dlat_offset = km_to_degrees(east_km, north_km, pred_lat)
             wpt_lon = pred_lon + dlon_offset
             wpt_lat = pred_lat + dlat_offset
 
-            # Estimate transit time to this waypoint.
+            # How long will the glider take to fly from the previous
+            # waypoint to this candidate, accounting for currents
+            # pushing it sideways?
             transit = _estimate_transit_time(
                 prev_lat,
                 prev_lon,
@@ -454,7 +478,10 @@ class DrifterFollower(BaseFollower):
             )
             cumulative_time += transit
 
-            # Re-predict drifter position at arrival and re-place waypoint.
+            # Pass 2: redo the drifter prediction now that we know how
+            # long the transit takes.  This is the refinement step; we
+            # re-place the waypoint at the drifter's actual expected
+            # position on arrival.
             pred_lat = drifter_lat + (drift_vy * cumulative_time) / m_per_deg_lat
             pred_lon = drifter_lon + (drift_vx * cumulative_time) / m_per_deg_lon
             wpt_lon = pred_lon + dlon_offset

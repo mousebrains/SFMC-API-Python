@@ -5,6 +5,12 @@
 Glider management endpoints handle registration, deployment lifecycle,
 status queries, and sensor data retrieval.
 
+> **A note on response shape.**  The SFMC server returns JSON objects
+> whose exact field set depends on server version and configuration.
+> The examples below show fields the library actively relies on; your
+> server may include additional fields.  Treat unknown extras as
+> opaque rather than asserting they exist.
+
 ## Endpoint Summary
 
 | Method | Python method | API path |
@@ -47,6 +53,35 @@ status queries, and sensor data retrieval.
      │ ◄────────────────────────────────────── │
      │                                        │
      │  → returns dict                        │
+```
+
+## Typical response: `get_active_deployment_details(name)`
+
+```json
+{
+  "data": {
+    "id": 1234,
+    "gliderName": "osu684",
+    "currentScriptName": "sfmc.xml",
+    "currentScriptType": "factory",
+    "isCurrentScriptRunning": true
+  }
+}
+```
+
+The library reads `data.id` (used as the deployment ID for STOMP
+topics), `data.currentScriptName`, `data.currentScriptType`, and
+`data.isCurrentScriptRunning`.  Treat anything else as informational.
+
+## Typical response: `get_folder_file_listing(...)`
+
+Paginated.  The list of file names lives somewhere under `data`;
+inspect the response from your server with `--compact | jq .` once to
+see the exact shape, then extract accordingly.
+
+```bash
+sfmc-api --compact get-folder-file-listing osu684 from-glider \
+    --filter "*.sbd" | jq .
 ```
 
 ## Data Flow: Register a New Glider

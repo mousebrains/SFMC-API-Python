@@ -136,6 +136,7 @@ Simulation:
   --replay LOGFILE        Replay from log file instead of live STOMP
   --replay-interval SECS  Delay between events during replay (default: 10)
   --dry-run               Print output instead of uploading
+  --strict                Exit non-zero if any upload error occurred
 
 Logging:
   --logfile FILE          Log file path
@@ -144,20 +145,54 @@ Logging:
   --log-backup-count N    Rotated backup files to keep (default: 5)
 ```
 
+## End-of-run summary
+
+Every run prints a one-line summary just before exiting:
+
+```
+2026-05-15T12:00:00 sfmc.osu685.FOLLOW  Done. surfacings=12, files_emitted=12, upload_errors=0
+```
+
+- `surfacings` — number of `SurfacingEvent`s the parser produced and
+  delivered to your follower.
+- `files_emitted` — number of files actually uploaded (or printed in
+  `--dry-run`).
+- `upload_errors` — number of upload attempts that failed.  A non-zero
+  count is logged with full tracebacks at the time of failure; the
+  count is recapped here so you cannot miss it.
+
+When `upload_errors > 0` and you passed `--strict`, the process exits
+with status 2 instead of 0.  This is intended for unattended
+deployments (cron, systemd) where you want a non-zero exit to trigger
+alerting.
+
+The summary is also returned programmatically as a
+`sfmc_api.RunStats` instance — see the
+[Programmatic API](#programmatic-api) section.
+
 ## Programmatic API
 
 ```python
-from sfmc_api import SFMCClient
+from sfmc_api import RunStats, SFMCClient
 from sfmc_api.follow_glider import follow_glider
 from my_follower import MyFollower
 
-# Live mode
+# Live mode — returns a RunStats summarising the run.
 with SFMCClient() as client:
-    follow_glider(client, "osu685", MyFollower,
-                  follower_config={"sequence_number": 30})
+    stats: RunStats = follow_glider(
+        client, "osu685", MyFollower,
+        follower_config={"sequence_number": 30},
+    )
+    print(stats.format())  # e.g. "surfacings=12, files_emitted=12, upload_errors=0"
 
 # Offline replay (no client needed)
-follow_glider(client=None, glider_name="osu685",
-              follower_class=MyFollower,
-              replay="dialog.log", dry_run=True)
+stats = follow_glider(
+    client=None,
+    glider_name="osu685",
+    follower_class=MyFollower,
+    replay="dialog.log",
+    dry_run=True,
+)
+if stats.had_errors():
+    raise SystemExit(2)
 ```

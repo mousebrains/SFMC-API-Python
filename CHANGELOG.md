@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-05-15
+
+Improvements focused on making the toolkit safer and easier to learn
+for non-expert oceanographers.
+
+### Added
+
+- `docs/troubleshooting.md` — common error messages mapped to fixes
+  (auth, SSL, multi-host, command-not-found, follower failures)
+- `docs/glossary.md` — plain-language definitions of SFMC, deployment,
+  yo, waypoint, `.ma`/`.mi`/`.sbd`/`.tbd`, Iridium, STOMP, etc.
+- `docs/getting_started.md` — venv walkthrough, `sfmc-api init` flow,
+  credential sourcing
+- Waypoint sanity validation in `generate_goto_ma()`: rejects NaN/inf
+  and lat/lon outside `[-90, 90]` / `[-180, 180]`, catching the most
+  common follower bugs (swapped lat/lon, off-by-1000 unit errors)
+  before they reach the glider
+- Confirmation prompts on destructive CLI commands
+  (`delete-glider-file`, `delete-*-rules`, `clear-assigned-script`).
+  Bypassed by `-y` / `--yes` or `SFMC_ASSUME_YES=1` env var
+- `RunStats` class returned from `follow_glider()`, with end-of-run
+  summary line ("surfacings=N, files_emitted=M, upload_errors=K")
+- `sfmc-follow --strict` exits with status 2 when any upload error
+  occurred (intended for cron / systemd alerting)
+- Inline algorithm comments in `examples/drifter_follower.py`
+  explaining the two-pass drifter extrapolation
+
+### Changed
+
+- `dialog_parser._parse_glider_timestamp()` no longer depends on the
+  host locale's month-name table; uses an explicit English table so
+  non-English `LC_TIME` does not silently break timestamp parsing
+- Retry-exhaustion errors in `_request` now include the underlying
+  exception class and attempt count in the message
+- `ordered_dialog` warning when the buffer overflows now reports the
+  expected sequence and buffered range, not just the count
+- Examples in README and all docs standardized on `osu685`
+
+### Fixed
+
+- `.gitignore` now covers `htmlcov/`, `.benchmarks/`, and `*.log`
+
 ## [0.1.1] - 2026-03-28
 
 ### Added
