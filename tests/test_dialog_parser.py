@@ -14,6 +14,7 @@ from sfmc_api.dialog_parser import (
     VEHICLE_NAME_RE,
     DialogParser,
     SurfacingEvent,
+    _parse_glider_timestamp,
 )
 
 # ── Sample dialog text ──────────────────────────────────────────────
@@ -285,6 +286,65 @@ class TestDialogParserReset:
         parser.feed_line("Vehicle Name: test")
         parser.reset()
         assert parser.flush() is None
+
+
+class TestLocaleIndependentTimestamp:
+    """``_parse_glider_timestamp`` works regardless of host locale."""
+
+    def test_parses_typical_value(self) -> None:
+        dt = _parse_glider_timestamp("Sat Mar 28 20:40:38 2026")
+        assert dt == datetime(2026, 3, 28, 20, 40, 38, tzinfo=UTC)
+
+    def test_implementation_does_not_use_strptime(self) -> None:
+        """The fix is meaningful only if we don't fall back to strptime.
+
+        ``datetime.strptime`` reads the C locale for ``%a`` / ``%b``,
+        which is what we are trying to avoid.  This test ensures
+        future refactors do not silently reintroduce that dependency.
+        """
+        import inspect
+
+        from sfmc_api import dialog_parser
+
+        source = inspect.getsource(dialog_parser._parse_glider_timestamp)
+        assert "strptime" not in source
+        # Sanity-check the module-level table is being looked up.
+        assert "_MONTH_ABBR_TO_NUM" in inspect.getsource(dialog_parser)
+
+    def test_works_under_alternate_locale(self) -> None:
+        """A non-English LC_TIME locale must not break parsing.
+
+        When no alternative locale is installed (some minimal CI
+        images), the test still verifies the C/POSIX fallback path.
+        """
+        import locale
+
+        original = locale.setlocale(locale.LC_TIME)
+        try:
+            # Try a few non-English locales — fall back to C if none.
+            tried = False
+            for candidate in ("de_DE.UTF-8", "ja_JP.UTF-8", "C.UTF-8", "C"):
+                try:
+                    locale.setlocale(locale.LC_TIME, candidate)
+                    tried = True
+                    break
+                except locale.Error:
+                    continue
+            assert tried, "Could not switch LC_TIME even to C"
+
+            dt = _parse_glider_timestamp("Sat Mar 28 20:40:38 2026")
+            assert dt == datetime(2026, 3, 28, 20, 40, 38, tzinfo=UTC)
+        finally:
+            locale.setlocale(locale.LC_TIME, original)
+
+    def test_unknown_month_returns_none(self) -> None:
+        assert _parse_glider_timestamp("Sat Xyz 28 20:40:38 2026") is None
+
+    def test_malformed_returns_none(self) -> None:
+        assert _parse_glider_timestamp("not a timestamp") is None
+
+    def test_out_of_range_returns_none(self) -> None:
+        assert _parse_glider_timestamp("Sat Feb 30 20:40:38 2026") is None
 
 
 # ── Helpers ─────────────────────────────────────────────────────────

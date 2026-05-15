@@ -7,6 +7,18 @@ control navigation, diving, surfacing, sampling, and data transmission.
 The SFMC API provides endpoints to query, update, and delete rules for
 each plan type.
 
+If you are new to glider operations, see [glossary.md](glossary.md) for
+plain-language definitions of *waypoint*, *yo*, *surface*, and other
+plan vocabulary.
+
+> **Inspecting real responses.**  Plan JSON varies by server version
+> and plan content.  The fastest way to learn your server's shape is
+> to query it once and pretty-print the result:
+>
+> ```bash
+> sfmc-api --compact get-waypoint-plan osu684 | jq .
+> ```
+
 ## Plan Types
 
 | Plan | Controls | Query method | Update method |

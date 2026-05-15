@@ -1,5 +1,11 @@
 # Real-Time Streaming Data Flow
 
+> **What is streaming for?**  Streaming lets you watch a glider while
+> it is in the water without polling.  You subscribe to *topics* (e.g.
+> connection events, dialog output) and receive updates as they
+> happen.  Useful for live dashboards and follower plugins.  See
+> [glossary.md](glossary.md) for vocabulary.
+
 ## Overview
 
 The SFMC server provides real-time event streaming via **STOMP over

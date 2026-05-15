@@ -15,6 +15,7 @@ import pytest
 from sfmc_api import SFMCClient
 from sfmc_api.dialog_parser import DialogParser, SurfacingEvent
 from sfmc_api.follow_glider import (
+    RunStats,
     _open_replay,
     _parse_log_line,
     _print_files,
@@ -804,3 +805,177 @@ class TestFollowGliderErrorPaths:
 
         mock_info_log.error.assert_called_once()
         assert "client is required" in str(mock_info_log.error.call_args)
+
+
+class TestRunStats:
+    """RunStats counters and end-of-run summary."""
+
+    def test_starts_at_zero(self) -> None:
+        s = RunStats()
+        assert s.surfacings == 0
+        assert s.files_emitted == 0
+        assert s.upload_errors == 0
+        assert not s.had_errors()
+
+    def test_incr_methods(self) -> None:
+        s = RunStats()
+        s.incr_surfacings()
+        s.incr_files(3)
+        s.incr_upload_errors()
+        assert s.surfacings == 1
+        assert s.files_emitted == 3
+        assert s.upload_errors == 1
+        assert s.had_errors()
+
+    def test_format_summary(self) -> None:
+        s = RunStats()
+        s.incr_surfacings()
+        s.incr_files(2)
+        assert "surfacings=1" in s.format()
+        assert "files_emitted=2" in s.format()
+        assert "upload_errors=0" in s.format()
+
+    def test_concurrent_increments(self) -> None:
+        """Counters survive concurrent increments without losing updates."""
+        s = RunStats()
+        threads = [
+            threading.Thread(target=lambda: [s.incr_surfacings() for _ in range(1000)])
+            for _ in range(8)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert s.surfacings == 8000
+
+    @patch("sfmc_api.follow_glider.setup_logging")
+    def test_replay_returns_stats(
+        self,
+        mock_setup_logging: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        mock_dialog_log = MagicMock(spec=logging.Logger)
+        mock_dialog_log.name = "test.dialog"
+        mock_upload_log = MagicMock(spec=logging.Logger)
+        mock_upload_log.name = "test.upload"
+        mock_info_log = MagicMock(spec=logging.Logger)
+        mock_info_log.name = "test.info"
+        mock_setup_logging.return_value = (mock_dialog_log, mock_upload_log, mock_info_log)
+
+        log_file = tmp_path / "dialog.log"
+        log_file.write_text(SAMPLE_LOG_LINES)
+
+        stats = follow_glider(
+            client=None,
+            glider_name="testbot",
+            follower_class=RecordingFollower,
+            follower_config={},
+            replay=str(log_file),
+            replay_interval=0.0,
+            dry_run=True,
+        )
+
+        assert isinstance(stats, RunStats)
+        assert stats.surfacings >= 1
+        assert stats.files_emitted >= 1
+        assert stats.upload_errors == 0
+
+
+class TestStrictFlagExit:
+    """``--strict`` exits non-zero only when the run had upload errors."""
+
+    @patch("sfmc_api.follow_glider.follow_glider")
+    @patch("sfmc_api.follow_glider.load_follower_class")
+    def test_strict_exits_2_when_errors(
+        self,
+        mock_load: MagicMock,
+        mock_follow: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Pretend the follower module loads fine.
+        mock_load.return_value = RecordingFollower
+        # follow_glider returns a RunStats with one upload error.
+        stats = RunStats()
+        stats.incr_upload_errors()
+        mock_follow.return_value = stats
+
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "sfmc-follow",
+                "--glider",
+                "g1",
+                "--follower",
+                "fake.py",
+                "--replay",
+                "fake.log",
+                "--dry-run",
+                "--strict",
+            ],
+        )
+        from sfmc_api.follow_glider import main
+
+        with pytest.raises(SystemExit) as exc:
+            main()
+        assert exc.value.code == 2
+
+    @patch("sfmc_api.follow_glider.follow_glider")
+    @patch("sfmc_api.follow_glider.load_follower_class")
+    def test_strict_returns_normally_when_no_errors(
+        self,
+        mock_load: MagicMock,
+        mock_follow: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        mock_load.return_value = RecordingFollower
+        mock_follow.return_value = RunStats()  # no errors
+
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "sfmc-follow",
+                "--glider",
+                "g1",
+                "--follower",
+                "fake.py",
+                "--replay",
+                "fake.log",
+                "--dry-run",
+                "--strict",
+            ],
+        )
+        from sfmc_api.follow_glider import main
+
+        # No SystemExit means clean return.
+        main()
+
+    @patch("sfmc_api.follow_glider.follow_glider")
+    @patch("sfmc_api.follow_glider.load_follower_class")
+    def test_no_strict_returns_normally_even_with_errors(
+        self,
+        mock_load: MagicMock,
+        mock_follow: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        mock_load.return_value = RecordingFollower
+        stats = RunStats()
+        stats.incr_upload_errors()
+        mock_follow.return_value = stats
+
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "sfmc-follow",
+                "--glider",
+                "g1",
+                "--follower",
+                "fake.py",
+                "--replay",
+                "fake.log",
+                "--dry-run",
+            ],
+        )
+        from sfmc_api.follow_glider import main
+
+        # Without --strict, errors do not force a non-zero exit.
+        main()

@@ -232,15 +232,20 @@ class SFMCClient:
                 if attempt < _MAX_RETRIES - 1:
                     delay = 2**attempt
                     logger.warning(
-                        "%s %s failed (%s), retrying in %ds",
+                        "%s %s failed (%s: %s), retrying in %ds",
                         method,
                         path,
+                        type(exc).__name__,
                         exc,
                         delay,
                     )
                     time.sleep(delay)
                     continue
-                raise APIError(0, str(exc)) from exc
+                raise APIError(
+                    0,
+                    f"{method} {path} failed after {_MAX_RETRIES} attempts "
+                    f"({type(exc).__name__}: {exc})",
+                ) from exc
 
             # Token expired — refresh once
             if response.status_code == 401 and attempt == 0:
@@ -276,7 +281,11 @@ class SFMCClient:
 
         # Final attempt exhausted
         if last_exc is not None:
-            raise APIError(0, str(last_exc)) from last_exc
+            raise APIError(
+                0,
+                f"{method} {path} failed after {_MAX_RETRIES} attempts "
+                f"({type(last_exc).__name__}: {last_exc})",
+            ) from last_exc
         check_response(response)
         return response
 

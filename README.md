@@ -8,10 +8,24 @@
 
 Python client for the Slocum Fleet Management Center (SFMC) REST API.
 
+SFMC is the web service Slocum glider pilots use to monitor and
+command autonomous underwater gliders.  This library lets you script
+against it from Python, query glider state, upload mission plans, and
+stream real-time dialog events.  If terms like "glider," "deployment,"
+or "yo" are unfamiliar, start with the [glossary](docs/glossary.md).
+
 ## Installation
 
+We recommend a Python virtual environment for any new project.  See
+[Getting Started](docs/getting_started.md) for a step-by-step setup,
+including how to obtain SFMC API credentials.
+
 ```bash
+python3 -m venv venv
+source venv/bin/activate
 pip install -e .
+sfmc-api init      # interactive credentials setup
+sfmc-api auth      # verify your credentials work
 ```
 
 ## Quick Start
@@ -22,21 +36,26 @@ pip install -e .
 from sfmc_api import SFMCClient
 
 with SFMCClient() as client:
-    details = client.get_glider_details("osusim")
+    details = client.get_glider_details("osu685")
     print(details)
 ```
 
 ### Command-Line Interface
 
 ```bash
+sfmc-api init                                    # one-time: set up credentials
 sfmc-api auth                                    # test credentials
-sfmc-api get-glider-details osusim               # query a glider
-sfmc-api get-waypoint-plan osusim                # get navigation plan
-sfmc-api get-folder-file-listing osusim from-glider  # list files
-sfmc-api subscribe-connection-events osusim      # stream events (Ctrl-C to stop)
-sfmc-api --compact get-glider-details osusim     # single-line JSON
+sfmc-api get-glider-details osu685               # query a glider
+sfmc-api get-waypoint-plan osu685                # get navigation plan
+sfmc-api get-folder-file-listing osu685 from-glider  # list files
+sfmc-api subscribe-connection-events osu685      # stream events (Ctrl-C to stop)
+sfmc-api --compact get-glider-details osu685     # single-line JSON
 sfmc-api --help                                  # see all subcommands
 ```
+
+Destructive commands (`delete-*`, `clear-assigned-script`) prompt for
+confirmation by default; pass `-y` / `--yes` or set
+`SFMC_ASSUME_YES=1` to skip the prompt in scripts and services.
 
 ### [Monitor a Glider](docs/monitor_glider.md)
 
@@ -44,8 +63,8 @@ Stream a glider's real-time dialog output and script state transitions
 to the console and/or a log file:
 
 ```bash
-sfmc-monitor-glider osusim dialog.log
-sfmc-monitor-glider --host gliderfmc1.ceoas.oregonstate.edu osusim
+sfmc-monitor-glider osu685 dialog.log
+sfmc-monitor-glider --host gliderfmc1.ceoas.oregonstate.edu osu685
 ```
 
 See [docs/monitor_glider.md](docs/monitor_glider.md) for details.
@@ -74,7 +93,7 @@ See [docs/follow_glider.md](docs/follow_glider.md) for the full guide.
 
 ```bash
 # Run live integration tests against an SFMC server
-sfmc-api-test --host gliderfmc1.ceoas.oregonstate.edu --glider osusim
+sfmc-api-test --host gliderfmc1.ceoas.oregonstate.edu --glider osu685
 ```
 
 ## Configuration
@@ -103,7 +122,7 @@ Credentials are loaded from `~/.config/sfmc/credentials.json` by default.
 Select a host with `--host`:
 
 ```bash
-sfmc-api --host sfmc-backup.example.com get-glider-details osusim
+sfmc-api --host sfmc-backup.example.com get-glider-details osu685
 ```
 
 If the file has only one host, it is selected automatically.
@@ -113,6 +132,8 @@ See [docs/configuration.md](docs/configuration.md) for full details.
 ## Documentation
 
 - [Getting Started](docs/getting_started.md) -- installation and configuration
+- [Glossary](docs/glossary.md) -- term definitions for non-experts
+- [Troubleshooting](docs/troubleshooting.md) -- common errors and fixes
 - [Authentication](docs/authentication.md) -- auth data flow
 - [Configuration](docs/configuration.md) -- config resolution and JSON schema
 - [CLI Reference](docs/cli.md) -- command-line interface
@@ -123,6 +144,12 @@ See [docs/configuration.md](docs/configuration.md) for full details.
 - [Real-Time Streaming](docs/streaming.md) -- STOMP over SockJS event streaming
 - [Monitor Glider](docs/monitor_glider.md) -- real-time dialog and script monitoring
 - [Follow Glider](docs/follow_glider.md) -- autonomous follower plugins and simulation modes
+
+## Getting Help
+
+- For usage questions, start with [Troubleshooting](docs/troubleshooting.md).
+- Report bugs or request features at
+  <https://github.com/mousebrains/SFMC-API-Python/issues>.
 
 ## License
 

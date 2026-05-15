@@ -127,7 +127,7 @@ class TestRequest:
     def test_transport_error_wrapped(
         self, mock_build: MagicMock, mock_auth: MagicMock, config: SFMCConfig
     ) -> None:
-        """Raw httpx transport errors are wrapped as APIError."""
+        """Raw httpx transport errors are wrapped as APIError with type info."""
         mock_http = MagicMock(spec=httpx.Client)
         mock_http.request.side_effect = httpx.ConnectError("connection refused")
         mock_build.return_value = mock_http
@@ -135,7 +135,12 @@ class TestRequest:
         with SFMCClient(config=config) as client, pytest.raises(APIError) as exc_info:
             client.get_glider_details("g1")
         assert exc_info.value.status_code == 0
-        assert "connection refused" in exc_info.value.response_body
+        # The new message surfaces the exception class and attempt count
+        # so a non-expert can tell network failures from server failures.
+        body = exc_info.value.response_body
+        assert "connection refused" in body
+        assert "ConnectError" in body
+        assert "after 3 attempts" in body
 
 
 class TestGliderOnlyMethods:

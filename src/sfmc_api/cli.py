@@ -2,10 +2,10 @@
 
 Provides the ``sfmc-api`` command with subcommands for every API operation::
 
-    sfmc-api get-glider-details osusim
-    sfmc-api get-waypoint-plan osusim
-    sfmc-api subscribe-connection-events osusim
-    sfmc-api --compact get-glider-details osusim
+    sfmc-api get-glider-details osu685
+    sfmc-api get-waypoint-plan osu685
+    sfmc-api subscribe-connection-events osu685
+    sfmc-api --compact get-glider-details osu685
     sfmc-api --credentials /path/to/creds.json auth
 
 Run ``sfmc-api --help`` for the full list of subcommands.
@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -79,6 +80,20 @@ _STREAM: dict[str, str] = {
     "subscribe-deployment-events": "Stream deployment update events",
 }
 
+# Commands that remove server-side state.  These prompt for confirmation
+# unless --yes is given.  Mid-mission deletions can disrupt live gliders,
+# so we want a non-expert to pause and read what they are about to do.
+_DESTRUCTIVE: frozenset[str] = frozenset(
+    {
+        "delete-glider-file",
+        "delete-hit-waypoint-surface-plan-rule",
+        "delete-every-secs-surface-plan-rules",
+        "delete-at-utc-time-surface-plan-rules",
+        "delete-sampling-plan-rules",
+        "clear-assigned-script",
+    }
+)
+
 
 # ── Output helpers ───────────────────────────────────────────────────
 
@@ -128,6 +143,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Single-line JSON output instead of pretty-printed",
+    )
+    parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        default=False,
+        help="Skip interactive confirmation for destructive commands",
     )
     parser.add_argument(
         "--version",
@@ -288,6 +310,52 @@ def build_parser() -> argparse.ArgumentParser:
 # ── Dispatch ─────────────────────────────────────────────────────────
 
 
+def _assume_yes_from_env() -> bool:
+    """Honour SFMC_ASSUME_YES=1 as an alternative to passing --yes.
+
+    Useful for systemd units, cron jobs, and other unattended runners
+    where adding --yes to every invocation is awkward.  Set once in
+    the service environment and forget.
+    """
+    raw = os.environ.get("SFMC_ASSUME_YES", "").strip().lower()
+    return raw in {"1", "true", "yes", "y"}
+
+
+def _confirm_destructive(cmd: str, args: argparse.Namespace) -> bool:
+    """Return True if a destructive command should proceed.
+
+    Bypassed when *--yes* is set or ``SFMC_ASSUME_YES=1`` is in the
+    environment.  Otherwise prompts the user with a description of
+    what will be deleted.  In a non-interactive shell (no TTY on
+    stdin) we refuse rather than block forever — the user must opt in
+    with *--yes* or the env var when scripting.
+    """
+    if getattr(args, "yes", False) or _assume_yes_from_env():
+        return True
+
+    target = _describe_destructive_target(cmd, args)
+    sys.stderr.write(f"About to {target}.\n")
+    if not sys.stdin.isatty():
+        sys.stderr.write(
+            "Refusing in non-interactive shell. Pass --yes or set SFMC_ASSUME_YES=1 to confirm.\n"
+        )
+        return False
+    reply = input("Continue? [y/N] ").strip().lower()
+    return reply in {"y", "yes"}
+
+
+def _describe_destructive_target(cmd: str, args: argparse.Namespace) -> str:
+    """Human-readable description of what a destructive command will affect."""
+    glider = getattr(args, "glider_name", "?")
+    if cmd == "delete-glider-file":
+        return f"delete {args.folder}/{args.file_name} from glider {glider}"
+    if cmd == "clear-assigned-script":
+        return f"clear the assigned script on glider {glider}"
+    # The remaining commands are all rule deletions.
+    rule_kind = cmd.removeprefix("delete-").replace("-", " ")
+    return f"delete {rule_kind} for glider {glider}"
+
+
 def _run(client: SFMCClient, args: argparse.Namespace) -> int:
     """Dispatch the parsed command to the appropriate handler."""
     cmd: str = args.command
@@ -298,6 +366,10 @@ def _run(client: SFMCClient, args: argparse.Namespace) -> int:
         client.authenticate()
         _print_json({"status": "ok", "host": client._config.host}, compact)
         return 0
+
+    if cmd in _DESTRUCTIVE and not _confirm_destructive(cmd, args):
+        sys.stderr.write("Cancelled.\n")
+        return 1
 
     # Derive method name from command name
     method_name = cmd.replace("-", "_")

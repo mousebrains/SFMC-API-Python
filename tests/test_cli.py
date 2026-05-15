@@ -814,3 +814,107 @@ class TestMain:
             main()
         assert exc_info.value.code == 0
         mock_handle_add.assert_called_once_with(args)
+
+
+# ── TestDestructiveConfirmation ──────────────────────────────────────
+
+
+class TestDestructiveConfirmation:
+    """Destructive commands prompt unless --yes or SFMC_ASSUME_YES is set."""
+
+    def _make_args(self, **kwargs: object) -> MagicMock:
+        args = MagicMock()
+        args.compact = False
+        args.yes = False
+        for k, v in kwargs.items():
+            setattr(args, k, v)
+        return args
+
+    def test_yes_flag_skips_prompt(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("SFMC_ASSUME_YES", raising=False)
+        client = MagicMock()
+        client.delete_glider_file.return_value = {}
+        args = self._make_args(
+            command="delete-glider-file",
+            yes=True,
+            glider_name="g1",
+            folder="to-glider",
+            file_name="old.mi",
+        )
+        rc = _run(client, args)
+        assert rc == 0
+        client.delete_glider_file.assert_called_once_with("g1", "to-glider", "old.mi")
+
+    def test_env_var_skips_prompt(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SFMC_ASSUME_YES", "1")
+        client = MagicMock()
+        client.delete_glider_file.return_value = {}
+        args = self._make_args(
+            command="delete-glider-file",
+            glider_name="g1",
+            folder="to-glider",
+            file_name="old.mi",
+        )
+        rc = _run(client, args)
+        assert rc == 0
+        client.delete_glider_file.assert_called_once()
+
+    def test_non_tty_without_yes_refuses(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("SFMC_ASSUME_YES", raising=False)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        client = MagicMock()
+        args = self._make_args(
+            command="delete-glider-file",
+            glider_name="g1",
+            folder="to-glider",
+            file_name="old.mi",
+        )
+        rc = _run(client, args)
+        assert rc == 1
+        client.delete_glider_file.assert_not_called()
+        err = capsys.readouterr().err
+        assert "SFMC_ASSUME_YES" in err or "--yes" in err
+
+    def test_tty_user_says_no(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("SFMC_ASSUME_YES", raising=False)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+        client = MagicMock()
+        args = self._make_args(command="clear-assigned-script", glider_name="g1")
+        rc = _run(client, args)
+        assert rc == 1
+        client.clear_assigned_script.assert_not_called()
+
+    def test_tty_user_says_yes(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("SFMC_ASSUME_YES", raising=False)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda _prompt: "yes")
+        client = MagicMock()
+        client.clear_assigned_script.return_value = {}
+        args = self._make_args(command="clear-assigned-script", glider_name="g1")
+        rc = _run(client, args)
+        assert rc == 0
+        client.clear_assigned_script.assert_called_once_with("g1")
+
+    def test_non_destructive_unaffected(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # No prompt should appear; no input read.
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        monkeypatch.delenv("SFMC_ASSUME_YES", raising=False)
+        client = MagicMock()
+        client.get_glider_details.return_value = {"name": "g1"}
+        args = self._make_args(command="get-glider-details", glider_name="g1")
+        rc = _run(client, args)
+        assert rc == 0
+        client.get_glider_details.assert_called_once()

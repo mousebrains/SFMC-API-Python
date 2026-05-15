@@ -210,6 +210,58 @@ class TestValidation:
         assert any("<end:waypoints>" in ln for ln in lines)
 
 
+class TestCoordinateValidation:
+    """Reject malformed or out-of-range waypoints before they reach the glider."""
+
+    def test_lat_above_90_raises(self) -> None:
+        with pytest.raises(ValueError, match="latitude"):
+            generate_goto_ma(waypoints=[(-117.0, 91.0)], sequence_number=30)
+
+    def test_lat_below_minus_90_raises(self) -> None:
+        with pytest.raises(ValueError, match="latitude"):
+            generate_goto_ma(waypoints=[(-117.0, -90.5)], sequence_number=30)
+
+    def test_lon_above_180_raises(self) -> None:
+        with pytest.raises(ValueError, match="longitude"):
+            generate_goto_ma(waypoints=[(180.1, 33.0)], sequence_number=30)
+
+    def test_lon_below_minus_180_raises(self) -> None:
+        with pytest.raises(ValueError, match="longitude"):
+            generate_goto_ma(waypoints=[(-181.0, 33.0)], sequence_number=30)
+
+    def test_swapped_lat_lon_caught(self) -> None:
+        # User accidentally passes (lat, lon) instead of (lon, lat).
+        # For most coastal coordinates, the lat-as-lon will be in range
+        # but the lon-as-lat will exceed 90, catching the swap.
+        with pytest.raises(ValueError, match="latitude"):
+            generate_goto_ma(waypoints=[(33.167, -117.697)], sequence_number=30)
+
+    def test_nan_lat_raises(self) -> None:
+        nan = float("nan")
+        with pytest.raises(ValueError, match="NaN or infinity"):
+            generate_goto_ma(waypoints=[(-117.0, nan)], sequence_number=30)
+
+    def test_inf_lon_raises(self) -> None:
+        inf = float("inf")
+        with pytest.raises(ValueError, match="NaN or infinity"):
+            generate_goto_ma(waypoints=[(inf, 33.0)], sequence_number=30)
+
+    def test_boundary_lat_90_ok(self) -> None:
+        _, content = generate_goto_ma(waypoints=[(0.0, 90.0)], sequence_number=30)
+        assert "<start:waypoints>" in content
+
+    def test_boundary_lon_180_ok(self) -> None:
+        _, content = generate_goto_ma(waypoints=[(180.0, 0.0)], sequence_number=30)
+        assert "<start:waypoints>" in content
+
+    def test_malformed_waypoint_tuple_raises(self) -> None:
+        with pytest.raises(ValueError, match="must be a"):
+            generate_goto_ma(
+                waypoints=[(1.0,)],  # type: ignore[list-item]
+                sequence_number=30,
+            )
+
+
 # ── Helpers ─────────────────────────────────────────────────────────
 
 

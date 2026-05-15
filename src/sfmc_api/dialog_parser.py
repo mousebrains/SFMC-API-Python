@@ -78,6 +78,50 @@ from datetime import UTC, datetime
 
 from sfmc_api.coordinates import dddmm_to_decimal
 
+# The glider firmware emits English month abbreviations regardless of
+# the host's locale.  Mapping them explicitly avoids ``strptime``'s
+# locale-dependent behaviour, which silently fails on non-English
+# systems (German, Japanese, etc.).
+_MONTH_ABBR_TO_NUM = {
+    "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+    "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+}  # fmt: skip
+
+#: ``Sat Mar 28 20:40:38 2026`` — weekday + month + day + time + year.
+_CURR_TIME_VALUE_RE = re.compile(
+    r"^\S+\s+(?P<mon>[A-Za-z]{3})\s+(?P<day>\d{1,2})\s+"
+    r"(?P<hour>\d{1,2}):(?P<min>\d{1,2}):(?P<sec>\d{1,2})\s+"
+    r"(?P<year>\d{4})$"
+)
+
+
+def _parse_glider_timestamp(value: str) -> datetime | None:
+    """Parse a ``Curr Time:`` value, locale-independent.
+
+    Returns ``None`` for any malformed input rather than raising — the
+    caller continues collecting other fields when the timestamp is
+    unreadable.
+    """
+    m = _CURR_TIME_VALUE_RE.match(value.strip())
+    if not m:
+        return None
+    month = _MONTH_ABBR_TO_NUM.get(m.group("mon"))
+    if month is None:
+        return None
+    try:
+        return datetime(
+            year=int(m.group("year")),
+            month=month,
+            day=int(m.group("day")),
+            hour=int(m.group("hour")),
+            minute=int(m.group("min")),
+            second=int(m.group("sec")),
+            tzinfo=UTC,
+        )
+    except ValueError:
+        return None
+
+
 # ── Data classes ────────────────────────────────────────────────────
 
 
@@ -274,11 +318,9 @@ class DialogParser:
         m = CURR_TIME_RE.search(line)
         if m and self._current is not None:
             time_str = m.group(1).strip()
-            try:
-                dt = datetime.strptime(time_str, "%a %b %d %H:%M:%S %Y")
-                self._current.timestamp = dt.replace(tzinfo=UTC)
-            except ValueError:
-                pass  # Unparseable time -- keep going.
+            parsed = _parse_glider_timestamp(time_str)
+            if parsed is not None:
+                self._current.timestamp = parsed
             with contextlib.suppress(ValueError):
                 self._current.mission_time = float(m.group(2))
             return True

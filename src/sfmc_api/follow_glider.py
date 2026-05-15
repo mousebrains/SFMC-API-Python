@@ -137,6 +137,7 @@ import re
 import sys
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Any
@@ -148,6 +149,45 @@ from sfmc_api.monitor_glider import _LINE_SEP, _log_with_time, ordered_dialog
 from sfmc_api.stomp import StompSubscription
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RunStats:
+    """Thread-safe counters describing one ``follow_glider`` run.
+
+    Used to print an end-of-run summary so a non-expert running the
+    follower in a terminal can see at a glance whether anything went
+    wrong, instead of having to scroll back through the log.
+    """
+
+    surfacings: int = 0
+    files_emitted: int = 0
+    upload_errors: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def incr_surfacings(self) -> None:
+        with self._lock:
+            self.surfacings += 1
+
+    def incr_files(self, n: int = 1) -> None:
+        with self._lock:
+            self.files_emitted += n
+
+    def incr_upload_errors(self, n: int = 1) -> None:
+        with self._lock:
+            self.upload_errors += n
+
+    def had_errors(self) -> bool:
+        with self._lock:
+            return self.upload_errors > 0
+
+    def format(self) -> str:
+        with self._lock:
+            return (
+                f"surfacings={self.surfacings}, "
+                f"files_emitted={self.files_emitted}, "
+                f"upload_errors={self.upload_errors}"
+            )
 
 
 # ── Log line regex ──────────────────────────────────────────────────
@@ -246,6 +286,7 @@ def _read_dialog(
     dialog_log: logging.Logger | None,
     stop: threading.Event,
     event_interval: float = 0.0,
+    stats: RunStats | None = None,
 ) -> None:
     """Read dialog output, parse surfacings, and feed the follower.
 
@@ -286,6 +327,8 @@ def _read_dialog(
                     _log_with_time(dialog_log, line, line_start)
                 event = parser.feed_line(line)
                 if event is not None:
+                    if stats is not None:
+                        stats.incr_surfacings()
                     queue_in.put(event)
                     if event_interval > 0 and not stop.is_set():
                         stop.wait(timeout=event_interval)
@@ -297,11 +340,15 @@ def _read_dialog(
             _log_with_time(dialog_log, buf, line_start)
         event = parser.feed_line(buf)
         if event is not None:
+            if stats is not None:
+                stats.incr_surfacings()
             queue_in.put(event)
 
     # Flush any partially collected surfacing.
     event = parser.flush()
     if event is not None:
+        if stats is not None:
+            stats.incr_surfacings()
         queue_in.put(event)
 
 
@@ -314,6 +361,7 @@ def _upload_files(
     queue_out: Queue[dict[str, dict[str, str | bytes]] | None],
     upload_log: logging.Logger,
     stop: threading.Event,
+    stats: RunStats | None = None,
 ) -> None:
     """Read file dicts from queue_out and upload them to SFMC.
 
@@ -340,12 +388,16 @@ def _upload_files(
                     folder,
                     filenames,
                 )
+                if stats is not None:
+                    stats.incr_files(len(files))
             except Exception:
                 upload_log.exception(
                     "Failed to upload to %s: %s",
                     folder,
                     filenames,
                 )
+                if stats is not None:
+                    stats.incr_upload_errors()
 
 
 # ── Dry-run output thread ──────────────────────────────────────────
@@ -355,6 +407,7 @@ def _print_files(
     queue_out: Queue[dict[str, dict[str, str | bytes]] | None],
     output_log: logging.Logger,
     stop: threading.Event,
+    stats: RunStats | None = None,
 ) -> None:
     """Print generated files instead of uploading them.
 
@@ -387,6 +440,8 @@ def _print_files(
                     byte_count,
                     display,
                 )
+                if stats is not None:
+                    stats.incr_files()
 
 
 # ── Logging setup ───────────────────────────────────────────────────
@@ -478,7 +533,8 @@ def follow_glider(
     replay_interval: float = 10.0,
     dry_run: bool = False,
     stop: threading.Event | None = None,
-) -> None:
+    stats: RunStats | None = None,
+) -> RunStats:
     """Monitor a glider and run a follower that generates files.
 
     Connects to the glider's STOMP dialog stream (or replays from a
@@ -508,9 +564,18 @@ def follow_glider(
         dry_run: If ``True``, print generated files to the log instead
             of uploading them to SFMC.
         stop: Optional event to signal shutdown externally.
+        stats: Optional :class:`RunStats` to accumulate into.  A new
+            one is created if not supplied.  Either way the populated
+            instance is returned for inspection.
+
+    Returns:
+        A :class:`RunStats` summarising the run (surfacings,
+        files emitted, upload errors).
     """
     if stop is None:
         stop = threading.Event()
+    if stats is None:
+        stats = RunStats()
 
     dialog_log, upload_log, info_log = setup_logging(
         glider_name,
@@ -523,11 +588,11 @@ def follow_glider(
     # ── Validate arguments ──────────────────────────────────────
     if not replay and not dry_run and client is None:
         info_log.error("client is required for live mode without --dry-run")
-        return
+        return stats
 
     if replay and not dry_run and client is None:
         info_log.error("client is required for replay + upload mode")
-        return
+        return stats
 
     # ── Verify glider exists (skip in offline replay) ───────────
     if client is not None and not replay:
@@ -536,7 +601,7 @@ def follow_glider(
             glider_state = details["data"]["state"]
         except (KeyError, TypeError) as exc:
             info_log.error("Unexpected API response: %s", exc)
-            return
+            return stats
         info_log.info(
             "Following %s (state=%s)",
             glider_name,
@@ -579,7 +644,7 @@ def follow_glider(
     if replay:
         if not Path(replay).is_file():
             info_log.error("Replay file not found: %s", replay)
-            return
+            return stats
         dialog_sub, file_reader_thread = _open_replay(replay, stop)
         info_log.info("Replaying from %s", replay)
     else:
@@ -600,6 +665,7 @@ def follow_glider(
             dialog_log,
             stop,
             replay_interval if replay else 0.0,
+            stats,
         ),
         daemon=True,
         name="dialog-reader",
@@ -608,14 +674,14 @@ def follow_glider(
     if dry_run:
         output_thread = threading.Thread(
             target=_print_files,
-            args=(queue_out, upload_log, stop),
+            args=(queue_out, upload_log, stop, stats),
             daemon=True,
             name="dry-run-printer",
         )
     else:
         output_thread = threading.Thread(
             target=_upload_files,
-            args=(client, glider_name, queue_out, upload_log, stop),
+            args=(client, glider_name, queue_out, upload_log, stop, stats),
             daemon=True,
             name="file-uploader",
         )
@@ -672,7 +738,8 @@ def follow_glider(
         if stomp_ctx is not None:
             stomp_ctx.__exit__(None, None, None)
 
-    info_log.info("Done.")
+    info_log.info("Done. %s", stats.format())
+    return stats
 
 
 # ── CLI ─────────────────────────────────────────────────────────────
@@ -771,6 +838,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Print generated files instead of uploading to SFMC",
     )
+    sim.add_argument(
+        "--strict",
+        action="store_true",
+        default=False,
+        help="Exit with non-zero status if any upload error occurred",
+    )
 
     # ── Logging ─────────────────────────────────────────────────
     log_group = parser.add_argument_group("logging")
@@ -823,13 +896,14 @@ def main() -> None:
     # Decide whether we need an SFMC client.
     need_client = not (args.replay and args.dry_run)
 
+    stats: RunStats | None = None
     try:
         if need_client:
             with SFMCClient(
                 host=args.hostname,
                 config_path=args.credentials,
             ) as client:
-                follow_glider(
+                stats = follow_glider(
                     client=client,
                     glider_name=args.glider,
                     follower_class=follower_class,
@@ -844,7 +918,7 @@ def main() -> None:
                 )
         else:
             # Fully offline: replay + dry-run, no client needed.
-            follow_glider(
+            stats = follow_glider(
                 client=None,
                 glider_name=args.glider,
                 follower_class=follower_class,
@@ -862,6 +936,10 @@ def main() -> None:
     except Exception as exc:
         sys.stderr.write(f"Error: {exc}\n")
         sys.exit(1)
+
+    if args.strict and stats is not None and stats.had_errors():
+        sys.stderr.write(f"--strict: exiting non-zero ({stats.format()})\n")
+        sys.exit(2)
 
 
 if __name__ == "__main__":
