@@ -72,8 +72,9 @@ import sys
 import tempfile
 import time
 import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -138,11 +139,22 @@ class PullState:
 
     @classmethod
     def load(cls, path: Path) -> PullState:
-        """Load state from *path*, returning empty state if absent."""
+        """Load state from *path*, returning empty state if absent.
+
+        Raises:
+            SFMCError: If the file exists but is not a valid state
+                file (corrupt JSON, wrong shape, or unknown version),
+                so cron/systemd logs show a clear message instead of
+                a traceback.
+        """
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return cls()
+        except ValueError as exc:
+            raise SFMCError(f"Corrupt state file {path}: {exc}") from exc
+        if not isinstance(data, dict):
+            raise SFMCError(f"Corrupt state file {path}: expected a JSON object")
         if data.get("version") != _STATE_VERSION:
             raise SFMCError(f"Unsupported state file version {data.get('version')!r} in {path}")
         return cls(hwm=data.get("hwm"), files=data.get("files", {}))
@@ -193,6 +205,33 @@ def cutoff_before(mtime: str, margin_minutes: int) -> str:
 # ── Server interaction ───────────────────────────────────────────────
 
 
+def _iter_listing(
+    client: SFMCClient,
+    glider_name: str,
+    cutoff: str | None,
+) -> Iterator[dict[str, Any]]:
+    """Yield from-glider listing entries page by page.
+
+    Stops at the first short page, or at ``_MAX_LISTING_PAGES`` with
+    a warning (a safety valve, not a tuning knob).
+    """
+    for page in range(_MAX_LISTING_PAGES):
+        result = client.get_folder_file_listing(
+            glider_name,
+            "from-glider",
+            page=page,
+            last_modified_after=cutoff,
+        )
+        entries = result.get("results", [])
+        yield from entries
+        if len(entries) < result.get("limit", 20):
+            return
+    logger.warning(
+        "Listing exceeded %d pages; processing what was fetched",
+        _MAX_LISTING_PAGES,
+    )
+
+
 def list_new_files(
     client: SFMCClient,
     glider_name: str,
@@ -225,29 +264,13 @@ def list_new_files(
         cutoff = cutoff_before(state.hwm, margin_minutes)
 
     new: list[dict[str, Any]] = []
-    for page in range(_MAX_LISTING_PAGES):
-        result = client.get_folder_file_listing(
-            glider_name,
-            "from-glider",
-            page=page,
-            last_modified_after=cutoff,
-        )
-        entries = result.get("results", [])
-        for entry in entries:
-            name = entry["fileName"]
-            if connected and not _DINKUM_NAME_RE.match(name):
-                logger.debug("deferring possibly in-flight entry %s", name)
-                continue
-            if state.is_new(name, entry["dateTimeModified"]):
-                new.append(entry)
-        limit = result.get("limit", 20)
-        if len(entries) < limit:
-            break
-    else:
-        logger.warning(
-            "Filtered listing exceeded %d pages; processing what was fetched",
-            _MAX_LISTING_PAGES,
-        )
+    for entry in _iter_listing(client, glider_name, cutoff):
+        name = entry["fileName"]
+        if connected and not _DINKUM_NAME_RE.match(name):
+            logger.debug("deferring possibly in-flight entry %s", name)
+            continue
+        if state.is_new(name, entry["dateTimeModified"]):
+            new.append(entry)
     return new
 
 
@@ -258,7 +281,6 @@ def download_new_files(
     output_dir: Path,
     state: PullState,
     state_path: Path,
-    margin_minutes: int,
 ) -> int:
     """Download *new_entries* in one zip request and extract them.
 
@@ -274,7 +296,11 @@ def download_new_files(
     """
     wanted = {e["fileName"]: e for e in new_entries}
     oldest = min(e["dateTimeModified"] for e in new_entries)
-    cutoff = cutoff_before(oldest, margin_minutes)
+    # The wide listing margin exists to *find* old-stamped files; the
+    # entries' mtimes are exact once found, so the zip request only
+    # needs a minute of slack, not the full margin — otherwise every
+    # batch re-downloads (and discards) up to margin-worth of files.
+    cutoff = cutoff_before(oldest, 1)
 
     written: set[str] = set()
     with tempfile.TemporaryDirectory(prefix="sfmc-pull-") as tmp:
@@ -292,11 +318,13 @@ def download_new_files(
                 if entry is None or member.is_dir():
                     continue
                 target = output_dir / name
-                with zf.open(member) as src, open(target, "wb") as dst:
+                part = target.with_suffix(target.suffix + ".part")
+                with zf.open(member) as src, open(part, "wb") as dst:
                     dst.write(src.read())
                 mtime_dt = datetime.strptime(entry["dateTimeModified"], _MTIME_FMT)
-                epoch = mtime_dt.timestamp()
-                os.utime(target, (epoch, epoch))
+                epoch = mtime_dt.replace(tzinfo=UTC).timestamp()
+                os.utime(part, (epoch, epoch))
+                part.replace(target)
                 state.observe(name, entry["dateTimeModified"], entry["fileSize"])
                 written.add(name)
                 logger.info(
@@ -343,7 +371,6 @@ def reconcile(
         output_dir,
         state,
         state_path,
-        margin_minutes,
     )
 
 
@@ -361,31 +388,29 @@ def baseline(
     new and download deployment history.  Files older than the window
     stay invisible to all future passes, so their names are never
     needed.
+
+    The high-water mark can only come from a Dinkum-named entry, and
+    the newest page may hold none (e.g. right after a surfacing burst
+    whose renames are still pending) — so the unfiltered walk
+    continues, recording everything it passes, until it finds one.
+    If the folder has no Dinkum-named files at all, the mark stays
+    unset and every entry walked is recorded; reconciles then run
+    unfiltered until the first rename appears.
     """
-    result = client.get_folder_file_listing(glider_name, "from-glider", page=0)
-    for entry in result.get("results", []):
+    for entry in _iter_listing(client, glider_name, None):
         state.observe(entry["fileName"], entry["dateTimeModified"], entry["fileSize"])
+        if state.hwm is not None:
+            break
 
     if state.hwm is not None:
         cutoff = cutoff_before(state.hwm, margin_minutes)
-        for page in range(_MAX_LISTING_PAGES):
-            result = client.get_folder_file_listing(
-                glider_name,
-                "from-glider",
-                page=page,
-                last_modified_after=cutoff,
-            )
-            entries = result.get("results", [])
-            for entry in entries:
-                state.observe(entry["fileName"], entry["dateTimeModified"], entry["fileSize"])
-            if len(entries) < result.get("limit", 20):
-                break
-        else:
-            logger.warning(
-                "baseline window exceeded %d pages; earliest files in the "
-                "window may be re-downloaded once",
-                _MAX_LISTING_PAGES,
-            )
+        for entry in _iter_listing(client, glider_name, cutoff):
+            state.observe(entry["fileName"], entry["dateTimeModified"], entry["fileSize"])
+    else:
+        logger.warning(
+            "no Dinkum-named files found; high-water mark unset — "
+            "reconciles will scan unfiltered until the first rename appears"
+        )
 
     state.save(state_path)
     logger.info(
@@ -415,7 +440,7 @@ def log_transfers(client: SFMCClient, connection_id: int) -> None:
     """Log a one-line summary of a connection's Zmodem transfers."""
     try:
         data = client.get_zmodem_transfers(connection_id)["data"]
-    except SFMCError as exc:
+    except (SFMCError, KeyError, TypeError) as exc:
         logger.info("connection %d: no transfer records (%s)", connection_id, exc)
         return
     downloads = [t for t in data.get("downloads", []) if t.get("transferStatus") == "Completed"]
@@ -429,19 +454,54 @@ def log_transfers(client: SFMCClient, connection_id: int) -> None:
     )
 
 
+def try_reconcile(
+    client: SFMCClient,
+    args: argparse.Namespace,
+    state: PullState,
+    state_path: Path,
+    *,
+    connected: bool,
+) -> int:
+    """Reconcile, degrading any failure to a logged warning.
+
+    The daemon must survive transient server outages, rate limiting,
+    and malformed responses: a failed pass costs one poll cycle — the
+    settle window, idle reconcile, or reconnect catch-up retries
+    naturally.  KeyboardInterrupt/SystemExit still propagate.
+    """
+    try:
+        return reconcile(
+            client,
+            args.glider_name,
+            args.output_dir,
+            state,
+            state_path,
+            args.margin_minutes,
+            connected=connected,
+        )
+    except Exception as exc:
+        logger.warning("reconcile pass failed (%s: %s); will retry", type(exc).__name__, exc)
+        return 0
+
+
 # ── Event-driven main loop ───────────────────────────────────────────
 
 
-def _drain(sub: StompSubscription) -> list[Any]:
-    """Return all queued messages from *sub* without blocking."""
+def _drain(sub: StompSubscription) -> tuple[list[Any], bool]:
+    """Return ``(queued messages, closed)`` from *sub* without blocking.
+
+    The subscription's close sentinel (a single ``None``) must be
+    reported, not swallowed: it is enqueued exactly once, and losing
+    it here would leave the caller looping forever on a dead stream.
+    """
     messages: list[Any] = []
     while True:
         try:
             msg = sub.get(timeout=0.05)
         except queue.Empty:
-            return messages
+            return messages, False
         if msg is None:
-            return messages
+            return messages, True
         messages.append(msg)
 
 
@@ -496,7 +556,8 @@ def stream_once(
                     return
 
             now = time.monotonic()
-            events = ([msg] if msg else []) + _drain(conn_sub)
+            drained, conn_closed = _drain(conn_sub)
+            events = ([msg] if msg else []) + drained
             for event_list in events:
                 for event in event_list if isinstance(event_list, list) else [event_list]:
                     if event.get("active") is False:
@@ -521,19 +582,16 @@ def stream_once(
                             event.get("startDateTime"),
                         )
 
-            for body in _drain(zmodem_sub):
+            zmodem_bodies, zmodem_closed = _drain(zmodem_sub)
+            for body in zmodem_bodies:
                 logger.debug("zmodem transfer activity: %s", body)
 
+            if conn_closed or zmodem_closed:
+                logger.warning("event stream closed")
+                return
+
             if settle_until is not None and now >= next_poll:
-                downloaded = reconcile(
-                    client,
-                    args.glider_name,
-                    args.output_dir,
-                    state,
-                    state_path,
-                    args.margin_minutes,
-                    connected=connected,
-                )
+                downloaded = try_reconcile(client, args, state, state_path, connected=connected)
                 if downloaded:
                     quiet_polls = 0
                     window_downloads += downloaded
@@ -557,15 +615,7 @@ def stream_once(
 
             if settle_until is None and now - last_activity >= args.reconcile_interval:
                 last_activity = now
-                downloaded = reconcile(
-                    client,
-                    args.glider_name,
-                    args.output_dir,
-                    state,
-                    state_path,
-                    args.margin_minutes,
-                    connected=connected,
-                )
+                downloaded = try_reconcile(client, args, state, state_path, connected=connected)
                 if downloaded:
                     logger.info("idle reconcile caught %d file(s)", downloaded)
 
@@ -576,30 +626,51 @@ def run_stream(
     state: PullState,
     state_path: Path,
 ) -> None:
-    """Stream events forever, reconnecting with backoff on drops."""
+    """Stream events forever, reconnecting with backoff on drops.
+
+    Survives anything short of KeyboardInterrupt/SystemExit: server
+    outages, auth hiccups, and malformed responses all reduce to a
+    logged warning and a backed-off reconnect.  Backoff only resets
+    after a session that lived a while, so a flapping stream cannot
+    reconnect-storm every 15 seconds forever.
+    """
     backoff = 15.0
     while True:
+        session_start = time.monotonic()
         try:
             stream_once(client, args, state, state_path)
-            backoff = 15.0
         except StompError as exc:
             logger.warning("STOMP error: %s", exc)
+        except Exception as exc:
+            logger.warning("stream session failed (%s: %s)", type(exc).__name__, exc)
+        if time.monotonic() - session_start > 60.0:
+            backoff = 15.0
         logger.info("reconnecting in %.0fs", backoff)
         time.sleep(backoff)
         backoff = min(backoff * 2, 300.0)
         # Catch anything that arrived while the stream was down.
-        reconcile(
+        try_reconcile(
             client,
-            args.glider_name,
-            args.output_dir,
+            args,
             state,
             state_path,
-            args.margin_minutes,
             connected=glider_is_connected(client, args.glider_name),
         )
 
 
 # ── Entry point ──────────────────────────────────────────────────────
+
+
+def _nonnegative_int(value: str) -> int:
+    """argparse type: an integer >= 0.
+
+    A negative margin would place the cutoff *after* the high-water
+    mark and guarantee missed files.
+    """
+    n = int(value)
+    if n < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return n
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -643,7 +714,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--margin-minutes",
-        type=int,
+        type=_nonnegative_int,
         default=2880,
         metavar="N",
         help=(
@@ -716,7 +787,11 @@ def main() -> None:
     try:
         state = PullState.load(state_path)
         with SFMCClient(config_path=args.credentials, host=args.host) as client:
-            if state.hwm is None and not state.files:
+            # Baseline only when no state file exists: an existing file
+            # with empty contents means "baselined an empty folder", and
+            # re-baselining then would mark everything that arrived since
+            # as seen without downloading it.
+            if not state_path.exists():
                 baseline(client, args.glider_name, state, state_path, args.margin_minutes)
             else:
                 caught_up = reconcile(
