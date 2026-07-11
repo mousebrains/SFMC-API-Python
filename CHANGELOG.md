@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `sfmc-pull-new-downloads` — event-driven mirroring of new
+  `from-glider` files into a local directory.  Subscribes to
+  connection and Zmodem transfer events, waits out SFMC's variable
+  rename delay after each surfacing, then fetches all new files in a
+  single filtered zip request.  Downloads both the 8.3-named and the
+  renamed copies (compressed `*.?cd` may never be renamed;
+  `*.mri`/`*.mrd` never are), deferring non-Dinkum names while the
+  glider is connected so partially transferred files are never
+  fetched.  Keeps a state file for safe restarts and offers a
+  `--once` mode for cron.  Timestamp cutoffs stay in the glider-clock
+  domain with a dive-scale safety margin (default 48 h) and local
+  filename dedup.  (`docs/pull_new_downloads.md`)
+
 ## [0.2.0] - 2026-05-15
 
 Improvements focused on making the toolkit safer and easier to learn
