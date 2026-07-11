@@ -324,14 +324,13 @@ class TestPrintFiles:
 
     def test_prints_file_content(self) -> None:
         q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
-        stop = threading.Event()
         mock_log = MagicMock(spec=logging.Logger)
         mock_log.name = "test.dryrun"
 
         q_out.put({"to-glider": {"goto_l30.ma": "waypoint data"}})
         q_out.put(None)
 
-        _print_files(q_out, mock_log, stop)
+        _print_files(q_out, mock_log)
 
         mock_log.info.assert_called()
         call_args_str = str(mock_log.info.call_args)
@@ -340,31 +339,34 @@ class TestPrintFiles:
 
     def test_handles_bytes_content(self) -> None:
         q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
-        stop = threading.Event()
         mock_log = MagicMock(spec=logging.Logger)
         mock_log.name = "test.dryrun.bytes"
 
         q_out.put({"to-science": {"data.bin": b"binary content"}})
         q_out.put(None)
 
-        _print_files(q_out, mock_log, stop)
+        _print_files(q_out, mock_log)
 
         mock_log.info.assert_called()
 
-    def test_respects_stop_event(self) -> None:
+    def test_drains_backlog_before_sentinel(self) -> None:
+        """Queued output is emitted even during shutdown — the sentinel,
+        not the stop event, ends the loop (files generated just before
+        a disconnect must not be discarded)."""
         q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
-        stop = threading.Event()
-        stop.set()
         mock_log = MagicMock(spec=logging.Logger)
-        mock_log.name = "test.dryrun.stop"
+        mock_log.name = "test.dryrun.drain"
 
-        thread = threading.Thread(
-            target=_print_files,
-            args=(q_out, mock_log, stop),
-        )
+        q_out.put({"to-glider": {"a.ma": "1"}})
+        q_out.put({"to-glider": {"b.ma": "2"}})
+        q_out.put(None)
+
+        thread = threading.Thread(target=_print_files, args=(q_out, mock_log))
         thread.start()
         thread.join(timeout=5)
+
         assert not thread.is_alive()
+        assert mock_log.info.call_count == 2
 
 
 # ── Upload thread tests ─────────────────────────────────────────────
@@ -377,13 +379,12 @@ class TestUploadFiles:
         mock_client = MagicMock()
         mock_client.upload_glider_file_contents.return_value = {"ok": True}
         q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
-        stop = threading.Event()
         log = logging.getLogger("test.upload")
 
         q_out.put({"to-glider": {"goto_l30.ma": "content"}})
         q_out.put(None)
 
-        _upload_files(mock_client, "g1", q_out, log, stop)
+        _upload_files(mock_client, "g1", q_out, log)
 
         mock_client.upload_glider_file_contents.assert_called_once_with(
             "g1",
@@ -395,34 +396,39 @@ class TestUploadFiles:
         mock_client = MagicMock()
         mock_client.upload_glider_file_contents.side_effect = RuntimeError("network")
         q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
-        stop = threading.Event()
         log = logging.getLogger("test.upload.err")
 
         q_out.put({"to-glider": {"f.ma": "data"}})
         q_out.put(None)
 
-        _upload_files(mock_client, "g1", q_out, log, stop)
+        _upload_files(mock_client, "g1", q_out, log)
 
-    def test_respects_stop_event(self) -> None:
+    def test_drains_backlog_before_sentinel(self) -> None:
+        """Every queued upload happens before the sentinel ends the
+        loop — a disconnect must not discard generated files."""
         mock_client = MagicMock()
+        mock_client.upload_glider_file_contents.return_value = {}
         q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
-        stop = threading.Event()
-        stop.set()
-        log = logging.getLogger("test.upload.stop")
+        log = logging.getLogger("test.upload.drain")
+
+        q_out.put({"to-glider": {"a.ma": "1"}})
+        q_out.put({"to-glider": {"b.ma": "2"}})
+        q_out.put(None)
 
         thread = threading.Thread(
             target=_upload_files,
-            args=(mock_client, "g1", q_out, log, stop),
+            args=(mock_client, "g1", q_out, log),
         )
         thread.start()
         thread.join(timeout=5)
+
         assert not thread.is_alive()
+        assert mock_client.upload_glider_file_contents.call_count == 2
 
     def test_multiple_folders(self) -> None:
         mock_client = MagicMock()
         mock_client.upload_glider_file_contents.return_value = {}
         q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
-        stop = threading.Event()
         log = logging.getLogger("test.upload.multi")
 
         q_out.put(
@@ -433,7 +439,7 @@ class TestUploadFiles:
         )
         q_out.put(None)
 
-        _upload_files(mock_client, "g1", q_out, log, stop)
+        _upload_files(mock_client, "g1", q_out, log)
 
         assert mock_client.upload_glider_file_contents.call_count == 2
 

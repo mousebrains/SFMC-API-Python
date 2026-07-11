@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+from typing import Any, ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -918,3 +920,93 @@ class TestDestructiveConfirmation:
         rc = _run(client, args)
         assert rc == 0
         client.get_glider_details.assert_called_once()
+
+
+# ── TestAtomicCredentialWrites ───────────────────────────────────────
+
+
+class TestAtomicCredentialWrites:
+    """Credential writes must be atomic and 0600 from birth."""
+
+    _ENTRY: ClassVar[dict[str, Any]] = {
+        "apiCredentials": {"clientId": "id", "secret": "sec"},
+        "tlsRejectUnauthorized": 0,
+    }
+
+    @patch("sfmc_api.cli._prompt_host_entry")
+    def test_init_no_tmp_leftover(self, mock_prompt: MagicMock, tmp_path: Path) -> None:
+        creds = tmp_path / "creds.json"
+        args = MagicMock()
+        args.credentials = creds
+        mock_prompt.return_value = ("h.example.com", dict(self._ENTRY))
+
+        rc = _handle_init(args)
+
+        assert rc == 0
+        assert not (tmp_path / "creds.json.tmp").exists()
+
+    @patch("sfmc_api.cli._prompt_host_entry")
+    def test_init_never_permissive_before_replace(
+        self, mock_prompt: MagicMock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The temp file already holds the secret, so it must be 0600
+        at the moment it replaces the target — a umask cannot widen it."""
+        creds = tmp_path / "creds.json"
+        args = MagicMock()
+        args.credentials = creds
+        mock_prompt.return_value = ("h.example.com", dict(self._ENTRY))
+
+        seen_modes: list[int] = []
+        real_replace = os.replace
+
+        def spy_replace(src: Any, dst: Any) -> None:
+            seen_modes.append(Path(src).stat().st_mode & 0o777)
+            real_replace(src, dst)
+
+        monkeypatch.setattr("sfmc_api.cli.os.replace", spy_replace)
+
+        rc = _handle_init(args)
+
+        assert rc == 0
+        assert seen_modes == [0o600]
+        assert creds.stat().st_mode & 0o777 == 0o600
+
+    @patch("sfmc_api.cli._prompt_host_entry")
+    def test_add_host_interrupted_write_keeps_original(
+        self, mock_prompt: MagicMock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failure mid-write must leave the existing multi-host store
+        untouched (no truncation) and clean up the temp file."""
+        creds = tmp_path / "creds.json"
+        original = {"old.example.com": dict(self._ENTRY)}
+        creds.write_text(json.dumps(original, indent=4) + "\n")
+        args = MagicMock()
+        args.credentials = creds
+        mock_prompt.return_value = ("new.example.com", dict(self._ENTRY))
+
+        def broken_replace(src: Any, dst: Any) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr("sfmc_api.cli.os.replace", broken_replace)
+
+        with pytest.raises(OSError, match="disk full"):
+            _handle_add_host(args)
+
+        assert json.loads(creds.read_text()) == original
+        assert not (tmp_path / "creds.json.tmp").exists()
+
+    @patch("sfmc_api.cli._prompt_host_entry")
+    def test_add_host_replaces_atomically(self, mock_prompt: MagicMock, tmp_path: Path) -> None:
+        creds = tmp_path / "creds.json"
+        creds.write_text(json.dumps({"old.example.com": dict(self._ENTRY)}) + "\n")
+        args = MagicMock()
+        args.credentials = creds
+        mock_prompt.return_value = ("new.example.com", dict(self._ENTRY))
+
+        rc = _handle_add_host(args)
+
+        assert rc == 0
+        data = json.loads(creds.read_text())
+        assert set(data) == {"old.example.com", "new.example.com"}
+        assert creds.stat().st_mode & 0o777 == 0o600
+        assert not (tmp_path / "creds.json.tmp").exists()

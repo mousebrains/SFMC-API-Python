@@ -41,6 +41,20 @@ logger = logging.getLogger(__name__)
 _ORDER_BUFFER_MAX = 100
 
 
+def _flush_order(pending: dict[int, str], next_expected: int | None) -> list[int]:
+    """Order buffered sequence numbers for a flush.
+
+    Sorts by modular distance from *next_expected* so a buffer that
+    straddles the ``MAX_SEQUENCE -> 0`` wraparound flushes in stream
+    order (e.g. expected ``MAX_SEQUENCE``, buffered ``{MAX_SEQUENCE,
+    0, 1}`` flushes in that order, not ``0, 1, MAX_SEQUENCE``).
+    """
+    if next_expected is None:
+        return sorted(pending)
+    span = MAX_SEQUENCE + 1
+    return sorted(pending, key=lambda seq: (seq - next_expected) % span)
+
+
 def ordered_dialog(
     sub: StompSubscription,
 ) -> Generator[str, None, None]:
@@ -54,10 +68,11 @@ def ordered_dialog(
     Recovery: if the out-of-order buffer grows past
     ``_ORDER_BUFFER_MAX``, we assume a sequence number is permanently
     lost (e.g. a dropped Iridium frame) and flush every buffered
-    message in sequence-number order, then resume from whatever
-    arrives next.  Messages are never silently discarded — they may
-    just be yielded out of natural order across a flush boundary.
-    A WARNING is logged when this happens so operators can see it.
+    message in stream order, then resume from whatever arrives next.
+    When the subscription ends, anything still buffered is flushed the
+    same way.  Messages are never silently discarded — they may just
+    be yielded out of natural order across a flush boundary.  A
+    WARNING is logged when this happens so operators can see it.
 
     Yields:
         Each dialog data string, in sequence order.
@@ -91,21 +106,31 @@ def ordered_dialog(
 
             # If the gap is too large, the buffer is stale — flush and reset.
             if len(pending) > _ORDER_BUFFER_MAX:
-                lowest = min(pending)
-                highest = max(pending)
                 logger.warning(
                     "ordered_dialog: sequence gap exceeded buffer (%d msgs, "
                     "expected=%s, buffered range [%d, %d]). Flushing in "
-                    "sequence-number order and resuming.",
+                    "stream order and resuming.",
                     len(pending),
                     next_expected,
-                    lowest,
-                    highest,
+                    min(pending),
+                    max(pending),
                 )
-                for seq_key in sorted(pending):
+                for seq_key in _flush_order(pending, next_expected):
                     yield pending[seq_key]
                 pending.clear()
                 next_expected = None
+
+    # End of stream — a gap that never filled must not swallow the
+    # buffered tail (often the last lines of a surfacing).
+    if pending:
+        logger.warning(
+            "ordered_dialog: stream ended with %d message(s) buffered "
+            "(expected=%s); flushing in stream order.",
+            len(pending),
+            next_expected,
+        )
+        for seq_key in _flush_order(pending, next_expected):
+            yield pending[seq_key]
 
 
 # ── Logging setup ────────────────────────────────────────────────────

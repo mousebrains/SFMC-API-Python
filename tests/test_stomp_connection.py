@@ -167,12 +167,7 @@ class TestStompTlsConfig:
 class TestStompConnectionLifecycle:
     @patch("sfmc_api.stomp.ws_connect")
     def test_connect_success(self, mock_ws_connect: MagicMock, config: SFMCConfig) -> None:
-        mock_ws = MagicMock()
-        mock_ws.recv.side_effect = [
-            "o",  # SockJS open
-            'a["CONNECTED\\nversion:1.2\\n\\n\\u0000"]',  # STOMP CONNECTED
-        ]
-        mock_ws_connect.return_value = mock_ws
+        _make_connected_ws(mock_ws_connect)
 
         conn = StompConnection(config, "tok")
         conn.connect()
@@ -215,26 +210,10 @@ class TestStompConnectionLifecycle:
 
     @patch("sfmc_api.stomp.ws_connect")
     def test_subscribe_sends_frame(self, mock_ws_connect: MagicMock, config: SFMCConfig) -> None:
-        mock_ws = MagicMock()
-        mock_ws.recv.side_effect = [
-            "o",
-            'a["CONNECTED\\nversion:1.2\\n\\n\\u0000"]',
-        ]
-
-        # After connect, recv in _receive_loop should block
-        def recv_loop_block(timeout: float = 0) -> str:
-            import time
-
-            time.sleep(0.1)
-            raise TimeoutError
-
-        mock_ws_connect.return_value = mock_ws
+        mock_ws = _make_connected_ws(mock_ws_connect)
 
         conn = StompConnection(config, "tok")
         conn.connect()
-
-        # Reset recv to simulate blocking for the receiver thread
-        mock_ws.recv.side_effect = recv_loop_block
 
         sub = conn.subscribe("/topic/test-topic")
         assert sub.topic == "/topic/test-topic"
@@ -250,13 +229,7 @@ class TestStompConnectionLifecycle:
 
     @patch("sfmc_api.stomp.ws_connect")
     def test_context_manager(self, mock_ws_connect: MagicMock, config: SFMCConfig) -> None:
-        mock_ws = MagicMock()
-        mock_ws.recv.side_effect = [
-            "o",
-            'a["CONNECTED\\nversion:1.2\\n\\n\\u0000"]',
-            TimeoutError,
-        ]
-        mock_ws_connect.return_value = mock_ws
+        _make_connected_ws(mock_ws_connect)
 
         conn = StompConnection(config, "tok")
         conn.connect()
@@ -271,13 +244,7 @@ class TestStompConnectionLifecycle:
     def test_context_manager_auto_connects(
         self, mock_ws_connect: MagicMock, config: SFMCConfig
     ) -> None:
-        mock_ws = MagicMock()
-        mock_ws.recv.side_effect = [
-            "o",
-            'a["CONNECTED\\nversion:1.2\\n\\n\\u0000"]',
-            TimeoutError,
-        ]
-        mock_ws_connect.return_value = mock_ws
+        _make_connected_ws(mock_ws_connect)
 
         conn = StompConnection(config, "tok")
         with conn:
@@ -305,13 +272,29 @@ _OPEN = "o"
 _CONNECTED = 'a["CONNECTED\\nversion:1.2\\n\\n\\u0000"]'
 
 
+def _recv_frames_then_idle(mock_ws: MagicMock, frames: list[str]) -> None:
+    """Make recv yield *frames* in order, then raise TimeoutError forever.
+
+    A finite side_effect list would exhaust and kill the receiver
+    thread with StopIteration; since receive-loop teardown now clears
+    ``_connected``, mocks must keep the socket idle-but-alive for
+    tests that assert on a live connection.
+    """
+    frame_iter = iter(frames)
+
+    def recv(timeout: float = 0) -> str:
+        try:
+            return next(frame_iter)
+        except StopIteration:
+            raise TimeoutError from None
+
+    mock_ws.recv.side_effect = recv
+
+
 def _make_connected_ws(mock_ws_connect: MagicMock) -> MagicMock:
-    """Create a mock ws that completes the STOMP handshake, then blocks."""
+    """Create a mock ws that completes the STOMP handshake, then idles."""
     mock_ws = MagicMock()
-    mock_ws.recv.side_effect = [
-        _OPEN,
-        _CONNECTED,
-    ]
+    _recv_frames_then_idle(mock_ws, [_OPEN, _CONNECTED])
     mock_ws_connect.return_value = mock_ws
     return mock_ws
 
@@ -444,7 +427,6 @@ class TestUnsubscribeEdgeCases:
         conn.connect()
 
         # Subscribe first (this send works fine since side_effect not set yet)
-        mock_ws.recv.side_effect = [TimeoutError] * 100  # keep receiver loop alive
         conn.subscribe("/topic/test")
 
         # Now make send raise for the UNSUBSCRIBE
@@ -456,8 +438,7 @@ class TestUnsubscribeEdgeCases:
         # Verify the subscription was removed from the registry
         assert "sub-0" not in conn._subscriptions
 
-        conn._closing.set()  # stop receiver thread
-        conn._connected = False
+        conn.disconnect()
 
 
 # ── TestReceiveLoop ──────────────────────────────────────────────────
@@ -570,13 +551,7 @@ class TestReceiveLoop:
     def test_heartbeat_ignored(self, mock_ws_connect: MagicMock, config: SFMCConfig) -> None:
         """A heartbeat SockJS frame is silently ignored."""
         mock_ws = MagicMock()
-        mock_ws.recv.side_effect = [
-            _OPEN,
-            _CONNECTED,
-            "h",  # SockJS heartbeat
-            TimeoutError,
-            TimeoutError,
-        ]
+        _recv_frames_then_idle(mock_ws, [_OPEN, _CONNECTED, "h"])
         mock_ws_connect.return_value = mock_ws
 
         conn = StompConnection(config, "tok")
@@ -648,8 +623,11 @@ class TestReceiveLoop:
         msg = sub.get(timeout=2)
         assert msg is None
 
-        conn._closing.set()
-        conn._connected = False
+        # Receive-loop teardown must clear the connected flag so a
+        # later subscribe() fails fast instead of using a dead socket.
+        assert conn._connected is False
+        with pytest.raises(StompError, match="Not connected"):
+            conn.subscribe("/topic/other")
 
     @patch("sfmc_api.stomp.ws_connect")
     def test_recv_error_breaks_loop(self, mock_ws_connect: MagicMock, config: SFMCConfig) -> None:
@@ -684,8 +662,8 @@ class TestReceiveLoop:
         msg = sub.get(timeout=2)
         assert msg is None
 
-        conn._closing.set()
-        conn._connected = False
+        # Teardown clears the connected flag even on unexpected errors.
+        assert conn._connected is False
 
     @patch("sfmc_api.stomp.ws_connect")
     def test_message_to_unknown_subscription_ignored(
@@ -695,13 +673,7 @@ class TestReceiveLoop:
         mock_ws = MagicMock()
         # Message for sub-99 which doesn't exist
         message_frame = 'a["MESSAGE\\nsubscription:sub-99\\n\\n{\\"x\\":1}\\u0000"]'
-        mock_ws.recv.side_effect = [
-            _OPEN,
-            _CONNECTED,
-            message_frame,
-            TimeoutError,
-            TimeoutError,
-        ]
+        _recv_frames_then_idle(mock_ws, [_OPEN, _CONNECTED, message_frame])
         mock_ws_connect.return_value = mock_ws
 
         conn = StompConnection(config, "tok")
@@ -752,13 +724,7 @@ class TestBoundedQueue:
     @patch("sfmc_api.stomp.ws_connect")
     def test_subscribe_with_maxsize(self, mock_ws_connect: MagicMock, config: SFMCConfig) -> None:
         """Verify the maxsize parameter is accepted and applied."""
-        mock_ws = _make_connected_ws(mock_ws_connect)
-        mock_ws.recv.side_effect = [
-            _OPEN,
-            _CONNECTED,
-            TimeoutError,
-            TimeoutError,
-        ]
+        _make_connected_ws(mock_ws_connect)
 
         conn = StompConnection(config, "tok")
         conn.connect()
@@ -826,3 +792,105 @@ class TestHeartbeatInterval:
         assert "heart-beat:0,10000" in sent[0]
 
         conn.disconnect()
+
+
+def _handshake_then_idle_ws() -> MagicMock:
+    """A mock WebSocket that completes the handshake, then idles.
+
+    Unlike :func:`_make_connected_ws`, does not touch ws_connect —
+    callers can wire several of these as a side_effect sequence for
+    reconnect tests.
+    """
+    mock_ws = MagicMock()
+    _recv_frames_then_idle(mock_ws, [_OPEN, _CONNECTED])
+    return mock_ws
+
+
+class TestSubscriptionCloseFullQueue:
+    """close() must never block, even when a bounded queue is full."""
+
+    def test_close_returns_promptly_with_full_queue(self) -> None:
+        q: Queue[dict[str, Any] | StompError | None] = Queue(maxsize=1)
+        q.put({"m": 1})  # queue now full — no room for the sentinel
+        sub = StompSubscription("s0", "/topic/t", q)
+
+        closer = threading.Thread(target=sub.close)
+        closer.start()
+        closer.join(timeout=2)
+
+        assert not closer.is_alive(), "close() blocked on a full queue"
+
+    def test_backlog_drains_then_closure_reported(self) -> None:
+        q: Queue[dict[str, Any] | StompError | None] = Queue(maxsize=1)
+        q.put({"m": 1})
+        sub = StompSubscription("s0", "/topic/t", q)
+        sub.close()
+
+        assert sub.get(timeout=1) == {"m": 1}
+        assert sub.get(timeout=1) is None
+
+    def test_iteration_ends_after_close_with_full_queue(self) -> None:
+        q: Queue[dict[str, Any] | StompError | None] = Queue(maxsize=1)
+        q.put({"m": 1})
+        sub = StompSubscription("s0", "/topic/t", q)
+        sub.close()
+
+        assert list(sub) == [{"m": 1}]
+
+
+class TestConnectLifecycleGuards:
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_connect_twice_raises(self, mock_ws_connect: MagicMock, config: SFMCConfig) -> None:
+        """A second connect() must not silently leak the previous
+        WebSocket and receiver thread."""
+        mock_ws_connect.return_value = _handshake_then_idle_ws()
+        conn = StompConnection(config, "tok")
+        conn.connect()
+        try:
+            with pytest.raises(StompError, match="Already connected"):
+                conn.connect()
+            assert mock_ws_connect.call_count == 1
+        finally:
+            conn.disconnect()
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_reconnect_after_disconnect(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig
+    ) -> None:
+        """After disconnect(), the same object can connect again — the
+        lifecycle events must be reset or the new receiver thread would
+        exit immediately."""
+        mock_ws_connect.side_effect = [
+            _handshake_then_idle_ws(),
+            _handshake_then_idle_ws(),
+        ]
+        conn = StompConnection(config, "tok")
+        conn.connect()
+        conn.disconnect()
+        assert conn.disconnected is True
+
+        conn.connect()
+        try:
+            assert conn.disconnected is False
+            assert conn._connected is True
+        finally:
+            conn.disconnect()
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_subscribe_send_failure_rolls_back_registration(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig
+    ) -> None:
+        """A subscription the server never saw must not stay registered."""
+        mock_ws = _handshake_then_idle_ws()
+        mock_ws_connect.return_value = mock_ws
+        conn = StompConnection(config, "tok")
+        conn.connect()
+        try:
+            mock_ws.send.side_effect = OSError("socket gone")
+            with pytest.raises(StompError, match="SUBSCRIBE"):
+                conn.subscribe("/topic/x")
+            assert conn._subscriptions == {}
+            assert conn._sub_topics == {}
+        finally:
+            mock_ws.send.side_effect = None
+            conn.disconnect()

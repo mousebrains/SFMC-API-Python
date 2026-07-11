@@ -37,8 +37,10 @@ jobs:
         with:
           python-version: "3.12"
 
+      # drifter extra included so the drifter-follower example tests
+      # run instead of silently skipping on missing netCDF4/numpy
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,drifter]"
 
       - name: Run tests with coverage
         run: pytest --cov=sfmc_api --cov-report=xml --cov-fail-under=70 tests/
@@ -68,3 +70,29 @@ jobs:
 
       - name: Verify import
         run: python -c "from sfmc_api import SFMCClient, SFMCConfig, __version__; print(f'sfmc-api {__version__} OK')"
+
+  build-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist and wheel
+        run: |
+          pip install build
+          python -m build
+
+      - name: Check sdist contains docs and examples
+        run: |
+          tar -tzf dist/*.tar.gz | grep -q '/docs/' || { echo "sdist missing docs/"; exit 1; }
+          tar -tzf dist/*.tar.gz | grep -q '/examples/' || { echo "sdist missing examples/"; exit 1; }
+
+      - name: Smoke-test wheel install
+        run: |
+          python -m venv /tmp/wheel-venv
+          /tmp/wheel-venv/bin/pip install dist/*.whl
+          /tmp/wheel-venv/bin/python -c "from sfmc_api import SFMCClient, __version__; print(f'wheel {__version__} OK')"
+          /tmp/wheel-venv/bin/sfmc-api --version

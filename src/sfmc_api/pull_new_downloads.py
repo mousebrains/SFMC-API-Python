@@ -95,9 +95,14 @@ _MTIME_FMT = "%Y-%m-%d %H:%M:%S"
 #: same-minute files.
 _CUTOFF_FMT = "%Y%m%d%H%M"
 
-#: Never paginate the filtered listing past this many pages (20
-#: files/page).  A safety valve, not a tuning knob.
-_MAX_LISTING_PAGES = 50
+#: Failsafe ceiling on listing pagination (20 files/page).  Listings
+#: are walked to exhaustion — stopping early would silently strand
+#: every file past the cut, because the name-based dedup means later
+#: passes re-fetch the same leading pages forever.  This bound only
+#: exists so a server that never returns a short page cannot spin the
+#: loop indefinitely; hitting it raises so the pass fails loudly
+#: instead of being checkpointed as complete.
+_MAX_LISTING_PAGES = 2000
 
 #: Full Dinkum-header name SFMC renames files to, e.g.
 #: ``osusim-2026-191-0-8.sbd`` (glider-year-yearday-mission-segment).
@@ -109,6 +114,10 @@ _MAX_LISTING_PAGES = 50
 #: can be observed mid-transfer with a partial, growing size, and
 #: carries dockserver-clock timestamps.
 _DINKUM_NAME_RE = re.compile(r"^.+-\d{4}-\d{1,3}-\d+-\d+\.\w+$")
+
+#: Zip members are streamed to disk in chunks of this size, so one
+#: oversized (or hostile) member cannot exhaust memory.
+_EXTRACT_CHUNK_BYTES = 64 * 1024
 
 _STATE_VERSION = 1
 
@@ -157,7 +166,23 @@ class PullState:
             raise SFMCError(f"Corrupt state file {path}: expected a JSON object")
         if data.get("version") != _STATE_VERSION:
             raise SFMCError(f"Unsupported state file version {data.get('version')!r} in {path}")
-        return cls(hwm=data.get("hwm"), files=data.get("files", {}))
+        hwm = data.get("hwm")
+        if hwm is not None and not isinstance(hwm, str):
+            raise SFMCError(f"Corrupt state file {path}: 'hwm' must be a string or null")
+        files = data.get("files", {})
+        if not isinstance(files, dict):
+            raise SFMCError(f"Corrupt state file {path}: 'files' must be an object")
+        for name, record in files.items():
+            if (
+                not isinstance(record, dict)
+                or not isinstance(record.get("mtime"), str)
+                or not isinstance(record.get("size"), int)
+            ):
+                raise SFMCError(
+                    f"Corrupt state file {path}: entry {name!r} must have "
+                    "a string 'mtime' and an integer 'size'"
+                )
+        return cls(hwm=hwm, files=files)
 
     def save(self, path: Path) -> None:
         """Atomically write state to *path*."""
@@ -210,10 +235,15 @@ def _iter_listing(
     glider_name: str,
     cutoff: str | None,
 ) -> Iterator[dict[str, Any]]:
-    """Yield from-glider listing entries page by page.
+    """Yield from-glider listing entries page by page, to exhaustion.
 
-    Stops at the first short page, or at ``_MAX_LISTING_PAGES`` with
-    a warning (a safety valve, not a tuning knob).
+    Stops at the first short page.  A listing that exceeds the
+    failsafe page ceiling raises instead of truncating: a truncated
+    walk would look like a complete pass, checkpoint the files it did
+    see, and permanently strand everything past the cut.
+
+    Raises:
+        SFMCError: If the listing exceeds ``_MAX_LISTING_PAGES``.
     """
     for page in range(_MAX_LISTING_PAGES):
         result = client.get_folder_file_listing(
@@ -226,9 +256,10 @@ def _iter_listing(
         yield from entries
         if len(entries) < result.get("limit", 20):
             return
-    logger.warning(
-        "Listing exceeded %d pages; processing what was fetched",
-        _MAX_LISTING_PAGES,
+    raise SFMCError(
+        f"from-glider listing for {glider_name} exceeded "
+        f"{_MAX_LISTING_PAGES} pages without a short page; aborting the "
+        "pass rather than silently stranding files past the cut"
     )
 
 
@@ -287,9 +318,13 @@ def download_new_files(
     The zip request uses a cutoff derived from the oldest new entry,
     so the archive stays as small as the server allows.  Only members
     named in *new_entries* are kept; margin-overlap duplicates are
-    discarded.  Extracted files get their listing mtime (interpreted
-    as UTC — glider clock domain) so downstream tools see a
-    meaningful timestamp.
+    discarded.  Each member is streamed to disk in chunks (a member is
+    never held in memory whole) and must match the listing-declared
+    ``fileSize`` byte for byte — a short or long member is left
+    unrecorded so the next pass retries it, instead of checkpointing
+    truncated data as complete.  Extracted files get their listing
+    mtime (interpreted as UTC — glider clock domain) so downstream
+    tools see a meaningful timestamp.
 
     Returns:
         The number of files written to *output_dir*.
@@ -319,8 +354,22 @@ def download_new_files(
                     continue
                 target = output_dir / name
                 part = target.with_suffix(target.suffix + ".part")
+                copied = 0
                 with zf.open(member) as src, open(part, "wb") as dst:
-                    dst.write(src.read())
+                    while chunk := src.read(_EXTRACT_CHUNK_BYTES):
+                        dst.write(chunk)
+                        copied += len(chunk)
+                expected = int(entry["fileSize"])
+                if copied != expected:
+                    part.unlink(missing_ok=True)
+                    logger.warning(
+                        "%s: zip member is %d bytes but listing says %d; "
+                        "leaving for retry next pass",
+                        name,
+                        copied,
+                        expected,
+                    )
+                    continue
                 mtime_dt = datetime.strptime(entry["dateTimeModified"], _MTIME_FMT)
                 epoch = mtime_dt.replace(tzinfo=UTC).timestamp()
                 os.utime(part, (epoch, epoch))

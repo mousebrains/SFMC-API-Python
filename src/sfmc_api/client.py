@@ -38,6 +38,16 @@ __all__ = ["SFMCClient"]
 logger = logging.getLogger(__name__)
 _MAX_RETRIES = 3
 
+#: Methods with no server-side effects — safe to retry on any
+#: transport failure, including ambiguous ones (e.g. a read timeout
+#: after the request may already have reached the server).
+_SAFE_METHODS = frozenset({"GET", "HEAD"})
+
+#: Transport failures raised before the request is transmitted.
+#: These are safe to retry for any method: the server cannot have
+#: acted on a request it never received.
+_PRE_SEND_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+
 
 def _validate_path_segment(value: str, name: str) -> str:
     """Raise *ValueError* if *value* is unsuitable for a URL path segment."""
@@ -163,7 +173,7 @@ class SFMCClient:
         Uses an ``_auth_lock`` to ensure only one thread performs
         sign-in when multiple threads race on an unauthenticated client.
         """
-        # Fast path ��� already authenticated.
+        # Fast path — already authenticated.
         with self._token_lock:
             if self._token is not None:
                 return
@@ -229,7 +239,14 @@ class SFMCClient:
                 )
             except httpx.HTTPError as exc:
                 last_exc = exc
-                if attempt < _MAX_RETRIES - 1:
+                # A state-changing request (POST/PUT/DELETE) must not be
+                # replayed after an ambiguous failure such as a read
+                # timeout: the server may already have applied it, and a
+                # retry would apply it twice (e.g. re-sending a glider
+                # command).  Only failures that provably occurred before
+                # transmission are retried for those methods.
+                retry_safe = method.upper() in _SAFE_METHODS or isinstance(exc, _PRE_SEND_ERRORS)
+                if retry_safe and attempt < _MAX_RETRIES - 1:
                     delay = 2**attempt
                     logger.warning(
                         "%s %s failed (%s: %s), retrying in %ds",
@@ -241,6 +258,13 @@ class SFMCClient:
                     )
                     time.sleep(delay)
                     continue
+                if not retry_safe:
+                    raise APIError(
+                        0,
+                        f"{method} {path} failed ({type(exc).__name__}: {exc}); "
+                        "not retried — the server may already have applied "
+                        "this request",
+                    ) from exc
                 raise APIError(
                     0,
                     f"{method} {path} failed after {_MAX_RETRIES} attempts "
@@ -1448,6 +1472,51 @@ class SFMCClient:
             response = self._request("PUT", path, files=files)
             return self._json_or_empty(response)
 
+    def _stream_download(
+        self,
+        path: str,
+        download_path: Path,
+        params: dict[str, str] | None = None,
+    ) -> Path:
+        """Stream an authenticated GET response to *download_path*.
+
+        Mirrors the auth behavior of :meth:`_request`: an expired token
+        (HTTP 401) is refreshed once and the request repeated, so
+        long-lived processes keep downloading across token expiry.
+        The body is written to a ``.part`` file that is renamed into
+        place only on success, so a failed download never leaves a
+        truncated file at the destination.
+        """
+        for attempt in (0, 1):
+            headers = self._auth_headers()
+            with self._http.stream(
+                "GET",
+                path,
+                headers=headers,
+                params=params,
+            ) as response:
+                if response.status_code == 401 and attempt == 0:
+                    logger.debug("Got 401 on download, refreshing auth token")
+                    with self._token_lock:
+                        self._token = None
+                    continue
+                if not response.is_success:
+                    # Streamed responses defer the body; read it so
+                    # check_response can include it in the error.
+                    response.read()
+                check_response(response)
+                tmp_path = download_path.with_suffix(download_path.suffix + ".part")
+                try:
+                    with open(tmp_path, "wb") as f:
+                        for chunk in response.iter_bytes():
+                            f.write(chunk)
+                    tmp_path.rename(download_path)
+                except BaseException:
+                    tmp_path.unlink(missing_ok=True)
+                    raise
+            return download_path
+        raise AssertionError("unreachable")  # pragma: no cover
+
     def download_glider_file(
         self,
         glider_name: str,
@@ -1479,23 +1548,10 @@ class SFMCClient:
         _validate_path_segment(folder, "folder")
         _validate_path_segment(file_name, "file_name")
         download_path = Path(download_path) if download_path else self.download_dir / file_name
-        headers = self._auth_headers()
-        with self._http.stream(
-            "GET",
+        return self._stream_download(
             f"/v1/download-glider-file/{glider_name}/{folder}/{file_name}",
-            headers=headers,
-        ) as response:
-            check_response(response)
-            tmp_path = download_path.with_suffix(download_path.suffix + ".part")
-            try:
-                with open(tmp_path, "wb") as f:
-                    for chunk in response.iter_bytes():
-                        f.write(chunk)
-                tmp_path.rename(download_path)
-            except BaseException:
-                tmp_path.unlink(missing_ok=True)
-                raise
-        return download_path
+            download_path,
+        )
 
     def download_glider_files(
         self,
@@ -1541,24 +1597,11 @@ class SFMCClient:
         if last_modified_after is not None:
             params["lastModifiedAfter"] = last_modified_after
 
-        headers = self._auth_headers()
-        with self._http.stream(
-            "GET",
+        return self._stream_download(
             f"/v1/download-glider-files/{glider_name}/{folder}",
-            headers=headers,
+            download_path,
             params=params,
-        ) as response:
-            check_response(response)
-            tmp_path = download_path.with_suffix(download_path.suffix + ".part")
-            try:
-                with open(tmp_path, "wb") as f:
-                    for chunk in response.iter_bytes():
-                        f.write(chunk)
-                tmp_path.rename(download_path)
-            except BaseException:
-                tmp_path.unlink(missing_ok=True)
-                raise
-        return download_path
+        )
 
     def delete_glider_file(self, glider_name: str, folder: str, file_name: str) -> dict[str, Any]:
         """Delete a file from a glider folder.

@@ -1166,3 +1166,166 @@ class TestPathValidation:
         assert _validate_path_segment("osusim", "glider") == "osusim"
         assert _validate_path_segment("from-glider", "folder") == "from-glider"
         assert _validate_path_segment("data.sbd", "file") == "data.sbd"
+
+
+class TestMutatingRetryPolicy:
+    """State-changing requests must not be replayed after ambiguous
+    transport failures — the server may already have applied them."""
+
+    @patch("sfmc_api.client.time")
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_put_not_retried_on_read_timeout(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        mock_time: MagicMock,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_build.return_value = mock_http
+        ok_resp = make_mock_response(200, {})
+        mock_http.request.side_effect = [httpx.ReadTimeout("timed out"), ok_resp]
+        client = SFMCClient(config=config)
+
+        with pytest.raises(APIError, match="may already have applied"):
+            client.send_command("g1", "abort")
+
+        # Exactly one request went out — the command was not replayed.
+        assert mock_http.request.call_count == 1
+        mock_time.sleep.assert_not_called()
+
+    @patch("sfmc_api.client.time")
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_put_retried_on_connect_error(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        mock_time: MagicMock,
+        config: SFMCConfig,
+    ) -> None:
+        """ConnectError happens before transmission, so a retry is safe
+        even for a mutating request."""
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_build.return_value = mock_http
+        ok_resp = make_mock_response(200, {})
+        mock_http.request.side_effect = [httpx.ConnectError("refused"), ok_resp]
+        client = SFMCClient(config=config)
+
+        client.send_command("g1", "status")
+
+        assert mock_http.request.call_count == 2
+
+    @patch("sfmc_api.client.time")
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_get_retried_on_read_timeout(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        mock_time: MagicMock,
+        config: SFMCConfig,
+    ) -> None:
+        """GET has no server-side effects; ambiguous failures retry."""
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_build.return_value = mock_http
+        ok_resp = make_mock_response(200, {"data": {}})
+        mock_http.request.side_effect = [httpx.ReadTimeout("timed out"), ok_resp]
+        client = SFMCClient(config=config)
+
+        result = client.get_glider_details("g1")
+
+        assert result == {"data": {}}
+        assert mock_http.request.call_count == 2
+
+
+def _make_stream_401_context() -> MagicMock:
+    """A mock stream context whose response is an expired-token 401."""
+    resp = MagicMock()
+    resp.is_success = False
+    resp.status_code = 401
+    resp.headers = {}
+    resp.text = "unauthorized"
+    ctx = MagicMock()
+    ctx.__enter__ = MagicMock(return_value=resp)
+    ctx.__exit__ = MagicMock(return_value=False)
+    return ctx
+
+
+class TestStreamingDownloadAuthRefresh:
+    """Streaming downloads must refresh an expired token once, like
+    every other request — long-lived mirrors depend on it."""
+
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_single_file_refreshes_on_401(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        tmp_path: Path,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_http.stream.side_effect = [
+            _make_stream_401_context(),
+            _make_stream_context([b"payload"]),
+        ]
+        mock_build.return_value = mock_http
+
+        dest = tmp_path / "f.sbd"
+        with SFMCClient(config=config) as client:
+            result = client.download_glider_file("g1", "from-glider", "f.sbd", download_path=dest)
+
+        assert result == dest
+        assert dest.read_bytes() == b"payload"
+        assert mock_http.stream.call_count == 2
+        # Initial sign-in plus the 401-triggered refresh.
+        assert mock_auth.call_count == 2
+
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_zip_download_refreshes_on_401(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        tmp_path: Path,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_http.stream.side_effect = [
+            _make_stream_401_context(),
+            _make_stream_context([b"zipbytes"]),
+        ]
+        mock_build.return_value = mock_http
+
+        dest = tmp_path / "batch.zip"
+        with SFMCClient(config=config) as client:
+            result = client.download_glider_files("g1", "from-glider", dest)
+
+        assert result == dest
+        assert dest.read_bytes() == b"zipbytes"
+        assert mock_auth.call_count == 2
+
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_persistent_401_raises_after_one_refresh(
+        self,
+        mock_build: MagicMock,
+        mock_auth: MagicMock,
+        tmp_path: Path,
+        config: SFMCConfig,
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_http.stream.side_effect = [
+            _make_stream_401_context(),
+            _make_stream_401_context(),
+        ]
+        mock_build.return_value = mock_http
+
+        dest = tmp_path / "f.sbd"
+        with SFMCClient(config=config) as client, pytest.raises(APIError) as exc_info:
+            client.download_glider_file("g1", "from-glider", "f.sbd", download_path=dest)
+
+        assert exc_info.value.status_code == 401
+        assert not dest.exists()

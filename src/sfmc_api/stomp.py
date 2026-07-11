@@ -31,7 +31,7 @@ import string
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from queue import Full, Queue
+from queue import Empty, Full, Queue
 from typing import Any
 
 from websockets.exceptions import ConnectionClosed
@@ -183,7 +183,7 @@ class StompSubscription:
         self._topic = topic
         self._queue: Queue[dict[str, Any] | StompError | None] = queue
         self._connection = connection
-        self._closed = False
+        self._closed = threading.Event()
 
     @property
     def topic(self) -> str:
@@ -193,15 +193,20 @@ class StompSubscription:
     def __iter__(self) -> Iterator[dict[str, Any]]:
         """Yield parsed JSON messages until the subscription is closed."""
         while True:
-            msg = self._queue.get()
+            try:
+                msg = self.get(timeout=1.0)
+            except Empty:
+                continue
             if msg is None:
                 break
-            if isinstance(msg, StompError):
-                raise msg
             yield msg
 
     def get(self, timeout: float | None = None) -> dict[str, Any] | None:
         """Get the next message, or ``None`` if the subscription closed.
+
+        After :meth:`close`, messages still buffered in the queue are
+        drained first; once the queue is empty, ``None`` is returned
+        immediately instead of blocking.
 
         Args:
             timeout: Seconds to wait.  ``None`` blocks indefinitely.
@@ -211,7 +216,18 @@ class StompSubscription:
         Raises:
             StompError: If a STOMP ERROR frame was received.
         """
-        msg = self._queue.get(timeout=timeout)
+        if self._closed.is_set():
+            try:
+                msg = self._queue.get_nowait()
+            except Empty:
+                return None
+        else:
+            try:
+                msg = self._queue.get(timeout=timeout)
+            except Empty:
+                if self._closed.is_set():
+                    return None
+                raise
         if isinstance(msg, StompError):
             raise msg
         return msg
@@ -222,13 +238,18 @@ class StompSubscription:
         Sends a STOMP ``UNSUBSCRIBE`` frame to the server, removes
         this subscription from the connection registry, and signals
         the iterator to stop.
+
+        Never blocks: on a bounded queue that is already full, the
+        ``None`` sentinel is skipped and the closed flag alone ends
+        iteration — :meth:`get` checks it once the backlog drains.
         """
-        if self._closed:
+        if self._closed.is_set():
             return
-        self._closed = True
+        self._closed.set()
         if self._connection is not None:
             self._connection._unsubscribe(self._id)
-        self._queue.put(None)
+        with contextlib.suppress(Full):
+            self._queue.put_nowait(None)
 
 
 # ── STOMP connection ─────────────────────────────────────────────────
@@ -277,8 +298,24 @@ class StompConnection:
         """Open the WebSocket and perform the STOMP handshake.
 
         Raises:
-            StompError: If the connection or handshake fails.
+            StompError: If already connected, or if the connection or
+                handshake fails.  Connecting twice without an
+                intervening :meth:`disconnect` would leak the previous
+                WebSocket and receiver thread.
         """
+        with self._lock:
+            if self._connected:
+                raise StompError("Already connected — call disconnect() first")
+        if self._receiver_thread is not None and self._receiver_thread.is_alive():
+            # A lingering receiver (disconnect() join timed out) would
+            # clobber the new connection's state from its teardown.
+            raise StompError("Previous receiver thread has not exited yet")
+        # Reset lifecycle events so the object can be reused after a
+        # disconnect; a stale _closing flag would make the new
+        # receiver thread exit immediately.
+        self._closing.clear()
+        self._disconnect_event.clear()
+
         # Honor stomp_debug from config — enable DEBUG logging for this module.
         if self._config.stomp_debug:
             logger.setLevel(logging.DEBUG)
@@ -413,7 +450,9 @@ class StompConnection:
             messages.
 
         Raises:
-            StompError: If not connected.
+            StompError: If not connected, or if sending the
+                ``SUBSCRIBE`` frame fails (the subscription is then
+                not registered).
         """
         with self._lock:
             if not self._connected:
@@ -432,7 +471,16 @@ class StompConnection:
             {"id": sub_id, "destination": topic},
         )
         assert self._ws is not None  # guaranteed after connect()
-        self._ws.send(json.dumps([subscribe_frame]))
+        try:
+            self._ws.send(json.dumps([subscribe_frame]))
+        except Exception as exc:
+            # Roll back the registration: a subscription the server
+            # never saw must not linger in the registry, holding its
+            # queue and receiving dispatches if its ID is ever reused.
+            with self._lock:
+                self._subscriptions.pop(sub_id, None)
+                self._sub_topics.pop(sub_id, None)
+            raise StompError(f"SUBSCRIBE for {topic} failed: {exc}") from exc
         logger.debug("Subscribed %s to %s", sub_id, topic)
 
         return sub
@@ -458,60 +506,64 @@ class StompConnection:
     def _receive_loop(self) -> None:
         """Background thread: receive WebSocket messages and dispatch."""
         assert self._ws is not None  # guaranteed: thread starts after connect()
-        while not self._closing.is_set():
-            try:
-                raw = str(self._ws.recv(timeout=1))
-            except TimeoutError:
-                continue
-            except ConnectionClosed:
-                logger.debug("WebSocket connection closed")
-                break
-            except Exception as exc:
-                if not self._closing.is_set():
-                    logger.warning("WebSocket recv error: %s", exc)
-                break
+        try:
+            while not self._closing.is_set():
+                try:
+                    raw = str(self._ws.recv(timeout=1))
+                except TimeoutError:
+                    continue
+                except ConnectionClosed:
+                    logger.debug("WebSocket connection closed")
+                    break
+                except Exception as exc:
+                    if not self._closing.is_set():
+                        logger.warning("WebSocket recv error: %s", exc)
+                    break
 
-            decoded = _sockjs_decode(raw)
-            if decoded is None:
-                logger.info("SockJS close frame received")
-                break
-            for msg_str in decoded:
-                frame = _parse_frame(msg_str)
+                decoded = _sockjs_decode(raw)
+                if decoded is None:
+                    logger.info("SockJS close frame received")
+                    break
+                for msg_str in decoded:
+                    frame = _parse_frame(msg_str)
 
-                if frame.command == "MESSAGE":
-                    sub_id = frame.headers.get("subscription", "")
-                    with self._lock:
-                        sub = self._subscriptions.get(sub_id)
-                    if sub is not None:
-                        try:
-                            payload: dict[str, Any] = json.loads(frame.body)
-                        except json.JSONDecodeError:
-                            payload = {"_raw": frame.body}
-                        try:
-                            sub._queue.put_nowait(payload)
-                        except Full:
-                            logger.warning(
-                                "Subscription %s queue full, dropping message",
-                                sub._id,
-                            )
-                elif frame.command == "ERROR":
-                    logger.error("STOMP ERROR: %s", frame.body)
-                    err = StompError(f"STOMP server error: {frame.body}")
-                    with self._lock:
-                        subs = list(self._subscriptions.values())
-                    for sub in subs:
-                        with contextlib.suppress(Full):
-                            sub._queue.put_nowait(err)
-                elif frame.command == "HEARTBEAT":
-                    pass
-                else:
-                    logger.debug("STOMP frame: %s", frame.command)
-
-        # Signal disconnection
-        self._disconnect_event.set()
-
-        # Signal all subscriptions that the connection is gone
-        with self._lock:
-            remaining = list(self._subscriptions.values())
-        for sub in remaining:
-            sub.close()
+                    if frame.command == "MESSAGE":
+                        sub_id = frame.headers.get("subscription", "")
+                        with self._lock:
+                            sub = self._subscriptions.get(sub_id)
+                        if sub is not None:
+                            try:
+                                payload: dict[str, Any] = json.loads(frame.body)
+                            except json.JSONDecodeError:
+                                payload = {"_raw": frame.body}
+                            try:
+                                sub._queue.put_nowait(payload)
+                            except Full:
+                                logger.warning(
+                                    "Subscription %s queue full, dropping message",
+                                    sub._id,
+                                )
+                    elif frame.command == "ERROR":
+                        logger.error("STOMP ERROR: %s", frame.body)
+                        err = StompError(f"STOMP server error: {frame.body}")
+                        with self._lock:
+                            subs = list(self._subscriptions.values())
+                        for sub in subs:
+                            with contextlib.suppress(Full):
+                                sub._queue.put_nowait(err)
+                    elif frame.command == "HEARTBEAT":
+                        pass
+                    else:
+                        logger.debug("STOMP frame: %s", frame.command)
+        finally:
+            # The connection is unusable once this thread exits: clear
+            # the connected flag first so subscribe() fails fast
+            # instead of writing to a dead socket, then signal waiters
+            # and close the subscriptions.
+            with self._lock:
+                self._connected = False
+            self._disconnect_event.set()
+            with self._lock:
+                remaining = list(self._subscriptions.values())
+            for sub in remaining:
+                sub.close()
