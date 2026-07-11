@@ -89,6 +89,9 @@ Run a follower plugin that watches each surfacing, generates new
 navigation files (e.g. waypoint plans), and uploads them to SFMC:
 
 ```bash
+# The drifter example needs the [drifter] extra (netCDF4, numpy)
+pip install -e '.[drifter]'
+
 # Offline test: replay a log file, print what the follower generates
 sfmc-follow --glider osu685 --follower examples/drifter_follower.py \
             --config examples/drifter_config.yaml \
@@ -106,8 +109,13 @@ See [docs/follow_glider.md](docs/follow_glider.md) for the full guide.
 ### Integration Tests
 
 ```bash
-# Run live integration tests against an SFMC server
+# Read-only checks against a live SFMC server — safe for any glider
 sfmc-api-test --host gliderfmc1.ceoas.oregonstate.edu --glider osu685
+
+# Also test state-changing endpoints (upload/deploy/delete files,
+# cycle the script assignment, send a 'status' command).  Only use
+# against a glider that is NOT on an active mission.
+sfmc-api-test --host gliderfmc1.ceoas.oregonstate.edu --glider test-glider --allow-writes
 ```
 
 ## Configuration

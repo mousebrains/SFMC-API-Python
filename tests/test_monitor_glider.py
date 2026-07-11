@@ -9,7 +9,7 @@ from queue import Queue
 from typing import Any
 
 from sfmc_api.monitor_glider import _log_with_time, monitor_dialog, ordered_dialog
-from sfmc_api.stomp import StompError, StompSubscription
+from sfmc_api.stomp import MAX_SEQUENCE, StompError, StompSubscription
 
 
 def _make_sub(messages: list[dict[str, Any]]) -> StompSubscription:
@@ -35,7 +35,9 @@ class TestOrderedDialogInOrder:
 
 
 class TestOrderedDialogOutOfOrder:
-    def test_reorders_messages(self) -> None:
+    def test_eof_flushes_buffered_tail(self) -> None:
+        """A gap that never fills must not swallow the buffered tail:
+        it is flushed in stream order when the subscription ends."""
         sub = _make_sub(
             [
                 {"sequenceNumber": 2, "data": "c"},
@@ -43,17 +45,49 @@ class TestOrderedDialogOutOfOrder:
                 {"sequenceNumber": 1, "data": "b"},
             ]
         )
-        _ = list(ordered_dialog(sub))
-        # First message (seq=2) sets next_expected=2, yields "c", advances to 3.
-        # seq=0 is out of order (expected 3), buffered.
-        # seq=1 is out of order (expected 3), buffered.
-        # Stream ends. Buffered messages 0,1 are not drained because
-        # next_expected is 3 and neither 3 is in pending.
-        # Actually they stay buffered. The reorder only drains when
-        # next_expected matches. So result is just ["c"].
-        # But if the first message is seq=0, it works:
-        # Let's test a different scenario that actually reorders.
-        pass
+        result = list(ordered_dialog(sub))
+        # seq=2 sets next_expected=2, yields "c", advances to 3.
+        # seq=0 and seq=1 are out of order (expected 3) and buffered.
+        # Stream ends: the buffer flushes by modular distance from 3,
+        # so 0 comes before 1.
+        assert result == ["c", "a", "b"]
+
+    def test_eof_flush_gap_never_filled(self) -> None:
+        """Sequence 0, 2, EOF: 2 must still be delivered."""
+        sub = _make_sub(
+            [
+                {"sequenceNumber": 0, "data": "a"},
+                {"sequenceNumber": 2, "data": "c"},
+            ]
+        )
+        result = list(ordered_dialog(sub))
+        assert result == ["a", "c"]
+
+    def test_in_order_drain_wraps_around_max_sequence(self) -> None:
+        """The buffered drain follows the MAX_SEQUENCE -> 0 wraparound."""
+        sub = _make_sub(
+            [
+                {"sequenceNumber": MAX_SEQUENCE - 1, "data": "w"},
+                {"sequenceNumber": 0, "data": "y"},
+                {"sequenceNumber": MAX_SEQUENCE, "data": "x"},
+                {"sequenceNumber": 1, "data": "z"},
+            ]
+        )
+        result = list(ordered_dialog(sub))
+        assert result == ["w", "x", "y", "z"]
+
+    def test_eof_flush_wraparound_gap(self) -> None:
+        """Wraparound with the boundary message lost: expected
+        MAX_SEQUENCE, buffered {0, 1} — flushed as 0 then 1."""
+        sub = _make_sub(
+            [
+                {"sequenceNumber": MAX_SEQUENCE - 1, "data": "w"},
+                {"sequenceNumber": 1, "data": "z"},
+                {"sequenceNumber": 0, "data": "y"},
+            ]
+        )
+        result = list(ordered_dialog(sub))
+        assert result == ["w", "y", "z"]
 
 
 class TestOrderedDialogReorder:

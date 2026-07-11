@@ -42,4 +42,11 @@ class APIError(SFMCError):
     def __init__(self, status_code: int, response_body: str = "") -> None:
         self.status_code = status_code
         self.response_body = response_body
-        super().__init__(f"SFMC API error: HTTP {status_code}")
+        if status_code == 0 and response_body:
+            # Transport failure — there is no HTTP status to show, and
+            # the description (exception type, attempt count, whether a
+            # retry was withheld) is the only useful information.
+            message = response_body
+        else:
+            message = f"SFMC API error: HTTP {status_code}"
+        super().__init__(message)

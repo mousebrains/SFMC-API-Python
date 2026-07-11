@@ -65,7 +65,17 @@ Issues = "https://github.com/mousebrains/SFMC-API-Python/issues"
 Changelog = "https://github.com/mousebrains/SFMC-API-Python/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.sdist]
-include = ["/src", "/README.md", "/LICENSE", "/CHANGELOG.md", "/pyproject.toml"]
+# docs/ and examples/ ship in the sdist because the README links to
+# them throughout (quick starts, drifter example, data-flow guides).
+include = [
+    "/src",
+    "/docs",
+    "/examples",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+    "/pyproject.toml",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sfmc_api"]

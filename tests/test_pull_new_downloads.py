@@ -383,3 +383,146 @@ class TestMarginValidation:
 
     def test_accepts_zero(self) -> None:
         assert _nonnegative_int("0") == 0
+
+
+class TestStateValidation:
+    """PullState.load must reject malformed nested shapes with
+    SFMCError, not let them crash later in is_new()/observe()."""
+
+    def _write(self, tmp_path: Path, payload: dict[str, Any]) -> Path:
+        path = tmp_path / "state.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def test_rejects_files_as_list(self, tmp_path: Path) -> None:
+        path = self._write(tmp_path, {"version": 1, "hwm": None, "files": []})
+        with pytest.raises(SFMCError, match="'files' must be an object"):
+            PullState.load(path)
+
+    def test_rejects_non_string_hwm(self, tmp_path: Path) -> None:
+        path = self._write(tmp_path, {"version": 1, "hwm": 5, "files": {}})
+        with pytest.raises(SFMCError, match="'hwm' must be a string"):
+            PullState.load(path)
+
+    def test_rejects_non_dict_file_record(self, tmp_path: Path) -> None:
+        path = self._write(tmp_path, {"version": 1, "hwm": None, "files": {"a.sbd": "nope"}})
+        with pytest.raises(SFMCError, match=r"a\.sbd"):
+            PullState.load(path)
+
+    def test_rejects_bad_record_fields(self, tmp_path: Path) -> None:
+        path = self._write(
+            tmp_path,
+            {"version": 1, "hwm": None, "files": {"a.sbd": {"mtime": 1, "size": "x"}}},
+        )
+        with pytest.raises(SFMCError, match=r"a\.sbd"):
+            PullState.load(path)
+
+    def test_accepts_valid_nested_shape(self, tmp_path: Path) -> None:
+        path = self._write(
+            tmp_path,
+            {
+                "version": 1,
+                "hwm": "2026-07-11 01:00:00",
+                "files": {"a.sbd": {"mtime": "2026-07-11 01:00:00", "size": 3}},
+            },
+        )
+        state = PullState.load(path)
+        assert state.hwm == "2026-07-11 01:00:00"
+        assert not state.is_new("a.sbd", "2026-07-11 01:00:00")
+
+
+class TestListingPagination:
+    """The listing walk must reach every page — stopping early would
+    permanently strand files past the cut (name-based dedup makes
+    later passes re-fetch the same leading pages forever)."""
+
+    def test_paginates_past_fifty_pages(self) -> None:
+        def listing(
+            glider_name: str,
+            folder: str,
+            page: int = 0,
+            last_modified_after: str | None = None,
+        ) -> dict[str, Any]:
+            if page < 60:
+                return {
+                    "limit": 20,
+                    "results": [
+                        entry(f"48280{page:03d}{i:02d}.sbd", "2026-07-11 01:00:00", 1)
+                        for i in range(20)
+                    ],
+                }
+            return {"limit": 20, "results": []}
+
+        client = MagicMock()
+        client.get_folder_file_listing.side_effect = listing
+
+        new = list_new_files(client, "osusim", PullState(), margin_minutes=5)
+
+        assert len(new) == 1200
+        assert client.get_folder_file_listing.call_count == 61
+
+    def test_runaway_listing_raises_instead_of_truncating(self) -> None:
+        client = MagicMock()
+        client.get_folder_file_listing.return_value = {
+            "limit": 20,
+            "results": [entry(f"a{i}.sbd", "2026-07-11 01:00:00", 1) for i in range(20)],
+        }
+
+        with pytest.raises(SFMCError, match="exceeded"):
+            list_new_files(client, "osusim", PullState(), margin_minutes=5)
+
+
+class TestZipMemberSizeVerification:
+    def test_short_member_left_retryable(self, tmp_path: Path) -> None:
+        """A member shorter than the listing's fileSize must not be
+        installed or checkpointed — the next pass has to retry it."""
+        outdir = tmp_path / "out"
+        outdir.mkdir()
+        state = PullState()
+        state_path = tmp_path / "state.json"
+        client = make_zip_client(tmp_path, {"g-2026-192-0-1.sbd": b"abc"})
+        new_entries = [entry("g-2026-192-0-1.sbd", "2026-07-11 01:23:44", 100)]
+
+        n = download_new_files(client, "osusim", new_entries, outdir, state, state_path)
+
+        assert n == 0
+        assert not (outdir / "g-2026-192-0-1.sbd").exists()
+        assert not (outdir / "g-2026-192-0-1.sbd.part").exists()
+        assert "g-2026-192-0-1.sbd" not in state.files
+        assert not state_path.exists()  # nothing written, nothing saved
+        # The entry stays new, so the next pass retries it.
+        assert state.is_new("g-2026-192-0-1.sbd", "2026-07-11 01:23:44")
+
+    def test_exact_size_member_installed(self, tmp_path: Path) -> None:
+        outdir = tmp_path / "out"
+        outdir.mkdir()
+        state = PullState()
+        state_path = tmp_path / "state.json"
+        client = make_zip_client(tmp_path, {"g-2026-192-0-1.sbd": b"abc"})
+        new_entries = [entry("g-2026-192-0-1.sbd", "2026-07-11 01:23:44", 3)]
+
+        n = download_new_files(client, "osusim", new_entries, outdir, state, state_path)
+
+        assert n == 1
+        assert (outdir / "g-2026-192-0-1.sbd").read_bytes() == b"abc"
+        assert state.files["g-2026-192-0-1.sbd"]["size"] == 3
+
+    def test_large_member_streams_in_chunks(self, tmp_path: Path) -> None:
+        """A member bigger than the extract chunk size arrives intact."""
+        outdir = tmp_path / "out"
+        outdir.mkdir()
+        content = bytes(range(256)) * 1024  # 256 KiB, 4 chunks
+        client = make_zip_client(tmp_path, {"g-2026-192-0-2.sbd": content})
+        new_entries = [entry("g-2026-192-0-2.sbd", "2026-07-11 01:23:44", len(content))]
+
+        n = download_new_files(
+            client,
+            "osusim",
+            new_entries,
+            outdir,
+            PullState(),
+            tmp_path / "s.json",
+        )
+
+        assert n == 1
+        assert (outdir / "g-2026-192-0-2.sbd").read_bytes() == content

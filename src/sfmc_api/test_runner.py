@@ -1,12 +1,23 @@
 """Integration test runner for the SFMC REST API via the ``sfmc-api`` CLI.
 
-Installed as the ``sfmc-api-test`` console script.  Exercises as many
-API endpoints as possible against a live SFMC server *without*
-registering a new glider.
+Installed as the ``sfmc-api-test`` console script.  Exercises API
+endpoints against a live SFMC server *without* registering a new
+glider.
+
+By default only read-only endpoints are tested.  Pass
+``--allow-writes`` to also run the mutation groups — those upload,
+deploy, and delete files on the server, cycle the glider's script
+assignment (any prior assignment is **not** restored), and send a
+``status`` command to the glider.  Only do that against a glider that
+is not on an active mission, or one dedicated to testing.
 
 Usage::
 
+    # Read-only checks — safe against any glider
     sfmc-api-test --host gliderfmc1.ceoas.oregonstate.edu --glider shoebox
+
+    # Full run, including state-changing endpoints
+    sfmc-api-test --host ... --glider test-glider --allow-writes
 
 The script creates temporary files for upload/plan tests, cleans them
 up from the server when done, and prints a pass/fail/warn summary.
@@ -22,12 +33,30 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+
+#: Test groups that only read from the server.
+_READ_ONLY_GROUPS = ("auth", "queries", "listing", "sensors")
+
+#: Test groups that change server or glider state: they upload,
+#: deploy, and delete files, create a deployment if none is active,
+#: cycle the script assignment, and send a command to the glider.
+#: Run only with explicit --allow-writes consent.
+_WRITE_GROUPS = (
+    "deployment",
+    "files",
+    "plans",
+    "deploy",
+    "delete-rules",
+    "scripts",
+    "command",
+)
 
 # ── Colour helpers ────────────────────────────────────────────────────
 
@@ -259,12 +288,25 @@ def _test_file_upload_download_delete(
     test_file2.write_text("sfmc-api integration test file 2\n")
 
     # Upload to to-glider
-    _sfmc(
+    status, _, _ = _sfmc(
         ["upload-glider-files", glider, "to-glider", str(test_file), str(test_file2)],
         host=host,
         credentials=creds,
         label="upload-glider-files to-glider (2 files)",
     )
+    if status == "fail":
+        # Nothing arrived on the server — downloading or deleting the
+        # files would only produce misleading cascade failures.
+        sys.stdout.write(_yellow("    (upload failed — skipping dependent steps)\n"))
+        for label in [
+            "verify upload via listing",
+            "download-glider-file (single)",
+            "download-glider-files (zip)",
+            "delete-glider-file (file 1)",
+            "delete-glider-file (file 2)",
+        ]:
+            _results.append((label, "warn", "skipped: upload failed"))
+        return
 
     # List to-glider to verify upload
     _sfmc(
@@ -327,12 +369,15 @@ def _test_upload_to_science(host: str, glider: str, creds: str | None, tmpdir: P
     test_file = tmpdir / "sfmc-api-test-sci.txt"
     test_file.write_text("science test file\n")
 
-    _sfmc(
+    status, _, _ = _sfmc(
         ["upload-glider-files", glider, "to-science", str(test_file)],
         host=host,
         credentials=creds,
         label="upload-glider-files to-science",
     )
+    if status == "fail":
+        _results.append(("delete-glider-file to-science", "warn", "skipped: upload failed"))
+        return
 
     _sfmc(
         ["delete-glider-file", glider, "to-science", "sfmc-api-test-sci.txt"],
@@ -618,6 +663,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Test groups to skip (auth, queries, deployment, listing, files, "
         "plans, deploy, scripts, command, sensors, delete-rules)",
     )
+    parser.add_argument(
+        "--allow-writes",
+        action="store_true",
+        help="Also run state-changing test groups "
+        f"({', '.join(_WRITE_GROUPS)}).  These upload/deploy/delete "
+        "files on the server, cycle the glider's script assignment "
+        "without restoring it, and send a 'status' command to the "
+        "glider — only use against a glider that is not on an active "
+        "mission.  Default: read-only groups only.",
+    )
     return parser
 
 
@@ -631,6 +686,17 @@ def main() -> None:
     creds: str | None = args.credentials
     ma_dir: Path | None = args.ma_files
     skip: set[str] = set(args.skip or [])
+
+    if args.allow_writes:
+        # The cleanup steps (delete-glider-file, clear-assigned-script,
+        # delete-*-rules) run through the sfmc-api CLI, which refuses
+        # destructive operations without confirmation when stdin is not
+        # a TTY — and its prompt would be invisible (and appear as a
+        # hang) behind capture_output when it is.  The runner-level
+        # --allow-writes consent stands in for those prompts.
+        os.environ["SFMC_ASSUME_YES"] = "1"
+    else:
+        skip.update(_WRITE_GROUPS)
 
     # Check that sfmc-api CLI is available
     try:
@@ -673,6 +739,18 @@ def main() -> None:
         print(f"  MA dir: {ma_dir}")
     if skip:
         print(f"  Skip:   {', '.join(sorted(skip))}")
+    if args.allow_writes:
+        print(
+            _yellow(
+                "  Mode:   READ-WRITE — this run will upload/deploy/delete "
+                "files on the server,\n"
+                "          cycle the script assignment on "
+                f"{glider} (without restoring it), and send\n"
+                "          it a 'status' command."
+            )
+        )
+    else:
+        print("  Mode:   read-only (pass --allow-writes to test state-changing endpoints)")
     print()
 
     with tempfile.TemporaryDirectory(prefix="sfmc-api-test-") as tmpdir:

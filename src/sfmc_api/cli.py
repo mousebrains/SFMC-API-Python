@@ -542,6 +542,31 @@ def _prompt_host_entry() -> tuple[str, dict[str, Any]]:
     return hostname, entry
 
 
+def _write_credentials(creds_path: Path, data: dict[str, Any]) -> None:
+    """Atomically write *data* to *creds_path* with mode 0600.
+
+    The secret-bearing JSON goes into an adjacent temporary file
+    created with mode 0600 from birth (never widened by the umask,
+    never readable mid-write), is flushed to disk, and then atomically
+    replaces the target — an interruption or full disk can never leave
+    a world-readable secret or a truncated credentials store behind.
+    """
+    creds_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(data, indent=4) + "\n"
+    tmp_path = creds_path.with_name(creds_path.name + ".tmp")
+    tmp_path.unlink(missing_ok=True)
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, creds_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def _handle_init(args: argparse.Namespace) -> int:
     """Create a new credentials file interactively."""
     creds_path = args.credentials or DEFAULT_CONFIG_PATH
@@ -554,9 +579,7 @@ def _handle_init(args: argparse.Namespace) -> int:
 
     hostname, entry = _prompt_host_entry()
 
-    creds_path.parent.mkdir(parents=True, exist_ok=True)
-    creds_path.write_text(json.dumps({hostname: entry}, indent=4) + "\n")
-    creds_path.chmod(0o600)
+    _write_credentials(creds_path, {hostname: entry})
 
     sys.stderr.write(f"\nCredentials saved to {creds_path}\n")
     prog = Path(sys.argv[0]).name
@@ -589,8 +612,7 @@ def _handle_add_host(args: argparse.Namespace) -> int:
             return 1
 
     data[hostname] = entry
-    creds_path.write_text(json.dumps(data, indent=4) + "\n")
-    creds_path.chmod(0o600)
+    _write_credentials(creds_path, data)
 
     sys.stderr.write(f"\nHost '{hostname}' added to {creds_path}\n")
     prog = Path(sys.argv[0]).name
@@ -606,11 +628,19 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    # init and add-host don't need an SFMCClient
-    if args.command == "init":
-        sys.exit(_handle_init(args))
-    if args.command == "add-host":
-        sys.exit(_handle_add_host(args))
+    # init and add-host don't need an SFMCClient.  They run outside
+    # the client exception wrapper below, so give them their own:
+    # a failed write or a Ctrl-C at a prompt should not traceback.
+    if args.command in ("init", "add-host"):
+        handler = _handle_init if args.command == "init" else _handle_add_host
+        try:
+            sys.exit(handler(args))
+        except OSError as exc:
+            sys.stderr.write(f"Error: {exc}\n")
+            sys.exit(1)
+        except (KeyboardInterrupt, EOFError):
+            sys.stderr.write("\nCancelled.\n")
+            sys.exit(130)
 
     try:
         with SFMCClient(

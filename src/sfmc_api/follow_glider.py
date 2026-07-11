@@ -139,7 +139,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from queue import Empty, Queue
+from queue import Queue
 from typing import Any
 
 from sfmc_api.client import SFMCClient
@@ -360,19 +360,20 @@ def _upload_files(
     glider_name: str,
     queue_out: Queue[dict[str, dict[str, str | bytes]] | None],
     upload_log: logging.Logger,
-    stop: threading.Event,
     stats: RunStats | None = None,
 ) -> None:
     """Read file dicts from queue_out and upload them to SFMC.
 
     Runs in its own thread.  Each item from the queue is a dict like
     ``{"to-glider": {"filename": "content"}, "to-science": {...}}``.
+
+    Terminates only on the ``None`` sentinel, not on the shared stop
+    event: files queued just before a disconnect or Ctrl-C must still
+    be uploaded, so shutdown enqueues the sentinel after the producers
+    have drained and this loop works through the backlog first.
     """
-    while not stop.is_set():
-        try:
-            output = queue_out.get(timeout=1.0)
-        except Empty:
-            continue
+    while True:
+        output = queue_out.get()
 
         if output is None:
             break
@@ -406,19 +407,18 @@ def _upload_files(
 def _print_files(
     queue_out: Queue[dict[str, dict[str, str | bytes]] | None],
     output_log: logging.Logger,
-    stop: threading.Event,
     stats: RunStats | None = None,
 ) -> None:
     """Print generated files instead of uploading them.
 
     Used in ``--dry-run`` mode.  For each file the follower produces,
     logs the folder, filename, and content.
+
+    Terminates only on the ``None`` sentinel, like
+    :func:`_upload_files`, so queued output is never discarded.
     """
-    while not stop.is_set():
-        try:
-            output = queue_out.get(timeout=1.0)
-        except Empty:
-            continue
+    while True:
+        output = queue_out.get()
 
         if output is None:
             break
@@ -674,14 +674,14 @@ def follow_glider(
     if dry_run:
         output_thread = threading.Thread(
             target=_print_files,
-            args=(queue_out, upload_log, stop, stats),
+            args=(queue_out, upload_log, stats),
             daemon=True,
             name="dry-run-printer",
         )
     else:
         output_thread = threading.Thread(
             target=_upload_files,
-            args=(client, glider_name, queue_out, upload_log, stop, stats),
+            args=(client, glider_name, queue_out, upload_log, stats),
             daemon=True,
             name="file-uploader",
         )
@@ -725,14 +725,20 @@ def follow_glider(
 
         # ── Cleanup ─────────────────────────────────────────────
         if stop.is_set():
+            # Drain in producer order (the same pattern as the replay
+            # path above): stop the dialog input and join its reader,
+            # let the follower work through queue_in to its sentinel,
+            # and only then send the output sentinel — enqueueing it
+            # any earlier would let the output worker exit while the
+            # follower is still producing, discarding queued files.
             dialog_sub.close()
-            follower.shutdown()
-            queue_out.put(None)
             dialog_thread.join(timeout=5)
             if file_reader_thread is not None:
                 file_reader_thread.join(timeout=5)
+            follower.shutdown()
             follower.join(timeout=5)
-            output_thread.join(timeout=5)
+            queue_out.put(None)
+            output_thread.join(timeout=10)
 
     finally:
         if stomp_ctx is not None:

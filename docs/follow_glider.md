@@ -7,8 +7,10 @@ plugin**, and uploads any files the follower generates back to SFMC.
 ## Quick Start
 
 ```bash
-# Install with follower support
-pip install -e '.[follow]'
+# Install with follower support plus the drifter example's
+# dependencies (netCDF4, numpy).  For your own follower, the lighter
+# '.[follow]' extra is enough.
+pip install -e '.[drifter]'
 
 # Offline test with the drifter follower example
 sfmc-follow --glider osu685 \
