@@ -69,6 +69,20 @@ sfmc-monitor-glider --host gliderfmc1.ceoas.oregonstate.edu osu685
 
 See [docs/monitor_glider.md](docs/monitor_glider.md) for details.
 
+### [Pull New Downloads](docs/pull_new_downloads.md)
+
+Mirror new `from-glider` files into a local directory as the glider
+sends them, driven by real-time events (no polling while the glider
+is underwater):
+
+```bash
+sfmc-pull-new-downloads --host gliderfmc1.ceoas.oregonstate.edu osu685 /data/osu685
+sfmc-pull-new-downloads --once osu685 /data/osu685   # cron-friendly catch-up pass
+```
+
+See [docs/pull_new_downloads.md](docs/pull_new_downloads.md) for how
+batches, rename delays, and glider-clock timestamps are handled.
+
 ### [Follow a Glider (Autonomous Navigation)](docs/follow_glider.md)
 
 Run a follower plugin that watches each surfacing, generates new
