@@ -165,6 +165,7 @@ See [docs/configuration.md](docs/configuration.md) for full details.
 - [File Operations](docs/file_operations.md) -- upload, download, and delete
 - [Real-Time Streaming](docs/streaming.md) -- STOMP over SockJS event streaming
 - [Monitor Glider](docs/monitor_glider.md) -- real-time dialog and script monitoring
+- [Pull New Downloads](docs/pull_new_downloads.md) -- event-driven mirroring of new from-glider files
 - [Follow Glider](docs/follow_glider.md) -- autonomous follower plugins and simulation modes
 
 ## Getting Help
