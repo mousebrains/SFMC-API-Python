@@ -22,6 +22,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   domain with a dive-scale safety margin (default 48 h) and local
   filename dedup.  (`docs/pull_new_downloads.md`)
 
+### Changed
+
+- `sfmc-api-test` is **read-only by default**.  Pass `--allow-writes`
+  to run the state-changing groups (upload/deploy/delete files,
+  deployment creation, script-assignment cycling, send-command); the
+  runner then forwards consent to the child CLI via
+  `SFMC_ASSUME_YES`, so its cleanup deletions no longer hang or fail,
+  and steps that depend on a failed upload are skipped instead of
+  cascading (#4)
+- State-changing requests (POST/PUT/DELETE) are no longer retried
+  automatically after ambiguous transport failures such as read
+  timeouts — the server may already have applied them.  Failures that
+  occur before transmission (connect/pool errors) still retry, and
+  GET requests keep full retry behavior (#4)
+- `APIError` for a transport failure (status 0) now shows the failure
+  description in its message instead of the meaningless `HTTP 0`
+
+### Fixed
+
+- Streaming downloads (`download_glider_file`,
+  `download_glider_files`) refresh an expired auth token once on
+  HTTP 401, like every other request — long-lived processes no longer
+  fail downloads after token expiry (#4)
+- `sfmc-pull-new-downloads`: file listings paginate to exhaustion
+  instead of silently stopping at 50 pages (which could permanently
+  strand files past the cut); each zip member is verified
+  byte-for-byte against the listing's `fileSize` before being
+  installed or checkpointed, and is streamed to disk in chunks
+  instead of read whole into memory; malformed state files are
+  rejected with a clear `SFMCError` instead of crashing mid-run (#4)
+- STOMP: `StompSubscription.close()` no longer blocks when a bounded
+  queue is full; receive-loop teardown clears the connected flag so
+  `subscribe()` on a dead connection fails fast; calling `connect()`
+  twice raises instead of leaking the previous WebSocket and receiver
+  thread; a failed SUBSCRIBE send unregisters the subscription (#4)
+- `sfmc-follow`: shutdown drains queued uploads before exiting, so
+  files generated just before a disconnect or Ctrl-C are uploaded
+  rather than discarded; `ordered_dialog()` flushes buffered
+  out-of-order messages at end of stream (in wraparound-correct
+  order) instead of dropping them (#4)
+- `sfmc-api init` / `add-host`: credentials are written atomically
+  via a temp file created with mode 0600, so an interrupted write can
+  no longer truncate the store or briefly expose the secret with
+  permissive permissions; write failures and Ctrl-C at prompts exit
+  cleanly instead of printing a traceback (#4)
+- The sdist now ships `docs/` and `examples/`, which the README links
+  throughout; the follow-glider quick start installs the `[drifter]`
+  extra its example actually needs; CI runs the drifter example
+  tests, builds both artifacts, checks sdist contents, and
+  smoke-tests a clean wheel install (#4)
+
 ## [0.2.0] - 2026-05-15
 
 Improvements focused on making the toolkit safer and easier to learn

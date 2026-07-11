@@ -143,9 +143,10 @@ fewer operations.
 
 ### `APIError: HTTP 500` or other server error
 
-Something went wrong on the server side.  The response body, included
-in the error message, sometimes has details.  If the same operation
-fails repeatedly, contact your SFMC server administrator.
+Something went wrong on the server side.  When calling from Python,
+the raw response body is available as `APIError.response_body` and
+sometimes has details.  If the same operation fails repeatedly,
+contact your SFMC server administrator.
 
 ## Follower (`sfmc-follow`) problems
 
