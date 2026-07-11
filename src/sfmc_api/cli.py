@@ -14,6 +14,7 @@ Run ``sfmc-api --help`` for the full list of subcommands.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import getpass
 import json
 import os
@@ -565,6 +566,15 @@ def _write_credentials(creds_path: Path, data: dict[str, Any]) -> None:
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
+    # Make the rename itself durable.  Best-effort: directory fsync is
+    # not supported everywhere, and losing it only risks the *old*
+    # file reappearing after a crash, never a corrupt one.
+    with contextlib.suppress(OSError):
+        dir_fd = os.open(creds_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
 
 def _handle_init(args: argparse.Namespace) -> int:

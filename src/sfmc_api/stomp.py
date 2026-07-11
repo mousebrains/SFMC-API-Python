@@ -306,6 +306,10 @@ class StompConnection:
         with self._lock:
             if self._connected:
                 raise StompError("Already connected — call disconnect() first")
+        if self._receiver_thread is not None and self._receiver_thread.is_alive():
+            # A lingering receiver (disconnect() join timed out) would
+            # clobber the new connection's state from its teardown.
+            raise StompError("Previous receiver thread has not exited yet")
         # Reset lifecycle events so the object can be reused after a
         # disconnect; a stale _closing flag would make the new
         # receiver thread exit immediately.
@@ -446,7 +450,9 @@ class StompConnection:
             messages.
 
         Raises:
-            StompError: If not connected.
+            StompError: If not connected, or if sending the
+                ``SUBSCRIBE`` frame fails (the subscription is then
+                not registered).
         """
         with self._lock:
             if not self._connected:
