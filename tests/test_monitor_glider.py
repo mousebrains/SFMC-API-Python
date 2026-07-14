@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import signal
 import threading
 from queue import Queue
 from typing import Any
+from unittest.mock import MagicMock, patch
 
-from sfmc_api.monitor_glider import _log_with_time, monitor_dialog, ordered_dialog
+import pytest
+
+from sfmc_api.monitor_glider import _log_with_time, build_parser, monitor_dialog, ordered_dialog
 from sfmc_api.stomp import MAX_SEQUENCE, StompError, StompSubscription
 
 
@@ -35,6 +39,18 @@ class TestOrderedDialogInOrder:
 
 
 class TestOrderedDialogOutOfOrder:
+    def test_stomp_error_flushes_buffered_tail_before_raising(self) -> None:
+        q: Queue[dict[str, Any] | StompError | None] = Queue()
+        q.put({"sequenceNumber": 0, "data": "a"})
+        q.put({"sequenceNumber": 2, "data": "c"})
+        q.put(StompError("connection lost"))
+        stream = iter(ordered_dialog(StompSubscription("sub", "/test", q)))
+
+        assert next(stream) == "a"
+        assert next(stream) == "c"
+        with pytest.raises(StompError, match="connection lost"):
+            next(stream)
+
     def test_eof_flushes_buffered_tail(self) -> None:
         """A gap that never fills must not swallow the buffered tail:
         it is flushed in stream order when the subscription ends."""
@@ -195,20 +211,7 @@ class TestMonitorDialogReassembly:
 class TestMainArgparse:
     def test_host_and_credentials_flags(self) -> None:
         """Verify --host and --credentials flags are accepted by the parser."""
-        import argparse
-
-        # Replicate the parser setup from main()
-        parser = argparse.ArgumentParser()
-        parser.add_argument("glider_name")
-        parser.add_argument("logfile", nargs="?", default=None)
-        parser.add_argument("--host", default=None)
-        parser.add_argument(
-            "--credentials",
-            default=None,
-            metavar="PATH",
-        )
-
-        args = parser.parse_args(
+        args = build_parser().parse_args(
             [
                 "osusim",
                 "--host",
@@ -221,18 +224,45 @@ class TestMainArgparse:
         assert args.host == "sfmc.example.com"
         assert args.credentials == "/tmp/creds.json"
         assert args.logfile is None
+        assert args.no_reconnect is False
 
     def test_defaults(self) -> None:
         """Without optional flags, defaults are None."""
-        import argparse
-
-        parser = argparse.ArgumentParser()
-        parser.add_argument("glider_name")
-        parser.add_argument("logfile", nargs="?", default=None)
-        parser.add_argument("--host", default=None)
-        parser.add_argument("--credentials", default=None, metavar="PATH")
-
-        args = parser.parse_args(["myglider"])
+        args = build_parser().parse_args(["myglider"])
         assert args.host is None
         assert args.credentials is None
         assert args.logfile is None
+        assert args.no_reconnect is False
+
+    def test_no_reconnect(self) -> None:
+        args = build_parser().parse_args(["myglider", "--no-reconnect"])
+        assert args.no_reconnect is True
+
+    @patch("sfmc_api.monitor_glider.monitor_glider", side_effect=StompError("lost"))
+    @patch("sfmc_api.monitor_glider.SFMCClient")
+    @patch("sfmc_api.monitor_glider.setup_logging")
+    def test_no_reconnect_stream_loss_exits_1_and_restores_signals(
+        self,
+        mock_setup: MagicMock,
+        mock_client_class: MagicMock,
+        mock_monitor: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        dialog_log = MagicMock(spec=logging.Logger)
+        dialog_log.handlers = []
+        mock_setup.return_value = (dialog_log, MagicMock(spec=logging.Logger))
+        mock_client_class.return_value.__enter__.return_value = MagicMock()
+        monkeypatch.setattr("sys.argv", ["sfmc-monitor-glider", "g1", "--no-reconnect"])
+        previous_int = signal.getsignal(signal.SIGINT)
+        previous_term = signal.getsignal(signal.SIGTERM)
+
+        from sfmc_api.monitor_glider import main
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 1
+        assert mock_monitor.call_args.kwargs["reconnect"] is False
+        assert isinstance(mock_monitor.call_args.kwargs["stop"], threading.Event)
+        assert signal.getsignal(signal.SIGINT) == previous_int
+        assert signal.getsignal(signal.SIGTERM) == previous_term

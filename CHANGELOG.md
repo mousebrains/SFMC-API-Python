@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `sfmc-monitor-glider` and live `sfmc-follow` now reconnect expected
+  WebSocket/STOMP failures with capped, jittered exponential backoff and
+  synchronized authentication refresh. Both support `--no-reconnect` for
+  supervisors using `Restart=on-failure`, interrupt retry waits on SIGTERM,
+  and record replay-safe `STREAM_BOUNDARY` markers. `sfmc-follow` preserves
+  one follower/output pipeline across sessions, resets partial parser state at
+  gaps, suppresses strong-identity overlap duplicates, and reports successful
+  reconnects in `RunStats`. Reconnection restores future delivery only; SFMC
+  provides no stream-history catch-up for the offline interval.
+
 - `sfmc-pull-new-downloads` — event-driven mirroring of new
   `from-glider` files into a local directory.  Subscribes to
   connection and Zmodem transfer events, waits out SFMC's variable

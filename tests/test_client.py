@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -89,6 +91,74 @@ class TestLazyAuth:
         with SFMCClient(config=config) as client:
             client.authenticate()
             assert client._token == "tok"
+
+    @patch("sfmc_api.client.authenticate", side_effect=["old", "new"])
+    @patch("sfmc_api.client.build_http_client")
+    def test_refresh_auth_replaces_cached_token(
+        self, mock_build: MagicMock, mock_auth: MagicMock, config: SFMCConfig
+    ) -> None:
+        mock_build.return_value = MagicMock(spec=httpx.Client)
+
+        with SFMCClient(config=config) as client:
+            client.authenticate()
+            client.refresh_auth()
+
+            assert client._token == "new"
+        assert mock_auth.call_count == 2
+
+    @patch("sfmc_api.client.authenticate", side_effect=["old", AuthenticationError("down"), "new"])
+    @patch("sfmc_api.client.build_http_client")
+    def test_failed_refresh_preserves_token_and_can_retry(
+        self, mock_build: MagicMock, mock_auth: MagicMock, config: SFMCConfig
+    ) -> None:
+        mock_build.return_value = MagicMock(spec=httpx.Client)
+
+        with SFMCClient(config=config) as client:
+            client.authenticate()
+            with pytest.raises(AuthenticationError, match="down"):
+                client.refresh_auth()
+            assert client._token == "old"
+
+            client.refresh_auth()
+            assert client._token == "new"
+
+    @patch("sfmc_api.client.build_http_client")
+    def test_concurrent_refreshes_are_serialized(
+        self, mock_build: MagicMock, config: SFMCConfig
+    ) -> None:
+        mock_build.return_value = MagicMock(spec=httpx.Client)
+        active = 0
+        max_active = 0
+        call_count = 0
+        counter_lock = threading.Lock()
+
+        def sign_in(http: httpx.Client, auth_config: SFMCConfig) -> str:
+            del http, auth_config
+            nonlocal active, max_active, call_count
+            with counter_lock:
+                active += 1
+                call_count += 1
+                max_active = max(max_active, active)
+                token = f"token-{call_count}"
+            time.sleep(0.01)
+            with counter_lock:
+                active -= 1
+            return token
+
+        with (
+            patch("sfmc_api.client.authenticate", side_effect=sign_in),
+            SFMCClient(config=config) as client,
+        ):
+            threads = [threading.Thread(target=client.refresh_auth) for _ in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=2)
+
+            assert all(not thread.is_alive() for thread in threads)
+            assert max_active == 1
+            assert call_count == 8
+            assert client._token is not None
 
 
 class TestRequest:

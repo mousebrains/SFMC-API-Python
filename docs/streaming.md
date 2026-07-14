@@ -117,6 +117,21 @@ not the glider ID.  The client resolves this automatically.
 
 ## Usage Patterns
 
+### Reconnection ownership
+
+`StompConnection` reports closure to its subscriptions; it does not reconnect
+itself. A dead connection cannot safely recreate application-specific topics
+or state. Code using `open_stream()` directly must therefore open a new
+connection and create new subscriptions after closure.
+
+The long-running `sfmc-monitor-glider`, `sfmc-follow`, and
+`sfmc-pull-new-downloads` commands implement that application-level recovery.
+Their supervisors can preserve command state, refresh authentication, replace
+all subscriptions together, and distinguish expected transport failures from
+fatal processing errors. A new subscription receives future messages only;
+the current SFMC topic API provides no cursor/history catch-up for the offline
+interval.
+
 ### Basic: Stream connection events
 
 ```python
