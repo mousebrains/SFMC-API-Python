@@ -88,6 +88,10 @@ batches, rename delays, and glider-clock timestamps are handled.
 Run a follower plugin that watches each surfacing, generates new
 navigation files (e.g. waypoint plans), and uploads them to SFMC:
 
+Live monitor/follower commands reconnect with bounded backoff while preserving
+application state. Reconnect restores future messages but cannot recover
+events published during the gap.
+
 ```bash
 # The drifter example needs the [drifter] extra (netCDF4, numpy)
 pip install -e '.[drifter]'

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import signal
 import threading
 import time
 from pathlib import Path
@@ -14,6 +15,7 @@ import pytest
 
 from sfmc_api import SFMCClient
 from sfmc_api.dialog_parser import DialogParser, SurfacingEvent
+from sfmc_api.exceptions import SFMCError
 from sfmc_api.follow_glider import (
     RunStats,
     _open_replay,
@@ -107,6 +109,17 @@ class TestParseLogLine:
     def test_info_line_skipped(self) -> None:
         line = "2026-03-28T20:40:38.000000 sfmc.testbot.INFO  Connected"
         assert _parse_log_line(line) is None
+
+    def test_only_exact_stream_boundary_is_control_data(self) -> None:
+        marker = (
+            "2026-03-28T20:40:38.000000 sfmc.testbot.FOLLOW  "
+            "STREAM_BOUNDARY session=2 reason=stomp-error"
+        )
+        lookalike = "2026-03-28T20:40:38.000000 sfmc.testbot.FOLLOW  STREAM_BOUNDARY-ish"
+
+        assert _parse_log_line(marker) is not None
+        assert _parse_log_line(lookalike) is None
+        assert _parse_log_line("STREAM_BOUNDARY-ish") == "STREAM_BOUNDARY-ish"
 
     def test_blank_line(self) -> None:
         assert _parse_log_line("") is None
@@ -558,6 +571,7 @@ class TestBuildParser:
         assert args.log_level == "INFO"
         assert args.log_max_size == 10 * 1024 * 1024
         assert args.log_backup_count == 5
+        assert args.no_reconnect is False
 
     def test_simulation_args(self) -> None:
         parser = build_parser()
@@ -591,6 +605,12 @@ class TestBuildParser:
         assert args.replay is None
         assert args.replay_interval == 10.0
         assert args.dry_run is False
+        assert args.no_reconnect is False
+
+    def test_no_reconnect(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["--glider", "g1", "--follower", "f.py", "--no-reconnect"])
+        assert args.no_reconnect is True
 
     def test_missing_glider_fails(self) -> None:
         parser = build_parser()
@@ -759,11 +779,11 @@ class TestFollowGliderErrorPaths:
     """Test error paths where client is None but required."""
 
     @patch("sfmc_api.follow_glider.setup_logging")
-    def test_live_mode_without_client_returns(
+    def test_live_mode_without_client_raises(
         self,
         mock_setup_logging: MagicMock,
     ) -> None:
-        """Live mode (no replay, no dry-run) with client=None should return."""
+        """Live mode requires a client even when uploads are disabled."""
         mock_info_log = MagicMock(spec=logging.Logger)
         mock_info_log.name = "test.info"
         mock_setup_logging.return_value = (
@@ -772,23 +792,21 @@ class TestFollowGliderErrorPaths:
             mock_info_log,
         )
 
-        follow_glider(
-            client=None,
-            glider_name="g1",
-            follower_class=RecordingFollower,
-            follower_config={},
-        )
-
-        mock_info_log.error.assert_called_once()
-        assert "client is required" in str(mock_info_log.error.call_args)
+        with pytest.raises(ValueError, match="client is required"):
+            follow_glider(
+                client=None,
+                glider_name="g1",
+                follower_class=RecordingFollower,
+                follower_config={},
+            )
 
     @patch("sfmc_api.follow_glider.setup_logging")
-    def test_replay_upload_without_client_returns(
+    def test_replay_upload_without_client_raises(
         self,
         mock_setup_logging: MagicMock,
         tmp_path: Path,
     ) -> None:
-        """Replay + upload (no dry-run) with client=None should return."""
+        """Replay + upload (no dry-run) with client=None should fail."""
         mock_info_log = MagicMock(spec=logging.Logger)
         mock_info_log.name = "test.info"
         mock_setup_logging.return_value = (
@@ -800,17 +818,54 @@ class TestFollowGliderErrorPaths:
         log_file = tmp_path / "dialog.log"
         log_file.write_text("some data\n")
 
-        follow_glider(
-            client=None,
-            glider_name="g1",
-            follower_class=RecordingFollower,
-            follower_config={},
-            replay=str(log_file),
-            dry_run=False,
+        with pytest.raises(ValueError, match="client is required"):
+            follow_glider(
+                client=None,
+                glider_name="g1",
+                follower_class=RecordingFollower,
+                follower_config={},
+                replay=str(log_file),
+                dry_run=False,
+            )
+
+    @patch("sfmc_api.follow_glider.setup_logging")
+    def test_malformed_initial_glider_response_raises(
+        self,
+        mock_setup_logging: MagicMock,
+    ) -> None:
+        mock_setup_logging.return_value = (
+            MagicMock(spec=logging.Logger),
+            MagicMock(spec=logging.Logger),
+            MagicMock(spec=logging.Logger),
+        )
+        client = MagicMock(spec=SFMCClient)
+        client.get_glider_details.return_value = {"data": None}
+
+        with pytest.raises(SFMCError, match="Unexpected glider-details"):
+            follow_glider(client, "g1", RecordingFollower)
+
+        client.open_stream.assert_not_called()
+
+    @patch("sfmc_api.follow_glider.setup_logging")
+    def test_missing_replay_file_raises_before_starting_follower(
+        self,
+        mock_setup_logging: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        mock_setup_logging.return_value = (
+            MagicMock(spec=logging.Logger),
+            MagicMock(spec=logging.Logger),
+            MagicMock(spec=logging.Logger),
         )
 
-        mock_info_log.error.assert_called_once()
-        assert "client is required" in str(mock_info_log.error.call_args)
+        with pytest.raises(FileNotFoundError, match="Replay file not found"):
+            follow_glider(
+                None,
+                "g1",
+                RecordingFollower,
+                replay=str(tmp_path / "missing.log"),
+                dry_run=True,
+            )
 
 
 class TestRunStats:
@@ -821,6 +876,7 @@ class TestRunStats:
         assert s.surfacings == 0
         assert s.files_emitted == 0
         assert s.upload_errors == 0
+        assert s.reconnects == 0
         assert not s.had_errors()
 
     def test_incr_methods(self) -> None:
@@ -828,9 +884,11 @@ class TestRunStats:
         s.incr_surfacings()
         s.incr_files(3)
         s.incr_upload_errors()
+        s.incr_reconnects()
         assert s.surfacings == 1
         assert s.files_emitted == 3
         assert s.upload_errors == 1
+        assert s.reconnects == 1
         assert s.had_errors()
 
     def test_format_summary(self) -> None:
@@ -840,6 +898,7 @@ class TestRunStats:
         assert "surfacings=1" in s.format()
         assert "files_emitted=2" in s.format()
         assert "upload_errors=0" in s.format()
+        assert "reconnects=0" in s.format()
 
     def test_concurrent_increments(self) -> None:
         """Counters survive concurrent increments without losing updates."""
@@ -985,3 +1044,39 @@ class TestStrictFlagExit:
 
         # Without --strict, errors do not force a non-zero exit.
         main()
+
+    @patch("sfmc_api.follow_glider.follow_glider", side_effect=StompError("lost"))
+    @patch("sfmc_api.follow_glider.load_follower_class")
+    def test_no_reconnect_stream_loss_exits_1_and_restores_signals(
+        self,
+        mock_load: MagicMock,
+        mock_follow: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        mock_load.return_value = RecordingFollower
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "sfmc-follow",
+                "--glider",
+                "g1",
+                "--follower",
+                "fake.py",
+                "--replay",
+                "fake.log",
+                "--dry-run",
+                "--no-reconnect",
+            ],
+        )
+        previous_int = signal.getsignal(signal.SIGINT)
+        previous_term = signal.getsignal(signal.SIGTERM)
+        from sfmc_api.follow_glider import main
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 1
+        assert mock_follow.call_args.kwargs["reconnect"] is False
+        assert isinstance(mock_follow.call_args.kwargs["stop"], threading.Event)
+        assert signal.getsignal(signal.SIGINT) == previous_int
+        assert signal.getsignal(signal.SIGTERM) == previous_term

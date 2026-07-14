@@ -153,6 +153,12 @@ class SFMCClient:
 
     # ── Authentication ───────────────────────────────────────────────
 
+    def _authenticate_locked(self) -> None:
+        """Authenticate while the caller holds ``_auth_lock``."""
+        token = authenticate(self._http, self._config)
+        with self._token_lock:
+            self._token = token
+
     def authenticate(self) -> None:
         """Explicitly sign in and cache the bearer token.
 
@@ -163,9 +169,20 @@ class SFMCClient:
         Raises:
             AuthenticationError: If sign-in fails.
         """
-        token = authenticate(self._http, self._config)
-        with self._token_lock:
-            self._token = token
+        with self._auth_lock:
+            self._authenticate_locked()
+
+    def refresh_auth(self) -> None:
+        """Force a synchronized bearer-token refresh.
+
+        Long-running stream supervisors call this before replacing a dead
+        STOMP session. The new token becomes visible atomically to concurrent
+        HTTP users only after authentication succeeds.
+
+        Raises:
+            AuthenticationError: If sign-in fails.
+        """
+        self.authenticate()
 
     def _ensure_auth(self) -> None:
         """Sign in lazily — only if no token is cached yet.
@@ -183,7 +200,7 @@ class SFMCClient:
             with self._token_lock:
                 if self._token is not None:
                     return
-            self.authenticate()
+            self._authenticate_locked()
 
     def _auth_headers(self) -> dict[str, str]:
         """Return an ``Authorization: Bearer ...`` header dict."""
@@ -274,9 +291,7 @@ class SFMCClient:
             # Token expired — refresh once
             if response.status_code == 401 and attempt == 0:
                 logger.debug("Got 401, refreshing auth token")
-                with self._token_lock:
-                    self._token = None
-                self.authenticate()
+                self.refresh_auth()
                 with self._token_lock:
                     headers["Authorization"] = f"Bearer {self._token}"
                 continue
@@ -1497,8 +1512,7 @@ class SFMCClient:
             ) as response:
                 if response.status_code == 401 and attempt == 0:
                     logger.debug("Got 401 on download, refreshing auth token")
-                    with self._token_lock:
-                        self._token = None
+                    self.refresh_auth()
                     continue
                 if not response.is_success:
                     # Streamed responses defer the body; read it so

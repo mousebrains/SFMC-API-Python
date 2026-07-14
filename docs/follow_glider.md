@@ -40,9 +40,40 @@ Source (STOMP or log file)
   → Upload to SFMC  or  Print (--dry-run)
 ```
 
-Both live and replay modes produce a `StompSubscription` and feed
-through the exact same pipeline.  The only difference is the data
-source (WebSocket vs. log file).
+Both live and replay modes produce a `StompSubscription` and feed through the
+same parser and follower pipeline. Live mode replaces only its stream,
+subscription, ordering, line-assembly, and parser state after a disconnect;
+the follower instance, queues, output worker, statistics, and recent-event
+de-duplication cache remain alive.
+
+## Reconnection and delivery semantics
+
+Live mode reconnects by default after an expected WebSocket/STOMP closure or
+replacement-session setup failure. It refreshes authentication, creates a new
+connection and subscription, and uses exponential backoff: 15 seconds
+initially, doubling to 300 seconds, with up to 20% jitter. A session must stay
+subscribed for 60 seconds to reset the backoff. Ctrl-C, SIGTERM, or a supplied
+`stop` event interrupts a retry wait and drains the pipeline in producer order.
+
+Reconnect is best-effort future recovery, not lossless or exactly-once
+delivery. SFMC exposes no cursor/history operation for dialog published while
+the process is offline. At a stream boundary the follower:
+
+- flushes a pre-boundary event only if it already has both GPS and sensor data;
+- discards unterminated character fragments and all other partial parser state;
+- suppresses an overlapping duplicate only when timestamp and mission time
+  are present and the `(vehicle name, timestamp, mission time)` identity
+  matches; and
+- delivers ambiguous events when timestamp or mission time is absent rather
+  than risking a false duplicate.
+
+Monitor/follow logs contain `STREAM_BOUNDARY session=N reason=...` markers.
+Replay recognizes these markers and performs the same flush/reset, without
+exposing the marker to the follower as dialog data.
+
+Pass `--no-reconnect` if an unexpected live stream loss should exit with
+status 1, for example so systemd `Restart=on-failure` owns recovery. Replay is
+always finite and never enters the reconnect supervisor.
 
 ## Simulation Modes
 
@@ -139,6 +170,7 @@ Simulation:
   --replay-interval SECS  Delay between events during replay (default: 10)
   --dry-run               Print output instead of uploading
   --strict                Exit non-zero if any upload error occurred
+  --no-reconnect          Exit non-zero if the live stream disconnects
 
 Logging:
   --logfile FILE          Log file path
@@ -152,7 +184,7 @@ Logging:
 Every run prints a one-line summary just before exiting:
 
 ```
-2026-05-15T12:00:00 sfmc.osu685.FOLLOW  Done. surfacings=12, files_emitted=12, upload_errors=0
+2026-05-15T12:00:00 sfmc.osu685.FOLLOW  Done. surfacings=12, files_emitted=12, upload_errors=0, reconnects=1
 ```
 
 - `surfacings` — number of `SurfacingEvent`s the parser produced and
@@ -162,6 +194,9 @@ Every run prints a one-line summary just before exiting:
 - `upload_errors` — number of upload attempts that failed.  A non-zero
   count is logged with full tracebacks at the time of failure; the
   count is recapped here so you cannot miss it.
+- `reconnects` — number of successful second-or-later live subscriptions.
+  Failed attempts are not counted, and this value does not make `--strict`
+  fail.
 
 When `upload_errors > 0` and you passed `--strict`, the process exits
 with status 2 instead of 0.  This is intended for unattended
@@ -185,7 +220,7 @@ with SFMCClient() as client:
         client, "osu685", MyFollower,
         follower_config={"sequence_number": 30},
     )
-    print(stats.format())  # e.g. "surfacings=12, files_emitted=12, upload_errors=0"
+    print(stats.format())  # includes surfacings, files, errors, and reconnects
 
 # Offline replay (no client needed)
 stats = follow_glider(
@@ -198,3 +233,9 @@ stats = follow_glider(
 if stats.had_errors():
     raise SystemExit(2)
 ```
+
+Live callers can set `reconnect=False` or tune the keyword-only
+`reconnect_initial_delay`, `reconnect_max_delay`,
+`reconnect_stable_after`, and `reconnect_jitter` settings. The defaults are
+15, 300, 60, and 0.2 seconds/fraction respectively. Replay ignores these
+settings.

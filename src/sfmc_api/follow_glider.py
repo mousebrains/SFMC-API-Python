@@ -133,20 +133,32 @@ from __future__ import annotations
 import argparse
 import logging
 import logging.handlers
+import queue
 import re
+import signal
 import sys
 import threading
 import time
+from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from queue import Queue
 from typing import Any
 
 from sfmc_api.client import SFMCClient
 from sfmc_api.dialog_parser import DialogParser, SurfacingEvent
+from sfmc_api.exceptions import SFMCError
 from sfmc_api.follower import BaseFollower, load_follower_class
-from sfmc_api.monitor_glider import _LINE_SEP, _log_with_time, ordered_dialog
-from sfmc_api.stomp import StompSubscription
+from sfmc_api.monitor_glider import (
+    _LINE_SEP,
+    STREAM_BOUNDARY_PREFIX,
+    _log_with_time,
+    ordered_dialog,
+)
+from sfmc_api.stomp import StompError, StompSubscription
+from sfmc_api.stream_reconnect import ReconnectBackoff, safe_stream_error
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +175,7 @@ class RunStats:
     surfacings: int = 0
     files_emitted: int = 0
     upload_errors: int = 0
+    reconnects: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def incr_surfacings(self) -> None:
@@ -177,6 +190,10 @@ class RunStats:
         with self._lock:
             self.upload_errors += n
 
+    def incr_reconnects(self) -> None:
+        with self._lock:
+            self.reconnects += 1
+
     def had_errors(self) -> bool:
         with self._lock:
             return self.upload_errors > 0
@@ -186,13 +203,18 @@ class RunStats:
             return (
                 f"surfacings={self.surfacings}, "
                 f"files_emitted={self.files_emitted}, "
-                f"upload_errors={self.upload_errors}"
+                f"upload_errors={self.upload_errors}, "
+                f"reconnects={self.reconnects}"
             )
 
 
 # ── Log line regex ──────────────────────────────────────────────────
 
 _TS_LOGGER_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T[\d:.]+\s+(\S+)\s{2}(.*)")
+_REPLAY_STREAM_BOUNDARY = "\x1eSFMC_STREAM_BOUNDARY\x1e"
+_STREAM_BOUNDARY_RE = re.compile(
+    rf"^{re.escape(STREAM_BOUNDARY_PREFIX)} session=\d+ reason=[a-z][a-z0-9-]*$"
+)
 
 
 def _parse_log_line(line: str) -> str | None:
@@ -218,9 +240,17 @@ def _parse_log_line(line: str) -> str | None:
     ts_logger_match = _TS_LOGGER_RE.match(stripped)
     if ts_logger_match:
         logger_name = ts_logger_match.group(1)
+        message = ts_logger_match.group(2)
+        if (".INFO" in logger_name or ".FOLLOW" in logger_name) and _STREAM_BOUNDARY_RE.fullmatch(
+            message
+        ):
+            return _REPLAY_STREAM_BOUNDARY
         if ".DIALOG" not in logger_name:
             return None
-        return ts_logger_match.group(2)
+        return message
+
+    if _STREAM_BOUNDARY_RE.fullmatch(stripped):
+        return _REPLAY_STREAM_BOUNDARY
 
     # Raw dialog line (no prefix).
     return stripped
@@ -231,7 +261,7 @@ def _parse_log_line(line: str) -> str | None:
 
 def _file_reader(
     replay_path: str | Path,
-    queue: Queue[dict[str, Any] | None],
+    out_queue: Queue[dict[str, Any] | StompError | None],
     stop: threading.Event,
 ) -> None:
     """Background thread: read a log file and feed lines into a queue.
@@ -243,15 +273,19 @@ def _file_reader(
 
     Non-DIALOG lines (SCRIPT, INFO, etc.) are filtered out here.
     """
-    with open(replay_path, encoding="utf-8", errors="replace") as f:
-        for raw_line in f:
-            if stop.is_set():
-                break
-            dialog_text = _parse_log_line(raw_line)
-            if dialog_text is None:
-                continue
-            queue.put({"data": dialog_text + "\r\n"})
-    queue.put(None)  # Sentinel — signals end of stream.
+    try:
+        with open(replay_path, encoding="utf-8", errors="replace") as f:
+            for raw_line in f:
+                if stop.is_set():
+                    break
+                dialog_text = _parse_log_line(raw_line)
+                if dialog_text is None:
+                    continue
+                out_queue.put({"data": dialog_text + "\r\n"})
+    except Exception as exc:
+        out_queue.put(StompError(f"Replay reader failed: {exc}"))
+    finally:
+        out_queue.put(None)  # Sentinel — signals end of stream.
 
 
 def _open_replay(
@@ -263,8 +297,6 @@ def _open_replay(
     Returns the subscription (which can be iterated exactly like a
     live STOMP subscription) and the reader thread (already started).
     """
-    from sfmc_api.stomp import StompError
-
     q: Queue[dict[str, Any] | StompError | None] = Queue()
     thread = threading.Thread(
         target=_file_reader,
@@ -279,6 +311,81 @@ def _open_replay(
 # ── Dialog reader thread (shared by live and replay) ────────────────
 
 
+class _RecentSurfacingIds:
+    """Bounded de-duplication cache for strong surfacing identities."""
+
+    def __init__(self, maxsize: int = 128) -> None:
+        self._maxsize = maxsize
+        self._ordered: deque[tuple[str | None, datetime, float]] = deque()
+        self._known: set[tuple[str | None, datetime, float]] = set()
+
+    def duplicate_identity(
+        self, event: SurfacingEvent
+    ) -> tuple[str | None, datetime, float] | None:
+        if event.timestamp is None or event.mission_time is None:
+            return None
+        identity = (event.vehicle_name, event.timestamp, event.mission_time)
+        if identity in self._known:
+            return identity
+        if len(self._ordered) >= self._maxsize:
+            self._known.remove(self._ordered.popleft())
+        self._ordered.append(identity)
+        self._known.add(identity)
+        return None
+
+
+def _deliver_surfacing(
+    event: SurfacingEvent | None,
+    queue_in: Queue[SurfacingEvent | None],
+    stats: RunStats | None,
+    recent_ids: _RecentSurfacingIds | None,
+    info_log: logging.Logger | None,
+) -> bool:
+    if event is None:
+        return False
+    duplicate = None if recent_ids is None else recent_ids.duplicate_identity(event)
+    if duplicate is not None:
+        if info_log is not None:
+            info_log.warning("duplicate surfacing suppressed: %s", duplicate)
+        return False
+    if stats is not None:
+        stats.incr_surfacings()
+    queue_in.put(event)
+    return True
+
+
+def _finish_dialog_session(
+    *,
+    buf: str,
+    line_start: float,
+    parser: DialogParser,
+    queue_in: Queue[SurfacingEvent | None],
+    dialog_log: logging.Logger | None,
+    flush_unterminated: bool,
+    stats: RunStats | None,
+    recent_ids: _RecentSurfacingIds | None,
+    info_log: logging.Logger | None,
+) -> None:
+    if buf.strip():
+        if flush_unterminated:
+            if dialog_log:
+                _log_with_time(dialog_log, buf, line_start)
+            _deliver_surfacing(
+                parser.feed_line(buf),
+                queue_in,
+                stats,
+                recent_ids,
+                info_log,
+            )
+        elif info_log is not None:
+            info_log.warning(
+                "stream boundary discarded %d-byte unterminated fragment",
+                len(buf.encode("utf-8")),
+            )
+    _deliver_surfacing(parser.flush(), queue_in, stats, recent_ids, info_log)
+    parser.reset()
+
+
 def _read_dialog(
     sub: StompSubscription,
     parser: DialogParser,
@@ -287,6 +394,9 @@ def _read_dialog(
     stop: threading.Event,
     event_interval: float = 0.0,
     stats: RunStats | None = None,
+    recent_ids: _RecentSurfacingIds | None = None,
+    info_log: logging.Logger | None = None,
+    flush_unterminated: bool = True,
 ) -> None:
     """Read dialog output, parse surfacings, and feed the follower.
 
@@ -311,45 +421,70 @@ def _read_dialog(
     buf = ""
     line_start: float = 0.0
 
-    for data in ordered_dialog(sub):
-        if stop.is_set():
-            break
+    def process() -> None:
+        nonlocal buf, line_start
+        for data in ordered_dialog(sub):
+            if stop.is_set():
+                break
 
-        if not buf:
-            line_start = time.time()
-        buf += data
-        parts = _LINE_SEP.split(buf)
-        buf = parts[-1]
+            if not buf:
+                line_start = time.time()
+            buf += data
+            parts = _LINE_SEP.split(buf)
+            buf = parts[-1]
 
-        for line in parts[:-1]:
-            if line:
-                if dialog_log:
-                    _log_with_time(dialog_log, line, line_start)
-                event = parser.feed_line(line)
-                if event is not None:
-                    if stats is not None:
-                        stats.incr_surfacings()
-                    queue_in.put(event)
-                    if event_interval > 0 and not stop.is_set():
-                        stop.wait(timeout=event_interval)
-            line_start = time.time()
+            for line in parts[:-1]:
+                delivered = False
+                if line == _REPLAY_STREAM_BOUNDARY:
+                    delivered = _deliver_surfacing(
+                        parser.flush(),
+                        queue_in,
+                        stats,
+                        recent_ids,
+                        info_log,
+                    )
+                    parser.reset()
+                elif line:
+                    if dialog_log:
+                        _log_with_time(dialog_log, line, line_start)
+                    delivered = _deliver_surfacing(
+                        parser.feed_line(line),
+                        queue_in,
+                        stats,
+                        recent_ids,
+                        info_log,
+                    )
+                if delivered and event_interval > 0 and not stop.is_set():
+                    stop.wait(timeout=event_interval)
+                line_start = time.time()
 
-    # Flush remaining buffer.
-    if buf.strip():
-        if dialog_log:
-            _log_with_time(dialog_log, buf, line_start)
-        event = parser.feed_line(buf)
-        if event is not None:
-            if stats is not None:
-                stats.incr_surfacings()
-            queue_in.put(event)
-
-    # Flush any partially collected surfacing.
-    event = parser.flush()
-    if event is not None:
-        if stats is not None:
-            stats.incr_surfacings()
-        queue_in.put(event)
+    try:
+        process()
+    except StompError:
+        _finish_dialog_session(
+            buf=buf,
+            line_start=line_start,
+            parser=parser,
+            queue_in=queue_in,
+            dialog_log=dialog_log,
+            flush_unterminated=flush_unterminated or stop.is_set(),
+            stats=stats,
+            recent_ids=recent_ids,
+            info_log=info_log,
+        )
+        raise
+    else:
+        _finish_dialog_session(
+            buf=buf,
+            line_start=line_start,
+            parser=parser,
+            queue_in=queue_in,
+            dialog_log=dialog_log,
+            flush_unterminated=flush_unterminated or stop.is_set(),
+            stats=stats,
+            recent_ids=recent_ids,
+            info_log=info_log,
+        )
 
 
 # ── Upload thread ───────────────────────────────────────────────────
@@ -520,6 +655,311 @@ def setup_logging(
 # ── Main API ────────────────────────────────────────────────────────
 
 
+@dataclass(frozen=True)
+class _ThreadResult:
+    name: str
+    error: Exception | None
+
+
+def _run_thread_target(
+    name: str,
+    target: Callable[..., None],
+    args: tuple[Any, ...],
+    results: queue.Queue[_ThreadResult],
+) -> None:
+    try:
+        target(*args)
+    except Exception as exc:
+        results.put(_ThreadResult(name, exc))
+    else:
+        results.put(_ThreadResult(name, None))
+
+
+def _pipeline_health(
+    follower: BaseFollower,
+    output_thread: threading.Thread,
+    output_results: queue.Queue[_ThreadResult],
+) -> None:
+    if not follower.is_alive():
+        raise RuntimeError("Follower thread died")
+    if output_thread.is_alive():
+        return
+    try:
+        result = output_results.get_nowait()
+    except queue.Empty as exc:
+        raise RuntimeError("Output worker died without reporting a result") from exc
+    output_results.put(result)
+    if result.error is not None:
+        raise RuntimeError(
+            f"Output worker failed: {safe_stream_error(result.error)}"
+        ) from result.error
+    raise RuntimeError("Output worker exited unexpectedly")
+
+
+def _wait_for_reconnect(
+    stop: threading.Event,
+    delay: float,
+    follower: BaseFollower,
+    output_thread: threading.Thread,
+    output_results: queue.Queue[_ThreadResult],
+) -> bool:
+    deadline = time.monotonic() + delay
+    while not stop.is_set():
+        _pipeline_health(follower, output_thread, output_results)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        if stop.wait(min(0.5, remaining)):
+            return True
+    return True
+
+
+def _run_live_dialog_sessions(
+    *,
+    client: SFMCClient,
+    glider_name: str,
+    queue_in: Queue[SurfacingEvent | None],
+    dialog_log: logging.Logger,
+    info_log: logging.Logger,
+    stop: threading.Event,
+    stats: RunStats,
+    recent_ids: _RecentSurfacingIds,
+    follower: BaseFollower,
+    output_thread: threading.Thread,
+    output_results: queue.Queue[_ThreadResult],
+    reconnect: bool,
+    reconnect_initial_delay: float,
+    reconnect_max_delay: float,
+    reconnect_stable_after: float,
+    reconnect_jitter: float,
+    worker_join_timeout: float,
+) -> None:
+    backoff = ReconnectBackoff(
+        initial_delay=reconnect_initial_delay,
+        max_delay=reconnect_max_delay,
+        stable_after=reconnect_stable_after,
+        jitter=reconnect_jitter,
+    )
+    attempt_number = 0
+    session_number = 0
+    offline_since: float | None = None
+
+    while not stop.is_set():
+        attempt_number += 1
+        subscribed_at: float | None = None
+        failure: Exception | None = None
+        reason = "closed"
+        try:
+            if attempt_number > 1:
+                client.refresh_auth()
+            with client.open_stream() as stomp:
+                dialog_sub = client.subscribe_glider_output(glider_name, stomp)
+                parser = DialogParser()
+                results: queue.Queue[_ThreadResult] = queue.Queue()
+                dialog_thread = threading.Thread(
+                    target=_run_thread_target,
+                    args=(
+                        "dialog",
+                        _read_dialog,
+                        (
+                            dialog_sub,
+                            parser,
+                            queue_in,
+                            dialog_log,
+                            stop,
+                            0.0,
+                            stats,
+                            recent_ids,
+                            info_log,
+                            False,
+                        ),
+                        results,
+                    ),
+                    daemon=True,
+                    name="dialog-reader",
+                )
+                dialog_thread.start()
+                subscribed_at = time.monotonic()
+                session_number += 1
+                info_log.info("stream session %d subscribed", session_number)
+                if attempt_number > 1:
+                    stats.incr_reconnects()
+                if offline_since is not None:
+                    info_log.info(
+                        "stream session %d reconnected after %.1fs offline",
+                        session_number,
+                        subscribed_at - offline_since,
+                    )
+                    offline_since = None
+
+                first_result: _ThreadResult | None = None
+                try:
+                    while not stop.is_set():
+                        _pipeline_health(follower, output_thread, output_results)
+                        try:
+                            first_result = results.get(timeout=0.5)
+                            break
+                        except queue.Empty:
+                            continue
+                finally:
+                    dialog_sub.close()
+                    dialog_thread.join(timeout=worker_join_timeout)
+                    if dialog_thread.is_alive():
+                        raise RuntimeError("dialog reader did not stop after subscription close")
+
+                if first_result is None:
+                    try:
+                        first_result = results.get_nowait()
+                    except queue.Empty:
+                        first_result = None
+                if first_result is not None and first_result.error is not None:
+                    if isinstance(first_result.error, StompError):
+                        failure = first_result.error
+                        reason = "stomp-error"
+                    else:
+                        raise RuntimeError(
+                            f"dialog reader failed: {safe_stream_error(first_result.error)}"
+                        ) from first_result.error
+        except SFMCError as exc:
+            failure = exc
+            reason = "session-error"
+
+        if stop.is_set():
+            return
+
+        subscribed_uptime = (
+            None if subscribed_at is None else max(0.0, time.monotonic() - subscribed_at)
+        )
+        if subscribed_at is not None:
+            info_log.warning(
+                "%s session=%d reason=%s",
+                STREAM_BOUNDARY_PREFIX,
+                session_number,
+                reason,
+            )
+        if offline_since is None:
+            offline_since = time.monotonic()
+        detail = "normal subscription close" if failure is None else safe_stream_error(failure)
+        if subscribed_at is None:
+            info_log.warning(
+                "stream setup attempt %d ended: %s: %s",
+                attempt_number,
+                reason,
+                detail,
+            )
+        else:
+            info_log.warning(
+                "stream session %d ended: %s: %s",
+                session_number,
+                reason,
+                detail,
+            )
+        if not reconnect:
+            raise StompError(f"stream session ended: {reason}: {detail}") from failure
+
+        delay = backoff.next_delay(subscribed_uptime=subscribed_uptime)
+        info_log.info("reconnect attempt %d in %.1fs", delay.attempt, delay.actual)
+        if _wait_for_reconnect(
+            stop,
+            delay.actual,
+            follower,
+            output_thread,
+            output_results,
+        ):
+            return
+
+
+def _run_replay_dialog(
+    *,
+    replay: str,
+    replay_interval: float,
+    queue_in: Queue[SurfacingEvent | None],
+    dialog_log: logging.Logger,
+    info_log: logging.Logger,
+    stop: threading.Event,
+    stats: RunStats,
+    recent_ids: _RecentSurfacingIds,
+    follower: BaseFollower,
+    output_thread: threading.Thread,
+    output_results: queue.Queue[_ThreadResult],
+    worker_join_timeout: float,
+) -> None:
+    dialog_sub, file_reader_thread = _open_replay(replay, stop)
+    results: queue.Queue[_ThreadResult] = queue.Queue()
+    dialog_thread = threading.Thread(
+        target=_run_thread_target,
+        args=(
+            "dialog",
+            _read_dialog,
+            (
+                dialog_sub,
+                DialogParser(),
+                queue_in,
+                dialog_log,
+                stop,
+                replay_interval,
+                stats,
+                recent_ids,
+                info_log,
+                True,
+            ),
+            results,
+        ),
+        daemon=True,
+        name="dialog-reader",
+    )
+    dialog_thread.start()
+    try:
+        while not stop.is_set() and dialog_thread.is_alive():
+            _pipeline_health(follower, output_thread, output_results)
+            stop.wait(0.5)
+    finally:
+        dialog_sub.close()
+        dialog_thread.join(timeout=worker_join_timeout)
+        file_reader_thread.join(timeout=worker_join_timeout)
+    if dialog_thread.is_alive() or file_reader_thread.is_alive():
+        raise RuntimeError("replay reader did not stop")
+    try:
+        result = results.get_nowait()
+    except queue.Empty as exc:
+        raise RuntimeError("dialog reader ended without reporting a result") from exc
+    if result.error is not None:
+        raise RuntimeError(f"Replay failed: {safe_stream_error(result.error)}") from result.error
+    if not stop.is_set():
+        info_log.info("Replay exhausted, draining pipeline...")
+
+
+def _shutdown_follow_pipeline(
+    *,
+    follower: BaseFollower,
+    queue_out: Queue[dict[str, dict[str, str | bytes]] | None],
+    output_thread: threading.Thread,
+    output_results: queue.Queue[_ThreadResult],
+    info_log: logging.Logger,
+) -> None:
+    follower.shutdown()
+    warning_at = time.monotonic() + 10.0
+    while follower.is_alive():
+        follower.join(timeout=1.0)
+        now = time.monotonic()
+        if follower.is_alive() and now >= warning_at:
+            info_log.warning("still waiting for follower to finish before closing output")
+            warning_at = now + 10.0
+
+    queue_out.put(None)
+    output_thread.join(timeout=10.0)
+    if output_thread.is_alive():
+        raise RuntimeError("output worker did not stop after drain sentinel")
+    try:
+        result = output_results.get_nowait()
+    except queue.Empty as exc:
+        raise RuntimeError("output worker ended without reporting a result") from exc
+    if result.error is not None:
+        raise RuntimeError(
+            f"Output worker failed: {safe_stream_error(result.error)}"
+        ) from result.error
+
+
 def follow_glider(
     client: SFMCClient | None,
     glider_name: str,
@@ -534,6 +974,13 @@ def follow_glider(
     dry_run: bool = False,
     stop: threading.Event | None = None,
     stats: RunStats | None = None,
+    *,
+    reconnect: bool = True,
+    reconnect_initial_delay: float = 15.0,
+    reconnect_max_delay: float = 300.0,
+    reconnect_stable_after: float = 60.0,
+    reconnect_jitter: float = 0.2,
+    worker_join_timeout: float = 5.0,
 ) -> RunStats:
     """Monitor a glider and run a follower that generates files.
 
@@ -567,10 +1014,16 @@ def follow_glider(
         stats: Optional :class:`RunStats` to accumulate into.  A new
             one is created if not supplied.  Either way the populated
             instance is returned for inspection.
+        reconnect: Reconnect live streams after an expected session failure.
+        reconnect_initial_delay: Initial nominal retry delay in seconds.
+        reconnect_max_delay: Maximum nominal and jittered retry delay.
+        reconnect_stable_after: Subscribed uptime required to reset backoff.
+        reconnect_jitter: Symmetric jitter fraction applied to retry delays.
+        worker_join_timeout: Maximum time to join a session-scoped input worker.
 
     Returns:
         A :class:`RunStats` summarising the run (surfacings,
-        files emitted, upload errors).
+        files emitted, upload errors, and successful reconnections).
     """
     if stop is None:
         stop = threading.Event()
@@ -586,13 +1039,11 @@ def follow_glider(
     )
 
     # ── Validate arguments ──────────────────────────────────────
-    if not replay and not dry_run and client is None:
-        info_log.error("client is required for live mode without --dry-run")
-        return stats
+    if not replay and client is None:
+        raise ValueError("client is required for live mode")
 
     if replay and not dry_run and client is None:
-        info_log.error("client is required for replay + upload mode")
-        return stats
+        raise ValueError("client is required for replay + upload mode")
 
     # ── Verify glider exists (skip in offline replay) ───────────
     if client is not None and not replay:
@@ -600,8 +1051,7 @@ def follow_glider(
         try:
             glider_state = details["data"]["state"]
         except (KeyError, TypeError) as exc:
-            info_log.error("Unexpected API response: %s", exc)
-            return stats
+            raise SFMCError(f"Unexpected glider-details response: {exc}") from exc
         info_log.info(
             "Following %s (state=%s)",
             glider_name,
@@ -619,7 +1069,10 @@ def follow_glider(
             ", ".join(mode_label),
         )
 
-    # ── Set up queues and follower ──────────────────────────────
+    if replay and not Path(replay).is_file():
+        raise FileNotFoundError(f"Replay file not found: {replay}")
+
+    # ── Set up persistent queues and workers ───────────────────
     queue_in: Queue[SurfacingEvent | None] = Queue()
     queue_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
 
@@ -629,120 +1082,95 @@ def follow_glider(
         queue_out=queue_out,
     )
     info_log.info("Follower: %s", type(follower).__name__)
-
-    parser = DialogParser()
-
-    # ── Create the dialog subscription (live or replay) ─────────
-    #
-    # Both paths produce a StompSubscription that yields dicts with
-    # a "data" key.  The downstream pipeline (_read_dialog →
-    # ordered_dialog → DialogParser) is identical for both.
-    #
-    file_reader_thread: threading.Thread | None = None
-    stomp_ctx: Any = None
-
-    if replay:
-        if not Path(replay).is_file():
-            info_log.error("Replay file not found: %s", replay)
-            return stats
-        dialog_sub, file_reader_thread = _open_replay(replay, stop)
-        info_log.info("Replaying from %s", replay)
-    else:
-        assert client is not None
-        info_log.info("Opening STOMP stream...")
-        stomp_ctx = client.open_stream()
-        stomp = stomp_ctx.__enter__()
-        dialog_sub = client.subscribe_glider_output(glider_name, stomp)
-        info_log.info("Subscribed to dialog output")
-
-    # ── Start the unified pipeline ──────────────────────────────
-    dialog_thread = threading.Thread(
-        target=_read_dialog,
-        args=(
-            dialog_sub,
-            parser,
-            queue_in,
-            dialog_log,
-            stop,
-            replay_interval if replay else 0.0,
-            stats,
-        ),
-        daemon=True,
-        name="dialog-reader",
-    )
-
+    recent_ids = _RecentSurfacingIds()
+    output_results: queue.Queue[_ThreadResult] = queue.Queue()
     if dry_run:
         output_thread = threading.Thread(
-            target=_print_files,
-            args=(queue_out, upload_log, stats),
+            target=_run_thread_target,
+            args=("output", _print_files, (queue_out, upload_log, stats), output_results),
             daemon=True,
             name="dry-run-printer",
         )
     else:
+        assert client is not None
         output_thread = threading.Thread(
-            target=_upload_files,
-            args=(client, glider_name, queue_out, upload_log, stats),
+            target=_run_thread_target,
+            args=(
+                "output",
+                _upload_files,
+                (client, glider_name, queue_out, upload_log, stats),
+                output_results,
+            ),
             daemon=True,
             name="file-uploader",
         )
 
+    follower_started = False
+    output_started = False
     try:
-        dialog_thread.start()
         follower.start()
+        follower_started = True
         output_thread.start()
+        output_started = True
 
         mode_desc = "replay" if replay else "live"
         if dry_run:
             mode_desc += " + dry-run"
         info_log.info("Pipeline started (%s). Press Ctrl-C to stop.", mode_desc)
-
-        # ── Wait loop ───────────────────────────────────────────
-        while not stop.is_set():
-            try:
-                stop.wait(timeout=5)
-            except KeyboardInterrupt:
-                info_log.info("Stopping...")
-                stop.set()
-                break
-
-            if not dialog_thread.is_alive():
-                if replay:
-                    # Replay finished naturally — drain the pipeline.
-                    info_log.info("Replay exhausted, draining pipeline...")
-                    follower.shutdown()
-                    follower.join(timeout=10)
-                    queue_out.put(None)
-                    output_thread.join(timeout=10)
-                else:
-                    info_log.warning("Dialog stream disconnected")
-                    stop.set()
-                break
-
-            if not follower.is_alive():
-                info_log.warning("Follower thread died")
-                stop.set()
-                break
-
-        # ── Cleanup ─────────────────────────────────────────────
-        if stop.is_set():
-            # Drain in producer order (the same pattern as the replay
-            # path above): stop the dialog input and join its reader,
-            # let the follower work through queue_in to its sentinel,
-            # and only then send the output sentinel — enqueueing it
-            # any earlier would let the output worker exit while the
-            # follower is still producing, discarding queued files.
-            dialog_sub.close()
-            dialog_thread.join(timeout=5)
-            if file_reader_thread is not None:
-                file_reader_thread.join(timeout=5)
-            follower.shutdown()
-            follower.join(timeout=5)
-            queue_out.put(None)
-            output_thread.join(timeout=10)
-
+        try:
+            if replay:
+                info_log.info("Replaying from %s", replay)
+                _run_replay_dialog(
+                    replay=replay,
+                    replay_interval=replay_interval,
+                    queue_in=queue_in,
+                    dialog_log=dialog_log,
+                    info_log=info_log,
+                    stop=stop,
+                    stats=stats,
+                    recent_ids=recent_ids,
+                    follower=follower,
+                    output_thread=output_thread,
+                    output_results=output_results,
+                    worker_join_timeout=worker_join_timeout,
+                )
+            else:
+                assert client is not None
+                _run_live_dialog_sessions(
+                    client=client,
+                    glider_name=glider_name,
+                    queue_in=queue_in,
+                    dialog_log=dialog_log,
+                    info_log=info_log,
+                    stop=stop,
+                    stats=stats,
+                    recent_ids=recent_ids,
+                    follower=follower,
+                    output_thread=output_thread,
+                    output_results=output_results,
+                    reconnect=reconnect,
+                    reconnect_initial_delay=reconnect_initial_delay,
+                    reconnect_max_delay=reconnect_max_delay,
+                    reconnect_stable_after=reconnect_stable_after,
+                    reconnect_jitter=reconnect_jitter,
+                    worker_join_timeout=worker_join_timeout,
+                )
+        except KeyboardInterrupt:
+            info_log.info("Stopping...")
+            stop.set()
     finally:
-        if stomp_ctx is not None:
-            stomp_ctx.__exit__(None, None, None)
+        if follower_started and output_started:
+            info_log.info("stopping; draining follower/output queues")
+            _shutdown_follow_pipeline(
+                follower=follower,
+                queue_out=queue_out,
+                output_thread=output_thread,
+                output_results=output_results,
+                info_log=info_log,
+            )
+        elif follower_started:
+            follower.shutdown()
+            follower.join(timeout=5.0)
 
     info_log.info("Done. %s", stats.format())
     return stats
@@ -850,6 +1278,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Exit with non-zero status if any upload error occurred",
     )
+    sim.add_argument(
+        "--no-reconnect",
+        action="store_true",
+        default=False,
+        help="Exit non-zero if the live stream disconnects",
+    )
 
     # ── Logging ─────────────────────────────────────────────────
     log_group = parser.add_argument_group("logging")
@@ -903,14 +1337,43 @@ def main() -> None:
     need_client = not (args.replay and args.dry_run)
 
     stats: RunStats | None = None
+    stop = threading.Event()
+    previous_handlers: dict[signal.Signals, Any] = {}
+
+    def request_stop(signum: int, frame: Any) -> None:
+        del signum, frame
+        stop.set()
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        previous_handlers[signum] = signal.getsignal(signum)
+        signal.signal(signum, request_stop)
+
     try:
-        if need_client:
-            with SFMCClient(
-                host=args.hostname,
-                config_path=args.credentials,
-            ) as client:
+        try:
+            if need_client:
+                with SFMCClient(
+                    host=args.hostname,
+                    config_path=args.credentials,
+                ) as client:
+                    stats = follow_glider(
+                        client=client,
+                        glider_name=args.glider,
+                        follower_class=follower_class,
+                        follower_config=follower_config,
+                        log_file=args.logfile,
+                        log_level=args.log_level,
+                        log_max_bytes=args.log_max_size,
+                        log_backup_count=args.log_backup_count,
+                        replay=args.replay,
+                        replay_interval=args.replay_interval,
+                        dry_run=args.dry_run,
+                        stop=stop,
+                        reconnect=not args.no_reconnect,
+                    )
+            else:
+                # Fully offline: replay + dry-run, no client needed.
                 stats = follow_glider(
-                    client=client,
+                    client=None,
                     glider_name=args.glider,
                     follower_class=follower_class,
                     follower_config=follower_config,
@@ -921,27 +1384,18 @@ def main() -> None:
                     replay=args.replay,
                     replay_interval=args.replay_interval,
                     dry_run=args.dry_run,
+                    stop=stop,
+                    reconnect=not args.no_reconnect,
                 )
-        else:
-            # Fully offline: replay + dry-run, no client needed.
-            stats = follow_glider(
-                client=None,
-                glider_name=args.glider,
-                follower_class=follower_class,
-                follower_config=follower_config,
-                log_file=args.logfile,
-                log_level=args.log_level,
-                log_max_bytes=args.log_max_size,
-                log_backup_count=args.log_backup_count,
-                replay=args.replay,
-                replay_interval=args.replay_interval,
-                dry_run=args.dry_run,
-            )
-    except KeyboardInterrupt:
-        sys.stderr.write("\nStopped.\n")
-    except Exception as exc:
-        sys.stderr.write(f"Error: {exc}\n")
-        sys.exit(1)
+        except KeyboardInterrupt:
+            stop.set()
+            sys.stderr.write("\nStopped.\n")
+        except Exception as exc:
+            sys.stderr.write(f"Error: {safe_stream_error(exc)}\n")
+            sys.exit(1)
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
 
     if args.strict and stats is not None and stats.had_errors():
         sys.stderr.write(f"--strict: exiting non-zero ({stats.format()})\n")
