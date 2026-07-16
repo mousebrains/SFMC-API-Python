@@ -142,7 +142,6 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from queue import Queue
 from typing import Any
@@ -153,6 +152,7 @@ from sfmc_api.exceptions import SFMCError
 from sfmc_api.follower import BaseFollower, load_follower_class
 from sfmc_api.monitor_glider import (
     _LINE_SEP,
+    _MAX_LINE_BUFFER_BYTES,
     STREAM_BOUNDARY_PREFIX,
     _log_with_time,
     ordered_dialog,
@@ -316,15 +316,24 @@ class _RecentSurfacingIds:
 
     def __init__(self, maxsize: int = 128) -> None:
         self._maxsize = maxsize
-        self._ordered: deque[tuple[str | None, datetime, float]] = deque()
-        self._known: set[tuple[str | None, datetime, float]] = set()
+        self._ordered: deque[tuple[Any, ...]] = deque()
+        self._known: set[tuple[Any, ...]] = set()
 
-    def duplicate_identity(
-        self, event: SurfacingEvent
-    ) -> tuple[str | None, datetime, float] | None:
-        if event.timestamp is None or event.mission_time is None:
-            return None
-        identity = (event.vehicle_name, event.timestamp, event.mission_time)
+    def duplicate_identity(self, event: SurfacingEvent) -> tuple[Any, ...] | None:
+        if event.timestamp is not None and event.mission_time is not None:
+            identity: tuple[Any, ...] = (
+                event.vehicle_name,
+                event.timestamp,
+                event.mission_time,
+            )
+        else:
+            # Weak fallback: a surfacing whose Curr Time line was
+            # dropped or garbled still reproduces the identical raw
+            # dialog block when SFMC's resubscribe replay re-delivers
+            # it, so its content identifies it.  Treating "no identity"
+            # as "not a duplicate" delivered the same surfacing to the
+            # follower twice across a reconnect.
+            identity = (event.vehicle_name, "raw-lines", hash(tuple(event.raw_lines)))
         if identity in self._known:
             return identity
         if len(self._ordered) >= self._maxsize:
@@ -432,6 +441,12 @@ def _read_dialog(
             buf += data
             parts = _LINE_SEP.split(buf)
             buf = parts[-1]
+            if len(buf) > _MAX_LINE_BUFFER_BYTES:
+                logger.warning(
+                    "discarding %d bytes of line-break-free dialog data (buffer cap)",
+                    len(buf),
+                )
+                buf = ""
 
             for line in parts[:-1]:
                 delivered = False
@@ -490,12 +505,19 @@ def _read_dialog(
 # ── Upload thread ───────────────────────────────────────────────────
 
 
+#: Backoff waits between upload attempts (attempts = len + 1).  Short
+#: enough to fit within a surfacing window, long enough to ride out a
+#: network blip.
+_UPLOAD_RETRY_DELAYS = (10.0, 30.0)
+
+
 def _upload_files(
     client: SFMCClient,
     glider_name: str,
     queue_out: Queue[dict[str, dict[str, str | bytes]] | None],
     upload_log: logging.Logger,
     stats: RunStats | None = None,
+    abort: threading.Event | None = None,
 ) -> None:
     """Read file dicts from queue_out and upload them to SFMC.
 
@@ -506,6 +528,14 @@ def _upload_files(
     event: files queued just before a disconnect or Ctrl-C must still
     be uploaded, so shutdown enqueues the sentinel after the producers
     have drained and this loop works through the backlog first.
+
+    Each upload is retried with short backoff: re-uploading the same
+    named file is idempotent, and a network blip while the glider
+    waits at the surface must not silently discard the cycle's
+    steering files (the glider would fly stale waypoints for the
+    whole next dive).  *abort* — set during shutdown — cuts the
+    backoff waits short so the drain stays bounded; remaining
+    attempts still run, just without the delay.
     """
     while True:
         output = queue_out.get()
@@ -517,23 +547,45 @@ def _upload_files(
             if not files:
                 continue
             filenames = ", ".join(files.keys())
-            try:
-                client.upload_glider_file_contents(glider_name, folder, files)
-                upload_log.info(
-                    "Uploaded to %s: %s",
-                    folder,
-                    filenames,
-                )
-                if stats is not None:
-                    stats.incr_files(len(files))
-            except Exception:
-                upload_log.exception(
-                    "Failed to upload to %s: %s",
-                    folder,
-                    filenames,
-                )
-                if stats is not None:
-                    stats.incr_upload_errors()
+            attempts = 1 + len(_UPLOAD_RETRY_DELAYS)
+            for attempt in range(1, attempts + 1):
+                try:
+                    client.upload_glider_file_contents(glider_name, folder, files)
+                except Exception as exc:
+                    if attempt >= attempts:
+                        upload_log.exception(
+                            "Failed to upload to %s after %d attempts: %s",
+                            folder,
+                            attempt,
+                            filenames,
+                        )
+                        if stats is not None:
+                            stats.incr_upload_errors()
+                        break
+                    delay = _UPLOAD_RETRY_DELAYS[attempt - 1]
+                    upload_log.warning(
+                        "Upload to %s failed (attempt %d/%d, %s: %s), retrying in %.0fs: %s",
+                        folder,
+                        attempt,
+                        attempts,
+                        type(exc).__name__,
+                        exc,
+                        delay,
+                        filenames,
+                    )
+                    if abort is not None:
+                        abort.wait(timeout=delay)
+                    else:
+                        time.sleep(delay)
+                else:
+                    upload_log.info(
+                        "Uploaded to %s: %s",
+                        folder,
+                        filenames,
+                    )
+                    if stats is not None:
+                        stats.incr_files(len(files))
+                    break
 
 
 # ── Dry-run output thread ──────────────────────────────────────────
@@ -638,6 +690,11 @@ def setup_logging(
 
     def _make_logger(suffix: str) -> logging.Logger:
         log = logging.getLogger(f"sfmc.{glider_name}.{suffix}")
+        for stale in log.handlers:
+            # The documented multiple-followers-in-one-process usage
+            # calls setup repeatedly; clearing without closing leaks a
+            # file handle per call.
+            stale.close()
         log.handlers.clear()
         log.setLevel(level)
         log.propagate = False
@@ -936,18 +993,39 @@ def _shutdown_follow_pipeline(
     output_thread: threading.Thread,
     output_results: queue.Queue[_ThreadResult],
     info_log: logging.Logger,
+    upload_abort: threading.Event | None = None,
+    drain_timeout: float = 60.0,
 ) -> None:
     follower.shutdown()
+    deadline = time.monotonic() + drain_timeout
     warning_at = time.monotonic() + 10.0
     while follower.is_alive():
         follower.join(timeout=1.0)
         now = time.monotonic()
-        if follower.is_alive() and now >= warning_at:
+        if not follower.is_alive():
+            break
+        if now >= deadline:
+            # A follower stuck in user code (hung HTTP call in
+            # on_surfacing) must not hang shutdown forever — signals
+            # only set the already-set stop event, so without this
+            # bound only SIGKILL ends the process.  Follower threads
+            # are daemons; abandoning the drain loses at most output
+            # it would have produced after this point, and says so.
+            info_log.error(
+                "follower still running after %.0fs drain timeout; "
+                "abandoning it — output produced after this point is lost",
+                drain_timeout,
+            )
+            break
+        if now >= warning_at:
             info_log.warning("still waiting for follower to finish before closing output")
             warning_at = now + 10.0
 
+    if upload_abort is not None:
+        # Cut retry backoffs short; queued files still get attempted.
+        upload_abort.set()
     queue_out.put(None)
-    output_thread.join(timeout=10.0)
+    output_thread.join(timeout=45.0)
     if output_thread.is_alive():
         raise RuntimeError("output worker did not stop after drain sentinel")
     try:
@@ -1084,6 +1162,7 @@ def follow_glider(
     info_log.info("Follower: %s", type(follower).__name__)
     recent_ids = _RecentSurfacingIds()
     output_results: queue.Queue[_ThreadResult] = queue.Queue()
+    upload_abort = threading.Event()
     if dry_run:
         output_thread = threading.Thread(
             target=_run_thread_target,
@@ -1098,7 +1177,7 @@ def follow_glider(
             args=(
                 "output",
                 _upload_files,
-                (client, glider_name, queue_out, upload_log, stats),
+                (client, glider_name, queue_out, upload_log, stats, upload_abort),
                 output_results,
             ),
             daemon=True,
@@ -1167,6 +1246,7 @@ def follow_glider(
                 output_thread=output_thread,
                 output_results=output_results,
                 info_log=info_log,
+                upload_abort=upload_abort,
             )
         elif follower_started:
             follower.shutdown()

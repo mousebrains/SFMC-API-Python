@@ -316,3 +316,18 @@ class TestMonitorScriptsMalformedEvents:
         log = MagicMock()
         monitor_scripts(StompSubscription("sub", "/test", q), log, threading.Event())
         log.info.assert_called_once()
+
+
+class TestLineBufferCap:
+    """Finding 29: line-break-free binary chatter must not grow the
+    reassembly buffer without bound on a weeks-long service."""
+
+    def test_oversized_fragment_discarded(self, caplog: pytest.LogCaptureFixture) -> None:
+        from sfmc_api.monitor_glider import monitor_dialog
+
+        q: Queue[Any] = Queue()
+        q.put({"sequenceNumber": 0, "data": "x" * 300_000})
+        q.put(None)
+        with caplog.at_level("WARNING", logger="sfmc_api.monitor_glider"):
+            monitor_dialog(StompSubscription("sub", "/test", q), MagicMock(), threading.Event())
+        assert any("buffer cap" in r.message for r in caplog.records)

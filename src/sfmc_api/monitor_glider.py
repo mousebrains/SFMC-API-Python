@@ -242,6 +242,12 @@ def setup_logging(
 
 _LINE_SEP = re.compile(r"\r\n|\r|\n")
 
+#: Cap on the line-reassembly buffer.  Dialog lines are short; data
+#: that accumulates this much without a line break is binary chatter,
+#: and buffering it forever is unbounded memory growth on a service
+#: that runs for weeks.
+_MAX_LINE_BUFFER_BYTES = 256 * 1024
+
 
 def _log_with_time(log: logging.Logger, msg: str, created: float) -> None:
     """Emit a log record with an explicit creation timestamp."""
@@ -281,6 +287,12 @@ def monitor_dialog(
                 if line:
                     _log_with_time(log, line, line_start)
                 line_start = time.time()
+            if len(buf) > _MAX_LINE_BUFFER_BYTES:
+                logger.warning(
+                    "discarding %d bytes of line-break-free dialog data (buffer cap)",
+                    len(buf),
+                )
+                buf = ""
     finally:
         if buf.strip():
             if stop.is_set():
