@@ -43,10 +43,12 @@ def authenticate(http_client: httpx.Client, config: SFMCConfig) -> str:
         check_response(response)
         data = response.json()
         return str(data["token"])
-    except KeyError as exc:
-        raise AuthenticationError(
-            f"Unexpected sign-in response (missing 'token' key): {exc}"
-        ) from exc
+    except (KeyError, TypeError) as exc:
+        # TypeError covers a 200 response whose JSON is not an object
+        # (null, a string, an array — e.g. a maintenance-mode proxy):
+        # it must map to AuthenticationError like every other failure,
+        # not escape raw through the callers' reconnect supervisors.
+        raise AuthenticationError(f"Unexpected sign-in response shape: {exc}") from exc
     except (ValueError, SFMCError) as exc:
         raise AuthenticationError(f"Authentication failed: {exc}") from exc
     except httpx.HTTPError as exc:

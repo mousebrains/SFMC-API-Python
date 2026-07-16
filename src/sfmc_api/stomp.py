@@ -29,6 +29,7 @@ import random
 import ssl
 import string
 import threading
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from queue import Empty, Full, Queue
@@ -153,10 +154,22 @@ def _sockjs_decode(data: str) -> list[str] | None:
     if frame_type == "a":
         try:
             messages = json.loads(data[1:])
-            return messages if isinstance(messages, list) else []
         except json.JSONDecodeError:
             logger.warning("Failed to decode SockJS message: %s", data[:200])
             return []
+        if not isinstance(messages, list):
+            return []
+        # Non-string elements (a[null], a[{...}]) would raise deep in
+        # frame parsing and tear down the whole session for one bad
+        # frame — drop the element, keep the session.
+        valid = [m for m in messages if isinstance(m, str)]
+        if len(valid) != len(messages):
+            logger.warning(
+                "Dropping %d non-string SockJS element(s): %s",
+                len(messages) - len(valid),
+                data[:200],
+            )
+        return valid
 
     logger.debug("Unknown SockJS frame type %r: %s", frame_type, data[:200])
     return []
@@ -176,12 +189,12 @@ class StompSubscription:
         self,
         sub_id: str,
         topic: str,
-        queue: Queue[dict[str, Any] | StompError | None],
+        queue: Queue[dict[str, Any] | list[Any] | StompError | None],
         connection: StompConnection | None = None,
     ) -> None:
         self._id = sub_id
         self._topic = topic
-        self._queue: Queue[dict[str, Any] | StompError | None] = queue
+        self._queue: Queue[dict[str, Any] | list[Any] | StompError | None] = queue
         self._connection = connection
         self._closed = threading.Event()
 
@@ -190,8 +203,13 @@ class StompSubscription:
         """The STOMP topic this subscription is listening to."""
         return self._topic
 
-    def __iter__(self) -> Iterator[dict[str, Any]]:
-        """Yield parsed JSON messages until the subscription is closed."""
+    def __iter__(self) -> Iterator[dict[str, Any] | list[Any]]:
+        """Yield parsed JSON message bodies until the subscription is closed.
+
+        Bodies are JSON objects on most topics, but bare JSON arrays on
+        some (zmodem transfer events are arrays of connection IDs) —
+        consumers must check the shape before use.
+        """
         while True:
             try:
                 msg = self.get(timeout=1.0)
@@ -201,7 +219,7 @@ class StompSubscription:
                 break
             yield msg
 
-    def get(self, timeout: float | None = None) -> dict[str, Any] | None:
+    def get(self, timeout: float | None = None) -> dict[str, Any] | list[Any] | None:
         """Get the next message, or ``None`` if the subscription closed.
 
         After :meth:`close`, messages still buffered in the queue are
@@ -270,16 +288,49 @@ class StompConnection:
                 print(event)
     """
 
-    def __init__(self, config: SFMCConfig, token: str, heartbeat_interval: int = 0) -> None:
+    def __init__(
+        self,
+        config: SFMCConfig,
+        token: str,
+        heartbeat_interval: int = 0,
+        liveness_timeout: float = 60.0,
+        ping_timeout: float = 10.0,
+        handshake_timeout: float = 10.0,
+    ) -> None:
+        """Create a connection (not yet connected — call :meth:`connect`).
+
+        Args:
+            config: Server configuration.
+            token: Bearer token for the SockJS URL.
+            heartbeat_interval: Requested server-side STOMP heartbeat
+                interval in milliseconds (``0`` requests none).  SockJS
+                itself sends ``h`` frames every ~25 s regardless, which
+                also count as liveness traffic.
+            liveness_timeout: Seconds of receive silence after which the
+                connection is probed with a WebSocket ping; if the pong
+                does not arrive within *ping_timeout*, the socket is
+                closed so the session tears down and callers can
+                reconnect.  Half-open TCP (NAT expiry, silent partition)
+                otherwise hangs consumers forever with no reconnect.
+                ``0`` disables the watchdog.
+            ping_timeout: Seconds to wait for the liveness pong.
+            handshake_timeout: Seconds to wait for the STOMP CONNECTED
+                frame, tolerating interleaved heartbeat/other frames.
+        """
         self._config = config
         self._token = token
         self._heartbeat_interval = heartbeat_interval
+        self._liveness_timeout = liveness_timeout
+        self._ping_timeout = ping_timeout
+        self._handshake_timeout = handshake_timeout
         self._ws: ClientConnection | None = None
         self._lock = threading.Lock()
         self._subscriptions: dict[str, StompSubscription] = {}
         self._sub_topics: dict[str, str] = {}  # sub_id → topic
         self._next_sub_id = 0
         self._receiver_thread: threading.Thread | None = None
+        self._liveness_thread: threading.Thread | None = None
+        self._last_recv = 0.0
         self._connected = False
         self._closing = threading.Event()
         self._disconnect_event = threading.Event()
@@ -310,6 +361,8 @@ class StompConnection:
             # A lingering receiver (disconnect() join timed out) would
             # clobber the new connection's state from its teardown.
             raise StompError("Previous receiver thread has not exited yet")
+        if self._liveness_thread is not None and self._liveness_thread.is_alive():
+            raise StompError("Previous liveness thread has not exited yet")
         # Reset lifecycle events so the object can be reused after a
         # disconnect; a stale _closing flag would make the new
         # receiver thread exit immediately.
@@ -354,23 +407,32 @@ class StompConnection:
             self._ws.send(json.dumps([connect_frame]))
             logger.debug("Sent STOMP CONNECT")
 
-            # Wait for STOMP CONNECTED
-            resp = str(self._ws.recv(timeout=10))
-            messages = _sockjs_decode(resp) or []
-            for msg in messages:
-                frame = _parse_frame(msg)
-                if frame.command == "CONNECTED":
-                    with self._lock:
-                        self._connected = True
-                    logger.debug("STOMP CONNECTED: %s", frame.headers)
-                    break
-                elif frame.command == "ERROR":
-                    raise StompError(f"STOMP connection refused: {frame.body}")
-
+            # Wait for STOMP CONNECTED, tolerating interleaved
+            # heartbeat/other frames — a server that answers with a
+            # heartbeat before CONNECTED must not fail the handshake.
+            deadline = time.monotonic() + self._handshake_timeout
+            connected = False
+            while not connected:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise StompError("Did not receive STOMP CONNECTED frame")
+                try:
+                    resp = str(self._ws.recv(timeout=remaining))
+                except TimeoutError:
+                    continue  # deadline check on the next pass
+                messages = _sockjs_decode(resp)
+                if messages is None:
+                    raise StompError("Server closed SockJS session during handshake")
+                for msg in messages:
+                    frame = _parse_frame(msg)
+                    if frame.command == "CONNECTED":
+                        connected = True
+                        logger.debug("STOMP CONNECTED: %s", frame.headers)
+                        break
+                    if frame.command == "ERROR":
+                        raise StompError(f"STOMP connection refused: {frame.body}")
             with self._lock:
-                connected = self._connected
-            if not connected:
-                raise StompError("Did not receive STOMP CONNECTED frame")
+                self._connected = True
         except StompError:
             self._close_ws()
             raise
@@ -379,12 +441,20 @@ class StompConnection:
             raise StompError(f"STOMP handshake failed: {exc}") from exc
 
         # Start receiver thread
+        self._last_recv = time.monotonic()
         self._receiver_thread = threading.Thread(
             target=self._receive_loop,
             daemon=True,
             name="sfmc-stomp-receiver",
         )
         self._receiver_thread.start()
+        if self._liveness_timeout > 0:
+            self._liveness_thread = threading.Thread(
+                target=self._liveness_loop,
+                daemon=True,
+                name="sfmc-stomp-liveness",
+            )
+            self._liveness_thread.start()
 
     def disconnect(self) -> None:
         """Send STOMP DISCONNECT and close the WebSocket."""
@@ -413,6 +483,8 @@ class StompConnection:
 
         if self._receiver_thread is not None:
             self._receiver_thread.join(timeout=5)
+        if self._liveness_thread is not None:
+            self._liveness_thread.join(timeout=5)
 
     def _close_ws(self) -> None:
         """Close the WebSocket connection, ignoring errors."""
@@ -461,7 +533,7 @@ class StompConnection:
             sub_id = f"sub-{self._next_sub_id}"
             self._next_sub_id += 1
 
-            queue: Queue[dict[str, Any] | StompError | None] = Queue(maxsize=maxsize)
+            queue: Queue[dict[str, Any] | list[Any] | StompError | None] = Queue(maxsize=maxsize)
             sub = StompSubscription(sub_id, topic, queue, connection=self)
             self._subscriptions[sub_id] = sub
             self._sub_topics[sub_id] = topic
@@ -519,42 +591,34 @@ class StompConnection:
                     if not self._closing.is_set():
                         logger.warning("WebSocket recv error: %s", exc)
                     break
+                # Any traffic — data, SockJS 'h', STOMP heartbeat — is
+                # proof of link liveness for the watchdog.
+                self._last_recv = time.monotonic()
 
                 decoded = _sockjs_decode(raw)
                 if decoded is None:
                     logger.info("SockJS close frame received")
                     break
                 for msg_str in decoded:
-                    frame = _parse_frame(msg_str)
-
-                    if frame.command == "MESSAGE":
-                        sub_id = frame.headers.get("subscription", "")
-                        with self._lock:
-                            sub = self._subscriptions.get(sub_id)
-                        if sub is not None:
-                            try:
-                                payload: dict[str, Any] = json.loads(frame.body)
-                            except json.JSONDecodeError:
-                                payload = {"_raw": frame.body}
-                            try:
-                                sub._queue.put_nowait(payload)
-                            except Full:
-                                logger.warning(
-                                    "Subscription %s queue full, dropping message",
-                                    sub._id,
-                                )
-                    elif frame.command == "ERROR":
-                        logger.error("STOMP ERROR: %s", frame.body)
-                        err = StompError(f"STOMP server error: {frame.body}")
-                        with self._lock:
-                            subs = list(self._subscriptions.values())
-                        for sub in subs:
-                            with contextlib.suppress(Full):
-                                sub._queue.put_nowait(err)
-                    elif frame.command == "HEARTBEAT":
-                        pass
-                    else:
-                        logger.debug("STOMP frame: %s", frame.command)
+                    try:
+                        self._dispatch_message(msg_str)
+                    except Exception:
+                        # Server-data variance is handled explicitly in
+                        # _sockjs_decode and _dispatch_message, so an
+                        # exception here is an implementation fault,
+                        # not malformed input.  Running on — appearing
+                        # healthy while possibly discarding every
+                        # subsequent message — would hide the bug
+                        # forever; tear the session down instead,
+                        # attributed here rather than misreported as a
+                        # normal close.  The application supervisors
+                        # reconnect with backoff, keeping the failure
+                        # loud and bounded.
+                        logger.exception(
+                            "Unexpected error dispatching STOMP frame; closing session: %.200s",
+                            msg_str,
+                        )
+                        return
         finally:
             # The connection is unusable once this thread exits: clear
             # the connected flag first so subscribe() fails fast
@@ -567,3 +631,90 @@ class StompConnection:
                 remaining = list(self._subscriptions.values())
             for sub in remaining:
                 sub.close()
+
+    def _liveness_loop(self) -> None:
+        """Background thread: detect half-open TCP connections.
+
+        A NAT/firewall dropping the connection state without FIN/RST
+        leaves ``recv`` timing out forever while every layer believes
+        the session is healthy — no data, no disconnect, no reconnect.
+        Neither the SFMC STOMP dialect nor the sync websockets client
+        provides keepalive, so this thread probes with a WebSocket
+        ping once the link has been silent past ``liveness_timeout``
+        (SockJS server heartbeats normally arrive every ~25 s, so a
+        healthy-but-quiet topic never gets close to the default 60 s).
+        An unanswered ping closes the socket, which unblocks the
+        receive loop and tears the session down loudly; the
+        application-level supervisors then reconnect with backoff.
+        """
+        check_interval = max(0.1, min(self._liveness_timeout / 4.0, 15.0))
+        while not self._closing.wait(timeout=check_interval):
+            if self._disconnect_event.is_set():
+                return
+            idle = time.monotonic() - self._last_recv
+            if idle < self._liveness_timeout:
+                continue
+            assert self._ws is not None  # thread starts after connect()
+            answered = False
+            try:
+                pong = self._ws.ping()
+                pong_deadline = time.monotonic() + self._ping_timeout
+                while time.monotonic() < pong_deadline and not self._closing.is_set():
+                    if pong.wait(timeout=0.5):
+                        answered = True
+                        break
+            except Exception as exc:
+                logger.warning("Liveness ping could not be sent: %s", exc)
+            if self._closing.is_set():
+                return
+            if answered:
+                self._last_recv = time.monotonic()
+                continue
+            logger.warning(
+                "Connection silent for %.0fs and ping unanswered after %.0fs; "
+                "closing dead connection",
+                idle,
+                self._ping_timeout,
+            )
+            self._close_ws()
+            return
+
+    def _dispatch_message(self, msg_str: str) -> None:
+        """Parse one STOMP frame string and route it to subscribers."""
+        frame = _parse_frame(msg_str)
+
+        if frame.command == "MESSAGE":
+            sub_id = frame.headers.get("subscription", "")
+            with self._lock:
+                sub = self._subscriptions.get(sub_id)
+            if sub is not None:
+                try:
+                    payload: dict[str, Any] | list[Any] = json.loads(frame.body)
+                except json.JSONDecodeError:
+                    payload = {"_raw": frame.body}
+                # Objects and arrays are both real on SFMC topics
+                # (zmodem events are bare arrays of connection IDs).
+                # Anything else — notably a literal ``null``, which
+                # would collide with the queue's close sentinel — is
+                # wrapped the same way as unparseable bodies.
+                if not isinstance(payload, dict | list):
+                    payload = {"_raw": frame.body}
+                try:
+                    sub._queue.put_nowait(payload)
+                except Full:
+                    logger.warning(
+                        "Subscription %s queue full, dropping message",
+                        sub._id,
+                    )
+        elif frame.command == "ERROR":
+            logger.error("STOMP ERROR: %s", frame.body)
+            err = StompError(f"STOMP server error: {frame.body}")
+            with self._lock:
+                subs = list(self._subscriptions.values())
+            for sub in subs:
+                with contextlib.suppress(Full):
+                    sub._queue.put_nowait(err)
+        elif frame.command == "HEARTBEAT":
+            pass
+        else:
+            logger.debug("STOMP frame: %s", frame.command)

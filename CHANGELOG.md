@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Service robustness hardening across all three long-running commands,
+  addressing the 29 findings of the adversarial review
+  ([#8](https://github.com/mousebrains/SFMC-API-Python/issues/8)).
+  Highlights: corrupt Iridium dialog lines and physically impossible
+  GPS fixes are rejected instead of killing `sfmc-follow` or silently
+  steering it; a liveness watchdog detects half-open TCP connections
+  that previously hung `sfmc-monitor-glider` and `sfmc-follow` forever;
+  ill-typed STOMP message bodies cost one skipped message instead of
+  the whole service; follower file uploads retry with backoff instead
+  of discarding steering files; `sfmc-pull-new-downloads` quarantines
+  malformed listing entries, bounds high-water-mark advancement against
+  corrupt glider clocks, and fsyncs its state file; 429/401/non-JSON
+  HTTP responses are handled on every path; startup checks retry like
+  steady-state failures; the monitor's dialog log survives logrotate
+  and uses UTC timestamps; and `.ma` waypoint formatting can no longer
+  emit an invalid 60-minutes DDMM value.
+
 ### Added
 
 - `sfmc-monitor-glider` and live `sfmc-follow` now reconnect expected

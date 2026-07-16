@@ -8,7 +8,32 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from math import isfinite
 
-__all__ = ["ReconnectBackoff", "ReconnectDelay", "safe_stream_error"]
+from .exceptions import APIError, RateLimitError
+
+__all__ = [
+    "ReconnectBackoff",
+    "ReconnectDelay",
+    "is_transient_error",
+    "safe_stream_error",
+]
+
+
+def is_transient_error(exc: BaseException) -> bool:
+    """True if a failure is the kind that retrying can fix.
+
+    Transport failures (no HTTP status), rate limiting, and
+    server-side 5xx responses are transient.  Permanent client errors
+    — 404 from a misspelled glider name, 401/403 from bad credentials,
+    unexpected response shapes — must fail fast instead: retrying them
+    forever hides a misconfigured deployment from operators and from
+    systemd's exit-status/restart accounting.
+    """
+    if isinstance(exc, RateLimitError):
+        return True
+    if isinstance(exc, APIError):
+        return exc.status_code == 0 or exc.status_code >= 500
+    return False
+
 
 _TOKEN_QUERY_RE = re.compile(r"(access_token=)[^&\s]+", re.IGNORECASE)
 _BEARER_RE = re.compile(r"(Bearer\s+)[^\s,;]+", re.IGNORECASE)

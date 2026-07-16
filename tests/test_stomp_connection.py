@@ -362,18 +362,45 @@ class TestConnectFailures:
 
     @patch("sfmc_api.stomp.ws_connect")
     def test_no_connected_frame(self, mock_ws_connect: MagicMock, config: SFMCConfig) -> None:
-        """If the server sends a non-CONNECTED, non-ERROR frame, raise StompError."""
+        """Non-CONNECTED frames are tolerated but the deadline still fails."""
         mock_ws = MagicMock()
-        # Return SockJS open, then a HEARTBEAT-only frame (no CONNECTED)
-        mock_ws.recv.side_effect = [
-            "o",
-            'a["RECEIPT\\nreceipt-id:0\\n\\n\\u0000"]',
-        ]
+        # SockJS open, then a RECEIPT frame, then silence — never CONNECTED.
+        _recv_frames_then_idle(mock_ws, ["o", 'a["RECEIPT\\nreceipt-id:0\\n\\n\\u0000"]'])
+        mock_ws_connect.return_value = mock_ws
+
+        conn = StompConnection(config, "tok", handshake_timeout=0.3)
+        with pytest.raises(StompError, match="Did not receive STOMP CONNECTED frame"):
+            conn.connect()
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_sockjs_close_during_handshake(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig
+    ) -> None:
+        mock_ws = MagicMock()
+        _recv_frames_then_idle(mock_ws, ["o", 'c[1002,"Go away!"]'])
+        mock_ws_connect.return_value = mock_ws
+
+        conn = StompConnection(config, "tok", handshake_timeout=0.5)
+        with pytest.raises(StompError, match="closed SockJS session during handshake"):
+            conn.connect()
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_handshake_tolerates_interleaved_frames(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig
+    ) -> None:
+        """Heartbeats or other frames before CONNECTED must not burn a
+        whole connect attempt (finding 9 of the robustness review)."""
+        mock_ws = MagicMock()
+        _recv_frames_then_idle(
+            mock_ws,
+            ["o", "h", 'a["RECEIPT\\nreceipt-id:0\\n\\n\\u0000"]', _CONNECTED],
+        )
         mock_ws_connect.return_value = mock_ws
 
         conn = StompConnection(config, "tok")
-        with pytest.raises(StompError, match="Did not receive STOMP CONNECTED frame"):
-            conn.connect()
+        conn.connect()
+        assert conn._connected
+        conn.disconnect()
 
     @patch("sfmc_api.stomp.ws_connect")
     def test_generic_exception_wraps_stomp_error(
@@ -894,3 +921,191 @@ class TestConnectLifecycleGuards:
         finally:
             mock_ws.send.side_effect = None
             conn.disconnect()
+
+
+class TestMalformedStreamData:
+    """Malformed stream data must cost one message, not the session
+    (findings 3, 8, and 10 of the robustness review)."""
+
+    def _connect_with_gated_frames(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig, frames: list[str]
+    ) -> tuple[StompConnection, Any]:
+        """Handshake, subscribe, then release *frames* to the receiver."""
+        mock_ws = MagicMock()
+        gate = threading.Event()
+        calls = {"n": 0}
+        frame_iter = iter(frames)
+
+        def gated_recv(timeout: float = 0) -> str:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _OPEN
+            if calls["n"] == 2:
+                return _CONNECTED
+            gate.wait(timeout=5)
+            try:
+                return next(frame_iter)
+            except StopIteration:
+                raise TimeoutError from None
+
+        mock_ws.recv.side_effect = gated_recv
+        mock_ws_connect.return_value = mock_ws
+
+        conn = StompConnection(config, "tok")
+        conn.connect()
+        sub = conn.subscribe("/topic/test")
+        gate.set()
+        return conn, sub
+
+    def test_sockjs_array_with_non_string_elements(self) -> None:
+        result = _sockjs_decode('a[null, 42, "MESSAGE\\n\\nbody\\u0000"]')
+        assert result is not None
+        assert len(result) == 1
+        assert result[0].startswith("MESSAGE")
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_null_body_wrapped_not_confused_with_close_sentinel(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig
+    ) -> None:
+        """A JSON body of literal ``null`` must not enqueue ``None``,
+        which every consumer reads as "subscription closed"."""
+        frame = _sockjs_message_frame("MESSAGE", {"subscription": "sub-0"}, "null")
+        conn, sub = self._connect_with_gated_frames(mock_ws_connect, config, [frame])
+
+        msg = sub.get(timeout=2)
+        assert msg == {"_raw": "null"}
+        assert conn._connected
+
+        conn.disconnect()
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_array_body_passes_through(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig
+    ) -> None:
+        """Bare JSON arrays are real on SFMC topics (zmodem events)."""
+        frame = _sockjs_message_frame("MESSAGE", {"subscription": "sub-0"}, "[40633]")
+        conn, sub = self._connect_with_gated_frames(mock_ws_connect, config, [frame])
+
+        msg = sub.get(timeout=2)
+        assert msg == [40633]
+
+        conn.disconnect()
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_scalar_body_wrapped(self, mock_ws_connect: MagicMock, config: SFMCConfig) -> None:
+        frame = _sockjs_message_frame("MESSAGE", {"subscription": "sub-0"}, "42")
+        conn, sub = self._connect_with_gated_frames(mock_ws_connect, config, [frame])
+
+        msg = sub.get(timeout=2)
+        assert msg == {"_raw": "42"}
+
+        conn.disconnect()
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_unexpected_dispatch_error_tears_down_session(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Server-data variance is handled by explicit guards, so an
+        exception escaping dispatch is an implementation fault: the
+        session must tear down loudly (supervisors then reconnect with
+        backoff) instead of running on, apparently healthy, while
+        possibly discarding every message."""
+        from sfmc_api.stomp import _parse_frame as real_parse
+
+        def flaky(raw: str) -> Any:
+            if raw.startswith("POISON"):
+                raise RuntimeError("boom")
+            return real_parse(raw)
+
+        poison = 'a["POISON\\n\\nx\\u0000"]'
+        with (
+            patch("sfmc_api.stomp._parse_frame", side_effect=flaky),
+            caplog.at_level("ERROR", logger="sfmc_api.stomp"),
+        ):
+            conn, _sub = self._connect_with_gated_frames(mock_ws_connect, config, [poison])
+            assert conn.wait_disconnected(timeout=5)
+
+        # Attributed at the dispatch layer, not misreported as a
+        # normal close.
+        assert any("dispatching STOMP frame" in r.message for r in caplog.records)
+
+        conn.disconnect()
+
+
+class TestLivenessWatchdog:
+    """Half-open TCP must be detected and torn down loudly (finding 2
+    of the robustness review): silence past the threshold triggers a
+    WebSocket ping, and an unanswered ping closes the connection."""
+
+    def _silent_ws(self) -> tuple[MagicMock, threading.Event]:
+        """A mock ws that completes the handshake, then goes silent.
+
+        After ``close()`` is called, ``recv`` raises ConnectionClosed —
+        mirroring how closing a real socket unblocks the receive loop.
+        """
+        from websockets.exceptions import ConnectionClosed
+
+        mock_ws = MagicMock()
+        closed = threading.Event()
+        handshake = iter([_OPEN, _CONNECTED])
+
+        def recv(timeout: float = 0) -> str:
+            try:
+                return next(handshake)
+            except StopIteration:
+                pass
+            if closed.is_set():
+                raise ConnectionClosed(None, None)
+            raise TimeoutError
+
+        mock_ws.recv.side_effect = recv
+        mock_ws.close.side_effect = lambda *a, **k: closed.set()
+        return mock_ws, closed
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_unanswered_ping_closes_connection(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig
+    ) -> None:
+        mock_ws, closed = self._silent_ws()
+        mock_ws.ping.return_value = threading.Event()  # pong never arrives
+        mock_ws_connect.return_value = mock_ws
+
+        conn = StompConnection(config, "tok", liveness_timeout=0.2, ping_timeout=0.2)
+        conn.connect()
+
+        assert conn.wait_disconnected(timeout=5)
+        assert mock_ws.ping.called
+        assert closed.is_set()
+
+        conn.disconnect()
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_answered_ping_keeps_connection(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig
+    ) -> None:
+        mock_ws, _ = self._silent_ws()
+        pong = threading.Event()
+        pong.set()  # pong answered immediately
+        mock_ws.ping.return_value = pong
+        mock_ws_connect.return_value = mock_ws
+
+        conn = StompConnection(config, "tok", liveness_timeout=0.2, ping_timeout=0.2)
+        conn.connect()
+
+        # Idle long enough for several probe cycles.
+        assert not conn.wait_disconnected(timeout=1.0)
+        assert mock_ws.ping.called
+        assert conn._connected
+
+        conn.disconnect()
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_zero_timeout_disables_watchdog(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig
+    ) -> None:
+        _make_connected_ws(mock_ws_connect)
+
+        conn = StompConnection(config, "tok", liveness_timeout=0)
+        conn.connect()
+        assert conn._liveness_thread is None
+        conn.disconnect()

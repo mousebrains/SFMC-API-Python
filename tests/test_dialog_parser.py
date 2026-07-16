@@ -347,6 +347,129 @@ class TestLocaleIndependentTimestamp:
         assert _parse_glider_timestamp("Sat Feb 30 20:40:38 2026") is None
 
 
+class TestCorruptDialogLines:
+    """Garbled Iridium input must never raise out of the parser (#1)."""
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "GPS Location:  4439..300 N -12406.120 E measured     64.746 secs ago",
+            "GPS Location:  4439.300 N -124..06.120 E measured    64.746 secs ago",
+            "GPS Location:  4439.300 N -12406.120 E measured     -e+ secs ago",
+            "   sensor:m_battery(volts)=10.5.117         10.000 secs ago",
+            "   sensor:m_battery(volts)=-e+              10.000 secs ago",
+            "   sensor:m_battery(volts)=15.0             .e.e. secs ago",
+        ],
+    )
+    def test_degenerate_numeric_match_does_not_raise(self, line: str) -> None:
+        parser = DialogParser()
+        parser.feed_line("Connection Event: Carrier Detect found.123")
+        assert parser.feed_line(line) is None
+        assert parser.flush() is None
+
+    def test_corrupt_gps_line_does_not_store_fix(self) -> None:
+        parser = DialogParser()
+        parser.feed_line("Connection Event: Carrier Detect found.123")
+        parser.feed_line("GPS Location:  4439..300 N -12406.120 E measured  64.746 secs ago")
+        parser.feed_line("   sensor:m_battery(volts)=15.0    50.0 secs ago")
+        # No valid GPS → no emit even with a sensor present.
+        assert parser.flush() is None
+
+    def test_corrupt_gps_line_does_not_terminate_sensor_block(self) -> None:
+        parser = DialogParser()
+        parser.feed_line("Connection Event: Carrier Detect found.123")
+        parser.feed_line("GPS Location:  3310.021 N -11741.800 E measured  64.0 secs ago")
+        parser.feed_line("   sensor:m_battery(volts)=15.0    50.0 secs ago")
+        # A garbled GPS line mid-block is consumed, not treated as the
+        # non-sensor terminator.
+        assert (
+            parser.feed_line("GPS Location:  9999.9 N -12406.120 E measured  1.0 secs ago") is None
+        )
+        event = parser.feed_line("ABORT HISTORY: total since reset: 1")
+        assert event is not None
+        assert event.gps_lat == pytest.approx(33.16702, abs=1e-4)
+
+    def test_surfacing_survives_corrupt_line_then_good_fix(self) -> None:
+        parser = DialogParser()
+        parser.feed_line("Connection Event: Carrier Detect found.123")
+        parser.feed_line("GPS Location:  4439..300 N -12406.120 E measured  64.746 secs ago")
+        parser.feed_line("GPS Location:  4439.300 N -12406.120 E measured   70.0 secs ago")
+        parser.feed_line("   sensor:m_battery(volts)=15.0    50.0 secs ago")
+        event = parser.flush()
+        assert event is not None
+        assert event.gps_lat_ddmm == pytest.approx(4439.300)
+
+
+class TestGPSPlausibility:
+    """Physically impossible fixes are rejected, not steered on (#4)."""
+
+    @pytest.mark.parametrize(
+        ("lat_ddmm", "lon_ddmm", "age"),
+        [
+            ("4499.300", "-12406.120", "64.746"),  # 99.3 minutes: impossible
+            ("4439.300", "-12482.000", "64.746"),  # lon minutes >= 60
+            ("9139.300", "-12406.120", "64.746"),  # 91° latitude
+            ("4439.300", "-18106.120", "64.746"),  # 181° longitude
+            ("4439.300", "-12406.120", "1e+308"),  # no-fix sentinel age
+            ("69696969.000", "69696969.000", "1.0"),  # no-fix sentinel coords
+        ],
+    )
+    def test_implausible_fix_rejected(self, lat_ddmm: str, lon_ddmm: str, age: str) -> None:
+        parser = DialogParser()
+        parser.feed_line("Connection Event: Carrier Detect found.123")
+        parser.feed_line(f"GPS Location:  {lat_ddmm} N {lon_ddmm} E measured  {age} secs ago")
+        parser.feed_line("   sensor:m_battery(volts)=15.0    50.0 secs ago")
+        assert parser.flush() is None
+
+    def test_rejection_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
+        parser = DialogParser()
+        parser.feed_line("Connection Event: Carrier Detect found.123")
+        with caplog.at_level("WARNING", logger="sfmc_api.dialog_parser"):
+            parser.feed_line("GPS Location:  4499.300 N -12406.120 E measured  64.746 secs ago")
+        assert any("implausible GPS" in r.message for r in caplog.records)
+
+    @pytest.mark.parametrize(
+        ("lat_ddmm", "lon_ddmm"),
+        [
+            (9000.0, -12406.120),  # exactly the pole
+            (4439.300, -18000.0),  # exactly the antimeridian
+            (0.0, 0.0),
+            (-4439.300, 12406.120),  # southern/eastern hemispheres
+        ],
+    )
+    def test_boundary_fixes_accepted(self, lat_ddmm: float, lon_ddmm: float) -> None:
+        parser = DialogParser()
+        parser.feed_line("Connection Event: Carrier Detect found.123")
+        parser.feed_line(f"GPS Location:  {lat_ddmm} N {lon_ddmm} E measured  64.746 secs ago")
+        parser.feed_line("   sensor:m_battery(volts)=15.0    50.0 secs ago")
+        event = parser.flush()
+        assert event is not None
+        assert event.gps_lat_ddmm == pytest.approx(lat_ddmm)
+        assert event.gps_lon_ddmm == pytest.approx(lon_ddmm)
+
+    def test_nonfinite_sensor_value_rejected(self) -> None:
+        parser = DialogParser()
+        parser.feed_line("Connection Event: Carrier Detect found.123")
+        parser.feed_line("GPS Location:  3310.021 N -11741.800 E measured  64.0 secs ago")
+        parser.feed_line("   sensor:m_water_vx(m/s)=1e+400    50.0 secs ago")
+        parser.feed_line("   sensor:m_battery(volts)=15.0     50.0 secs ago")
+        event = parser.flush()
+        assert event is not None
+        assert "m_water_vx" not in event.sensors
+        assert "m_battery" in event.sensors
+
+    def test_huge_sentinel_sensor_age_still_accepted(self) -> None:
+        """1e+308 ages are routine sentinels on sensor lines (see
+        SAMPLE_SURFACING) — staleness policy belongs to the consumer."""
+        parser = DialogParser()
+        parser.feed_line("Connection Event: Carrier Detect found.123")
+        parser.feed_line("GPS Location:  3310.021 N -11741.800 E measured  64.0 secs ago")
+        parser.feed_line("   sensor:c_autoballast_state(enum)=5    1e+308 secs ago")
+        event = parser.flush()
+        assert event is not None
+        assert "c_autoballast_state" in event.sensors
+
+
 # ── Helpers ─────────────────────────────────────────────────────────
 
 

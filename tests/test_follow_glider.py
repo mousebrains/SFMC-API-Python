@@ -414,7 +414,10 @@ class TestUploadFiles:
         q_out.put({"to-glider": {"f.ma": "data"}})
         q_out.put(None)
 
-        _upload_files(mock_client, "g1", q_out, log)
+        with patch("sfmc_api.follow_glider._UPLOAD_RETRY_DELAYS", (0.0, 0.0)):
+            _upload_files(mock_client, "g1", q_out, log)
+
+        assert mock_client.upload_glider_file_contents.call_count == 3
 
     def test_drains_backlog_before_sentinel(self) -> None:
         """Every queued upload happens before the sentinel ends the
@@ -1080,3 +1083,220 @@ class TestStrictFlagExit:
         assert isinstance(mock_follow.call_args.kwargs["stop"], threading.Event)
         assert signal.getsignal(signal.SIGINT) == previous_int
         assert signal.getsignal(signal.SIGTERM) == previous_term
+
+
+class TestUploadRetry:
+    """Finding 5: a transient upload failure must not permanently
+    discard the follower's steering files."""
+
+    def test_retries_then_succeeds(self) -> None:
+        mock_client = MagicMock()
+        mock_client.upload_glider_file_contents.side_effect = [
+            RuntimeError("blip"),
+            {"ok": True},
+        ]
+        stats = RunStats()
+        q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
+        q_out.put({"to-glider": {"goto_l30.ma": "c"}})
+        q_out.put(None)
+
+        with patch("sfmc_api.follow_glider._UPLOAD_RETRY_DELAYS", (0.0, 0.0)):
+            _upload_files(mock_client, "g1", q_out, logging.getLogger("t.retry1"), stats)
+
+        assert mock_client.upload_glider_file_contents.call_count == 2
+        assert stats.files_emitted == 1
+        assert stats.upload_errors == 0
+
+    def test_gives_up_after_all_attempts(self) -> None:
+        mock_client = MagicMock()
+        mock_client.upload_glider_file_contents.side_effect = RuntimeError("down")
+        stats = RunStats()
+        q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
+        q_out.put({"to-glider": {"goto_l30.ma": "c"}})
+        q_out.put(None)
+
+        with patch("sfmc_api.follow_glider._UPLOAD_RETRY_DELAYS", (0.0, 0.0)):
+            _upload_files(mock_client, "g1", q_out, logging.getLogger("t.retry2"), stats)
+
+        assert mock_client.upload_glider_file_contents.call_count == 3
+        assert stats.upload_errors == 1
+
+    def test_abort_cuts_backoff_short(self) -> None:
+        """During shutdown the real (10s, 30s) waits must collapse."""
+        mock_client = MagicMock()
+        mock_client.upload_glider_file_contents.side_effect = RuntimeError("down")
+        q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
+        q_out.put({"to-glider": {"goto_l30.ma": "c"}})
+        q_out.put(None)
+        abort = threading.Event()
+        abort.set()
+
+        start = time.monotonic()
+        _upload_files(mock_client, "g1", q_out, logging.getLogger("t.retry3"), None, abort)
+
+        assert time.monotonic() - start < 5.0
+        assert mock_client.upload_glider_file_contents.call_count == 3
+
+
+class TestWeakDuplicateIdentity:
+    """Finding 20: dedup must not silently disable when Curr Time is
+    missing/garbled — replayed surfacings reproduce identical blocks."""
+
+    def test_identical_raw_block_is_duplicate(self) -> None:
+        from sfmc_api.follow_glider import _RecentSurfacingIds
+
+        cache = _RecentSurfacingIds()
+        lines = ["Carrier Detect found", "GPS Location: ...", "sensor: ..."]
+        first = SurfacingEvent(vehicle_name="g", raw_lines=list(lines))
+        replayed = SurfacingEvent(vehicle_name="g", raw_lines=list(lines))
+
+        assert cache.duplicate_identity(first) is None
+        assert cache.duplicate_identity(replayed) is not None
+
+    def test_distinct_raw_blocks_are_not_duplicates(self) -> None:
+        from sfmc_api.follow_glider import _RecentSurfacingIds
+
+        cache = _RecentSurfacingIds()
+        first = SurfacingEvent(vehicle_name="g", raw_lines=["block one"])
+        second = SurfacingEvent(vehicle_name="g", raw_lines=["block two"])
+
+        assert cache.duplicate_identity(first) is None
+        assert cache.duplicate_identity(second) is None
+
+    def test_strong_identity_still_used_when_available(self) -> None:
+        from datetime import UTC, datetime
+
+        from sfmc_api.follow_glider import _RecentSurfacingIds
+
+        cache = _RecentSurfacingIds()
+        ts = datetime(2026, 3, 28, 20, 40, 38, tzinfo=UTC)
+        first = SurfacingEvent(vehicle_name="g", timestamp=ts, mission_time=1.0)
+        # Same time identity, different raw lines (fragmentation varies).
+        second = SurfacingEvent(vehicle_name="g", timestamp=ts, mission_time=1.0, raw_lines=["x"])
+
+        assert cache.duplicate_identity(first) is None
+        assert cache.duplicate_identity(second) is not None
+
+
+class TestShutdownDrainTimeout:
+    """Finding 21: a follower stuck in user code must not hang
+    shutdown forever."""
+
+    def test_stuck_follower_abandoned_after_timeout(self) -> None:
+        import queue as queue_mod
+
+        from sfmc_api.follow_glider import (
+            _run_thread_target,
+            _shutdown_follow_pipeline,
+        )
+
+        follower = MagicMock()
+        follower.is_alive.return_value = True  # never finishes
+        q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
+        output_results: queue_mod.Queue[Any] = queue_mod.Queue()
+        output_thread = threading.Thread(
+            target=_run_thread_target,
+            args=(
+                "output",
+                _print_files,
+                (q_out, logging.getLogger("t.drain"), None),
+                output_results,
+            ),
+            daemon=True,
+        )
+        output_thread.start()
+        info_log = MagicMock()
+
+        start = time.monotonic()
+        _shutdown_follow_pipeline(
+            follower=follower,
+            queue_out=q_out,
+            output_thread=output_thread,
+            output_results=output_results,
+            info_log=info_log,
+            drain_timeout=0.5,
+        )
+
+        assert time.monotonic() - start < 10.0
+        assert info_log.error.called
+        assert not output_thread.is_alive()
+
+
+class TestSetupLoggingHandlerLeak:
+    """Finding 28: repeated programmatic setup must close old handlers."""
+
+    def test_stale_file_handlers_closed(self, tmp_path: Path) -> None:
+        import logging.handlers as lh
+
+        d1, _, _ = setup_logging("leaktest", str(tmp_path / "a.log"))
+        old = [h for h in d1.handlers if isinstance(h, lh.RotatingFileHandler)]
+        assert old
+
+        setup_logging("leaktest", str(tmp_path / "a.log"))
+
+        assert all(h.stream is None or h.stream.closed for h in old)
+
+
+class TestFollowStartupErrorClassification:
+    """Permanent client errors must fail fast at startup (review
+    follow-up on finding 14)."""
+
+    def test_404_fails_fast_even_with_reconnect(self) -> None:
+        from sfmc_api.exceptions import APIError
+
+        client = MagicMock(spec=SFMCClient)
+        client.get_glider_details.side_effect = APIError(404, "no such glider")
+
+        with pytest.raises(APIError):
+            follow_glider(
+                client=client,
+                glider_name="nosuch",
+                follower_class=BaseFollower,
+                dry_run=True,
+                reconnect_initial_delay=0.0,
+                reconnect_max_delay=0.0,
+                reconnect_jitter=0.0,
+            )
+
+        assert client.get_glider_details.call_count == 1
+
+
+class TestQueueBacklogWarnings:
+    """Review follow-up on finding 29: unbounded queues stay unbounded
+    (bounding them could block shutdown through the public sentinel
+    contract), but backlog depth must be visible."""
+
+    def test_deliver_surfacing_warns_on_backlog(self) -> None:
+        from sfmc_api.follow_glider import _QUEUE_BACKLOG_WARN, _deliver_surfacing
+
+        q_in: Queue[SurfacingEvent | None] = Queue()
+        for _ in range(_QUEUE_BACKLOG_WARN):
+            q_in.put(SurfacingEvent(vehicle_name="g"))
+        info_log = MagicMock(spec=logging.Logger)
+
+        delivered = _deliver_surfacing(
+            SurfacingEvent(vehicle_name="g", raw_lines=["x"]),
+            q_in,
+            None,
+            None,
+            info_log,
+        )
+
+        assert delivered
+        assert any("backlog" in str(call) for call in info_log.warning.call_args_list)
+
+    def test_send_files_warns_on_backlog(self, caplog: pytest.LogCaptureFixture) -> None:
+        class NoopFollower(BaseFollower):
+            def on_surfacing(self, event: SurfacingEvent) -> None:
+                pass
+
+        q_in: Queue[SurfacingEvent | None] = Queue()
+        q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
+        follower = NoopFollower(config={}, queue_in=q_in, queue_out=q_out)
+        for _ in range(9):
+            q_out.put({"to-glider": {"f.ma": "x"}})
+
+        with caplog.at_level("WARNING", logger="sfmc_api.follower"):
+            follower.send_files(to_glider={"g.ma": "y"})
+
+        assert any("upload backlog" in r.message for r in caplog.records)

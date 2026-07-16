@@ -21,6 +21,7 @@ Loads credentials from ``~/.config/sfmc/credentials.json`` by default.
 
 import argparse
 import logging
+import logging.handlers
 import queue
 import re
 import signal
@@ -34,7 +35,11 @@ from typing import Any
 from sfmc_api import SFMCClient
 from sfmc_api.exceptions import SFMCError
 from sfmc_api.stomp import MAX_SEQUENCE, StompError, StompSubscription
-from sfmc_api.stream_reconnect import ReconnectBackoff, safe_stream_error
+from sfmc_api.stream_reconnect import (
+    ReconnectBackoff,
+    is_transient_error,
+    safe_stream_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +52,11 @@ STREAM_BOUNDARY_PREFIX = "STREAM_BOUNDARY"
 #: while still bounding memory if a sequence number is permanently
 #: lost.
 _ORDER_BUFFER_MAX = 100
+
+#: Consecutive behind-the-cursor sequence numbers before we conclude
+#: the server restarted and reset its sequence counter (rather than a
+#: stray stale re-delivery) and re-anchor to the new numbering.
+_SEQ_RESET_STREAK = 3
 
 
 def _flush_order(pending: dict[int, str], next_expected: int | None) -> list[int]:
@@ -87,11 +97,25 @@ def ordered_dialog(
     """
     next_expected: int | None = None
     pending: dict[int, str] = {}
+    span = MAX_SEQUENCE + 1
+    behind_streak = 0
 
     try:
         for msg in sub:
+            # Server-data variance (a bare array, a null field) must
+            # cost one skipped message, not the whole service: these
+            # workers run under a supervisor that treats unexpected
+            # exceptions as fatal code bugs.
+            if not isinstance(msg, dict):
+                logger.warning("ordered_dialog: skipping non-object message: %.200r", msg)
+                continue
             seq = msg.get("sequenceNumber")
             data = msg.get("data", "")
+            if not isinstance(data, str):
+                logger.warning("ordered_dialog: skipping non-string data: %.200r", msg)
+                continue
+            if not isinstance(seq, int):
+                seq = None
 
             if seq is None:
                 # No sequence info — yield immediately
@@ -100,6 +124,7 @@ def ordered_dialog(
 
             if next_expected is None or seq == next_expected:
                 # In order (or first message) — yield and advance
+                behind_streak = 0
                 yield data
                 if next_expected is None:
                     next_expected = seq
@@ -109,8 +134,32 @@ def ordered_dialog(
                 while next_expected in pending:
                     yield pending.pop(next_expected)
                     next_expected = (next_expected + 1) if next_expected < MAX_SEQUENCE else 0
+            elif (seq - next_expected) % span > span // 2:
+                # Behind the cursor: a stale re-delivery, or the server
+                # restarted and reset its sequence counter.  Never park
+                # these (they can never drain) — yield immediately, and
+                # after a sustained streak re-anchor to the new
+                # numbering instead of stalling every fresh message in
+                # the out-of-order buffer until the overflow flush.
+                behind_streak += 1
+                if behind_streak >= _SEQ_RESET_STREAK:
+                    logger.warning(
+                        "ordered_dialog: %d consecutive sequence numbers behind "
+                        "expected=%s (last=%d); assuming server sequence reset "
+                        "and re-anchoring.",
+                        behind_streak,
+                        next_expected,
+                        seq,
+                    )
+                    for seq_key in _flush_order(pending, next_expected):
+                        yield pending[seq_key]
+                    pending.clear()
+                    next_expected = (seq + 1) if seq < MAX_SEQUENCE else 0
+                    behind_streak = 0
+                yield data
             else:
                 # Out of order — buffer it
+                behind_streak = 0
                 pending[seq] = data
 
                 # If the gap is too large, the buffer is stale — flush and reset.
@@ -183,11 +232,13 @@ def setup_logging(
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
 
-    # Override formatTime to include microseconds
+    # Override formatTime to include microseconds.  Timestamps are UTC:
+    # the dialog log is correlated with glider-clock (UTC) data, and
+    # naive local time goes non-monotonic at DST fall-back.
     def format_time_usec(record: logging.LogRecord, datefmt: str | None = None) -> str:
         import datetime
 
-        dt = datetime.datetime.fromtimestamp(record.created)
+        dt = datetime.datetime.fromtimestamp(record.created, tz=datetime.UTC)
         return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")
 
     fmt.formatTime = format_time_usec  # type: ignore[method-assign]
@@ -195,7 +246,11 @@ def setup_logging(
     handlers: list[logging.Handler] = []
 
     if log_file:
-        fh = logging.FileHandler(log_file, encoding="utf-8")
+        # WatchedFileHandler reopens the file when logrotate renames
+        # it.  A plain FileHandler keeps the rotated inode open
+        # forever, silently sending all new dialog — the primary data
+        # record — into the file logrotate is about to delete.
+        fh = logging.handlers.WatchedFileHandler(log_file, encoding="utf-8")
         fh.setFormatter(fmt)
         handlers.append(fh)
 
@@ -208,27 +263,30 @@ def setup_logging(
         sh.setFormatter(fmt)
         handlers.append(sh)
 
-    dialog_logger = logging.getLogger(f"sfmc.{glider_name}.DIALOG")
-    dialog_logger.handlers.clear()
-    dialog_logger.setLevel(logging.INFO)
-    dialog_logger.propagate = False
-    for h in handlers:
-        dialog_logger.addHandler(h)
+    def _make_logger(suffix: str) -> logging.Logger:
+        log = logging.getLogger(f"sfmc.{glider_name}.{suffix}")
+        for stale in log.handlers:
+            stale.close()  # repeated setup must not leak file handles
+        log.handlers.clear()
+        log.setLevel(logging.INFO)
+        log.propagate = False
+        for h in handlers:
+            log.addHandler(h)
+        return log
 
-    script_logger = logging.getLogger(f"sfmc.{glider_name}.SCRIPT")
-    script_logger.handlers.clear()
-    script_logger.setLevel(logging.INFO)
-    script_logger.propagate = False
-    for h in handlers:
-        script_logger.addHandler(h)
-
-    return dialog_logger, script_logger
+    return _make_logger("DIALOG"), _make_logger("SCRIPT")
 
 
 # ── Monitoring threads ───────────────────────────────────────────────
 
 
 _LINE_SEP = re.compile(r"\r\n|\r|\n")
+
+#: Cap on the line-reassembly buffer.  Dialog lines are short; data
+#: that accumulates this much without a line break is binary chatter,
+#: and buffering it forever is unbounded memory growth on a service
+#: that runs for weeks.
+_MAX_LINE_BUFFER_BYTES = 256 * 1024
 
 
 def _log_with_time(log: logging.Logger, msg: str, created: float) -> None:
@@ -269,6 +327,12 @@ def monitor_dialog(
                 if line:
                     _log_with_time(log, line, line_start)
                 line_start = time.time()
+            if len(buf) > _MAX_LINE_BUFFER_BYTES:
+                logger.warning(
+                    "discarding %d bytes of line-break-free dialog data (buffer cap)",
+                    len(buf),
+                )
+                buf = ""
     finally:
         if buf.strip():
             if stop.is_set():
@@ -289,6 +353,9 @@ def monitor_scripts(
     for event in sub:
         if stop.is_set():
             break
+        if not isinstance(event, dict):
+            logger.warning("monitor_scripts: skipping non-object event: %.200r", event)
+            continue
         script_name = event.get("scriptName", "?")
         script_type = event.get("scriptType", "?")
         script_state = event.get("scriptState", "?")
@@ -394,7 +461,35 @@ def monitor_glider(
     """Monitor live streams until stopped, reconnecting after session loss."""
     if stop is None:
         stop = threading.Event()
-    _initial_status(client, glider_name, info_log)
+
+    # The startup status check retries like the stream loop below: a
+    # service started at boot, before DNS/WAN is up, must not exit on
+    # a transient failure that the steady-state loop would have ridden
+    # out.  A separate backoff keeps startup failures from inflating
+    # the stream loop's delays.
+    startup_backoff = ReconnectBackoff(
+        initial_delay=reconnect_initial_delay,
+        max_delay=reconnect_max_delay,
+        stable_after=reconnect_stable_after,
+        jitter=reconnect_jitter,
+    )
+    while not stop.is_set():
+        try:
+            _initial_status(client, glider_name, info_log)
+            break
+        except SFMCError as exc:
+            # Permanent client errors (404 misspelled glider, bad
+            # credentials) fail fast; only transient failures retry.
+            if not reconnect or not is_transient_error(exc):
+                raise
+            delay = startup_backoff.next_delay(subscribed_uptime=None)
+            info_log.warning(
+                "startup status check failed (%s); retrying in %.1fs",
+                safe_stream_error(exc),
+                delay.actual,
+            )
+            if stop.wait(delay.actual):
+                return
 
     backoff = ReconnectBackoff(
         initial_delay=reconnect_initial_delay,
@@ -590,8 +685,10 @@ def main() -> None:
     previous_handlers: dict[signal.Signals, Any] = {}
 
     def request_stop(signum: int, frame: Any) -> None:
+        # Only set the event: logging from a signal handler can garble
+        # a log line the interrupted main thread is mid-way through
+        # emitting.  The supervisor loop logs the shutdown itself.
         del signum, frame
-        info_log.info("Stopping...")
         stop.set()
 
     for signum in (signal.SIGINT, signal.SIGTERM):

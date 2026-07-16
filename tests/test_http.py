@@ -94,3 +94,20 @@ def test_build_http_client() -> None:
         assert "test.example.com/sfmc/api" in str(client._base_url)
     finally:
         client.close()
+
+
+def test_rate_limit_negative_header_clamped() -> None:
+    """Callers sleep on retry_after_seconds; negatives would raise."""
+    r = _mock_response(429, headers={"x-rate-limit-retry-after-milliseconds": "-3000"})
+    with pytest.raises(RateLimitError) as exc_info:
+        check_response(r)
+    assert exc_info.value.retry_after_seconds == 0.0
+
+
+def test_rate_limit_oversized_header_capped_not_overflow() -> None:
+    """int('9'*400) is a valid Python int whose division by 1000 would
+    overflow float conversion; the clamp must happen in integer ms."""
+    r = _mock_response(429, headers={"x-rate-limit-retry-after-milliseconds": "9" * 400})
+    with pytest.raises(RateLimitError) as exc_info:
+        check_response(r)
+    assert exc_info.value.retry_after_seconds == 3600.0
