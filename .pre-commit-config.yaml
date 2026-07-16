@@ -11,6 +11,16 @@ repos:
       - id: mypy
         name: mypy
         entry: mypy src/sfmc_api/
-        language: system
+        # A pre-commit-managed environment (not language: system) so
+        # the hook works without an activated venv.  strict mypy needs
+        # the type-bearing dependencies here; keep the constraints in
+        # sync with [project.dependencies] and the dev extra in
+        # pyproject.toml.  CI runs mypy directly and is unaffected.
+        language: python
+        additional_dependencies:
+          - "mypy>=1.10"
+          - "httpx>=0.27,<1"
+          - "websockets>=13,<15"
+          - "types-PyYAML>=6"
         types: [python]
         pass_filenames: false
