@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -1399,3 +1400,118 @@ class TestStreamingDownloadAuthRefresh:
 
         assert exc_info.value.status_code == 401
         assert not dest.exists()
+
+
+class TestRetryHardening:
+    """Findings 11, 12, 13, and 27 of the robustness review: the retry
+    layer must survive missing/garbage/hostile response metadata."""
+
+    def _client(self, mock_build: MagicMock, *responses: Any) -> SFMCClient:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_build.return_value = mock_http
+        mock_http.request.side_effect = list(responses)
+        self.mock_http = mock_http
+        return SFMCClient(config=SFMCConfig(host="sfmc.test", client_id="c", secret="s"))
+
+    @patch("sfmc_api.client.time")
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_429_missing_header_uses_default_delay(
+        self, mock_build: MagicMock, mock_auth: MagicMock, mock_time: MagicMock
+    ) -> None:
+        """No retry-after header must not mean zero-delay hammering."""
+        client = self._client(
+            mock_build,
+            make_mock_response(429, {}),
+            make_mock_response(200, {"data": {}}),
+        )
+        client.get_glider_details("g1")
+        mock_time.sleep.assert_called_once_with(2.0)
+
+    @patch("sfmc_api.client.time")
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_429_negative_header_clamped_to_zero(
+        self, mock_build: MagicMock, mock_auth: MagicMock, mock_time: MagicMock
+    ) -> None:
+        """A negative header must not raise ValueError out of sleep
+        (which is not an SFMCError and killed the supervisors)."""
+        client = self._client(
+            mock_build,
+            make_mock_response(
+                429, {}, headers={"x-rate-limit-retry-after-milliseconds": "-1000"}
+            ),
+            make_mock_response(200, {"data": {}}),
+        )
+        client.get_glider_details("g1")
+        mock_time.sleep.assert_called_once_with(0.0)
+
+    @patch("sfmc_api.client.time")
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_429_huge_header_capped(
+        self, mock_build: MagicMock, mock_auth: MagicMock, mock_time: MagicMock
+    ) -> None:
+        """A 24h retry-after must not block shutdown for hours."""
+        client = self._client(
+            mock_build,
+            make_mock_response(
+                429, {}, headers={"x-rate-limit-retry-after-milliseconds": "86400000"}
+            ),
+            make_mock_response(200, {"data": {}}),
+        )
+        client.get_glider_details("g1")
+        mock_time.sleep.assert_called_once_with(60.0)
+
+    @patch("sfmc_api.client.time")
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_401_refresh_survives_earlier_transport_blip(
+        self, mock_build: MagicMock, mock_auth: MagicMock, mock_time: MagicMock
+    ) -> None:
+        """The refresh is gated on a flag, not on attempt == 0: a
+        transport error before the 401 must not turn a routine token
+        expiry into a hard failure."""
+        client = self._client(
+            mock_build,
+            httpx.ConnectError("blip"),
+            make_mock_response(401, {}),
+            make_mock_response(200, {"data": {}}),
+        )
+        result = client.get_glider_details("g1")
+        assert result == {"data": {}}
+        assert mock_auth.call_count == 2  # initial sign-in + 401 refresh
+
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_non_json_200_body_raises_apierror(
+        self, mock_build: MagicMock, mock_auth: MagicMock
+    ) -> None:
+        """A captive portal answering 200+HTML must surface as
+        SFMCError (reconnect loops ride it out), not raw ValueError."""
+        portal = make_mock_response(200, {})
+        portal.content = b"<html>login required</html>"
+        portal.json.side_effect = ValueError("not json")
+        client = self._client(mock_build, portal)
+        with pytest.raises(APIError, match="Expected JSON response body"):
+            client.get_glider_details("g1")
+
+
+class TestSigninResponseShapes:
+    """Finding 13: any sign-in failure maps to AuthenticationError."""
+
+    @pytest.mark.parametrize("bad_json", [None, "a-string", [1, 2], 42])
+    def test_non_object_signin_json_raises_authentication_error(self, bad_json: Any) -> None:
+        from sfmc_api.auth import authenticate
+        from sfmc_api.exceptions import AuthenticationError
+
+        http_client = MagicMock(spec=httpx.Client)
+        resp = make_mock_response(200, {})
+        resp.json.return_value = bad_json
+        http_client.post.return_value = resp
+
+        with pytest.raises(AuthenticationError):
+            authenticate(
+                http_client,
+                SFMCConfig(host="sfmc.test", client_id="c", secret="s"),
+            )

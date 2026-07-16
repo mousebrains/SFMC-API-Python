@@ -37,7 +37,7 @@ class TestAuthenticate:
         http = MagicMock(spec=httpx.Client)
         http.post.return_value = make_mock_response(200, {"not_token": "x"})
 
-        with pytest.raises(AuthenticationError, match="missing 'token'"):
+        with pytest.raises(AuthenticationError, match="Unexpected sign-in response shape"):
             authenticate(http, config)
 
     def test_network_error(self, config: SFMCConfig) -> None:

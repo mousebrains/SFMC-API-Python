@@ -94,3 +94,11 @@ def test_build_http_client() -> None:
         assert "test.example.com/sfmc/api" in str(client._base_url)
     finally:
         client.close()
+
+
+def test_rate_limit_negative_header_clamped() -> None:
+    """Callers sleep on retry_after_seconds; negatives would raise."""
+    r = _mock_response(429, headers={"x-rate-limit-retry-after-milliseconds": "-3000"})
+    with pytest.raises(RateLimitError) as exc_info:
+        check_response(r)
+    assert exc_info.value.retry_after_seconds == 0.0

@@ -38,6 +38,12 @@ __all__ = ["SFMCClient"]
 logger = logging.getLogger(__name__)
 _MAX_RETRIES = 3
 
+#: Upper bound on one 429 retry sleep.  The server-provided header is
+#: honored up to this; beyond it, the bounded retry loop simply gets
+#: another 429 and eventually raises RateLimitError for the caller's
+#: own backoff, instead of an uninterruptible hours-long sleep.
+_MAX_429_DELAY_SECONDS = 60.0
+
 #: Methods with no server-side effects — safe to retry on any
 #: transport failure, including ambiguous ones (e.g. a read timeout
 #: after the request may already have reached the server).
@@ -246,6 +252,7 @@ class SFMCClient:
         headers.update(self._auth_headers())
 
         last_exc: Exception | None = None
+        refreshed_auth = False
         for attempt in range(_MAX_RETRIES):
             try:
                 response = self._http.request(
@@ -288,24 +295,29 @@ class SFMCClient:
                     f"({type(exc).__name__}: {exc})",
                 ) from exc
 
-            # Token expired — refresh once
-            if response.status_code == 401 and attempt == 0:
+            # Token expired — refresh once.  Gated on a flag, not on
+            # attempt number: a transport blip on attempt 0 must not
+            # turn a routine token expiry into a hard failure.
+            if response.status_code == 401 and not refreshed_auth:
+                refreshed_auth = True
                 logger.debug("Got 401, refreshing auth token")
                 self.refresh_auth()
                 with self._token_lock:
                     headers["Authorization"] = f"Bearer {self._token}"
                 continue
 
-            # Rate limited — use server-provided delay
+            # Rate limited — use server-provided delay.  A missing or
+            # garbage header must not zero-delay hammer an overloaded
+            # server, a negative value must not raise out of
+            # time.sleep, and a huge value must not block shutdown for
+            # hours (the cap costs at most another bounded 429 pass).
             if response.status_code == 429 and attempt < _MAX_RETRIES - 1:
-                raw_ms = response.headers.get(
-                    "x-rate-limit-retry-after-milliseconds",
-                    "0",
-                )
+                raw_ms = response.headers.get("x-rate-limit-retry-after-milliseconds")
                 try:
-                    delay_s = int(raw_ms) / 1000
+                    delay_s = int(raw_ms) / 1000 if raw_ms is not None else 2.0
                 except (ValueError, TypeError):
                     delay_s = 2.0
+                delay_s = min(max(delay_s, 0.0), _MAX_429_DELAY_SECONDS)
                 logger.warning(
                     "Rate limited on %s %s, retrying in %.1fs",
                     method,
@@ -334,11 +346,24 @@ class SFMCClient:
 
         Several SFMC endpoints return HTTP 200 with an empty body on
         success (e.g. deploy, script-control, and delete-rule operations).
+
+        Raises:
+            APIError: If the body is non-empty but not JSON — e.g. a
+                captive portal or proxy answering 200 with HTML during
+                an outage.  Body-parse failures must surface as
+                SFMCError so long-running callers' reconnect loops can
+                ride them out instead of dying on a raw ValueError.
         """
         body = response.content
         if not body or not body.strip():
             return {}
-        return cast(dict[str, Any], response.json())
+        try:
+            return cast(dict[str, Any], response.json())
+        except ValueError as exc:
+            raise APIError(
+                response.status_code,
+                f"Expected JSON response body, got: {body[:200]!r}",
+            ) from exc
 
     # ── Glider Management ────────────────────────────────────────────
 

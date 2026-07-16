@@ -47,6 +47,10 @@ class APIError(SFMCError):
             # the description (exception type, attempt count, whether a
             # retry was withheld) is the only useful information.
             message = response_body
+        elif response_body:
+            # Operators diagnosing a failed service from its logs need
+            # the server's words, not just the status number.
+            message = f"SFMC API error: HTTP {status_code}: {response_body[:200]}"
         else:
             message = f"SFMC API error: HTTP {status_code}"
         super().__init__(message)
