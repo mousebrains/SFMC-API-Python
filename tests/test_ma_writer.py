@@ -271,3 +271,37 @@ def _extract_waypoint_lines(content: str) -> list[str]:
     start = lines.index("<start:waypoints>")
     end = lines.index("<end:waypoints>")
     return [ln for ln in lines[start + 1 : end] if ln.strip()]
+
+
+class TestDDMMRoundingCarry:
+    """Finding 19: rounding must never emit 60 minutes (invalid DDMM)."""
+
+    def test_latitude_hair_under_45_carries_to_4500(self) -> None:
+        from sfmc_api.ma_writer import generate_goto_ma
+
+        _, content = generate_goto_ma(
+            waypoints=[(-124.5, 44.9999999999)],
+            sequence_number=10,
+        )
+        assert "4500.0000" in content
+        assert "4460.0000" not in content
+
+    def test_longitude_hair_under_180_carries(self) -> None:
+        from sfmc_api.ma_writer import generate_goto_ma
+
+        _, content = generate_goto_ma(
+            waypoints=[(-179.9999999999, 44.5)],
+            sequence_number=10,
+        )
+        assert "-18000.0000" in content
+        assert "-17960.0000" not in content
+
+    def test_normal_coordinates_unchanged(self) -> None:
+        from sfmc_api.ma_writer import generate_goto_ma
+
+        _, content = generate_goto_ma(
+            waypoints=[(-117.6967, 33.1670)],
+            sequence_number=10,
+        )
+        assert "3310.0200" in content
+        assert "-11741.8020" in content

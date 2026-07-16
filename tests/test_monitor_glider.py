@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from sfmc_api.exceptions import SFMCError
 from sfmc_api.monitor_glider import _log_with_time, build_parser, monitor_dialog, ordered_dialog
 from sfmc_api.stomp import MAX_SEQUENCE, StompError, StompSubscription
 
@@ -331,3 +332,122 @@ class TestLineBufferCap:
         with caplog.at_level("WARNING", logger="sfmc_api.monitor_glider"):
             monitor_dialog(StompSubscription("sub", "/test", q), MagicMock(), threading.Event())
         assert any("buffer cap" in r.message for r in caplog.records)
+
+
+class TestSequenceReset:
+    """Finding 23: a server-side sequence reset must re-anchor after a
+    short streak instead of stalling dialog in the reorder buffer."""
+
+    def test_sustained_regression_reanchors(self) -> None:
+        msgs: list[dict[str, Any]] = [
+            {"sequenceNumber": 5_000_000, "data": "a"},
+            {"sequenceNumber": 5_000_001, "data": "b"},
+            # Server restart: counter resets to 0.
+            {"sequenceNumber": 0, "data": "r0"},
+            {"sequenceNumber": 1, "data": "r1"},
+            {"sequenceNumber": 2, "data": "r2"},
+            {"sequenceNumber": 3, "data": "r3"},
+            {"sequenceNumber": 4, "data": "r4"},
+        ]
+        result = list(ordered_dialog(_make_sub(msgs)))
+        # Nothing is lost, nothing stalls; after the streak the cursor
+        # follows the new numbering so r3/r4 flow in order.
+        assert result == ["a", "b", "r0", "r1", "r2", "r3", "r4"]
+
+    def test_isolated_stale_redelivery_yields_immediately(self) -> None:
+        msgs: list[dict[str, Any]] = [
+            {"sequenceNumber": 10, "data": "a"},
+            {"sequenceNumber": 5, "data": "stale"},  # behind: yielded, not parked
+            {"sequenceNumber": 11, "data": "b"},
+        ]
+        result = list(ordered_dialog(_make_sub(msgs)))
+        assert result == ["a", "stale", "b"]
+
+    def test_forward_out_of_order_still_buffers(self) -> None:
+        msgs: list[dict[str, Any]] = [
+            {"sequenceNumber": 10, "data": "a"},
+            {"sequenceNumber": 12, "data": "c"},  # ahead: buffered
+            {"sequenceNumber": 11, "data": "b"},
+        ]
+        result = list(ordered_dialog(_make_sub(msgs)))
+        assert result == ["a", "b", "c"]
+
+
+class TestMonitorLogging:
+    """Findings 15 and 26: the primary data record must survive
+    logrotate and carry UTC timestamps."""
+
+    def test_file_handler_is_watched(self, tmp_path: Any) -> None:
+        from sfmc_api.monitor_glider import setup_logging
+
+        dialog_log, _ = setup_logging("logtest", str(tmp_path / "d.log"))
+        assert any(isinstance(h, logging.handlers.WatchedFileHandler) for h in dialog_log.handlers)
+        for h in dialog_log.handlers:
+            h.close()
+
+    def test_timestamps_are_utc(self, tmp_path: Any) -> None:
+        from sfmc_api.monitor_glider import setup_logging
+
+        dialog_log, _ = setup_logging("utctest", str(tmp_path / "d.log"))
+        fmt = dialog_log.handlers[0].formatter
+        assert fmt is not None
+        record = logging.LogRecord("n", logging.INFO, "p", 0, "m", (), None)
+        record.created = 0.0  # epoch
+        assert fmt.formatTime(record).startswith("1970-01-01T00:00:00")
+        for h in dialog_log.handlers:
+            h.close()
+
+
+class TestStartupRetry:
+    """Finding 14: a transient boot-time failure must be retried like
+    any steady-state failure, not exit before the loop starts."""
+
+    def test_initial_status_retried(self) -> None:
+        from sfmc_api.monitor_glider import monitor_glider
+
+        client = MagicMock()
+        client.get_glider_details.side_effect = [
+            SFMCError("DNS not up yet"),
+            {"data": {"state": "connected", "id": 8}},
+        ]
+        # Succeed startup, then make the stream session end fatally to
+        # exit the test quickly via the no-reconnect path... instead,
+        # use stop: set it during the first session wait.
+        stop = threading.Event()
+
+        def stop_soon(*args: Any, **kwargs: Any) -> MagicMock:
+            stop.set()
+            raise SFMCError("no stream in this test")
+
+        client.open_stream.side_effect = stop_soon
+        client.get_active_deployment_details.return_value = {"data": {}}
+
+        monitor_glider(
+            client,
+            "g1",
+            MagicMock(spec=logging.Logger),
+            MagicMock(spec=logging.Logger),
+            MagicMock(spec=logging.Logger),
+            stop=stop,
+            reconnect_initial_delay=0.0,
+            reconnect_max_delay=0.0,
+            reconnect_jitter=0.0,
+        )
+
+        assert client.get_glider_details.call_count == 2
+
+    def test_no_reconnect_startup_failure_still_raises(self) -> None:
+        from sfmc_api.monitor_glider import monitor_glider
+
+        client = MagicMock()
+        client.get_glider_details.side_effect = SFMCError("down")
+
+        with pytest.raises(SFMCError, match="down"):
+            monitor_glider(
+                client,
+                "g1",
+                MagicMock(spec=logging.Logger),
+                MagicMock(spec=logging.Logger),
+                MagicMock(spec=logging.Logger),
+                reconnect=False,
+            )

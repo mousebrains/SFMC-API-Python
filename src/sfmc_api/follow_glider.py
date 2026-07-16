@@ -1125,7 +1125,30 @@ def follow_glider(
 
     # ── Verify glider exists (skip in offline replay) ───────────
     if client is not None and not replay:
-        details = client.get_glider_details(glider_name)
+        # Retried like the session loop: a service started at boot,
+        # before DNS/WAN is up, must not exit on a transient failure
+        # the steady-state supervisor would have ridden out.
+        startup_backoff = ReconnectBackoff(
+            initial_delay=reconnect_initial_delay,
+            max_delay=reconnect_max_delay,
+            stable_after=reconnect_stable_after,
+            jitter=reconnect_jitter,
+        )
+        while True:
+            try:
+                details = client.get_glider_details(glider_name)
+                break
+            except SFMCError as exc:
+                if not reconnect:
+                    raise
+                delay = startup_backoff.next_delay(subscribed_uptime=None)
+                info_log.warning(
+                    "startup glider check failed (%s); retrying in %.1fs",
+                    safe_stream_error(exc),
+                    delay.actual,
+                )
+                if stop.wait(delay.actual):
+                    return stats
         try:
             glider_state = details["data"]["state"]
         except (KeyError, TypeError) as exc:

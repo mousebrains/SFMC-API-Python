@@ -117,6 +117,24 @@ def _validate_waypoints(waypoints: list[tuple[float, float]]) -> None:
             )
 
 
+def _format_dddmm(value: float) -> str:
+    """Format a DDDMM value to 4 decimals, carrying rounded-up minutes.
+
+    A latitude a hair under 45° converts to 4459.99999..., which naive
+    ``%.4f`` renders as ``4460.0000`` — 60 minutes, an invalid DDMM
+    value that a validating firmware decoder may reject (the classic
+    NMEA carry bug).  Rounding first and carrying 60 minutes into the
+    degrees keeps every emitted coordinate well-formed.
+    """
+    sign = "-" if value < 0 else ""
+    absolute = round(abs(value), 4)
+    degrees, minutes = divmod(absolute, 100.0)
+    if minutes >= 60.0 - 5e-5:
+        degrees += 1.0
+        minutes = 0.0
+    return f"{sign}{degrees * 100.0 + minutes:.4f}"
+
+
 def generate_goto_ma(
     waypoints: list[tuple[float, float]],
     sequence_number: int,
@@ -184,7 +202,7 @@ def generate_goto_ma(
     for lon_deg, lat_deg in waypoints:
         lon_ddmm = decimal_to_dddmm(lon_deg)
         lat_ddmm = decimal_to_dddmm(lat_deg)
-        lines.append(f"{lon_ddmm:.4f}\t{lat_ddmm:.4f}")
+        lines.append(f"{_format_dddmm(lon_ddmm)}\t{_format_dddmm(lat_ddmm)}")
 
     lines.append("<end:waypoints>")
     lines.append("")  # Trailing newline.
