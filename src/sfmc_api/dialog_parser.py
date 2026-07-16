@@ -60,6 +60,13 @@ non-sensor line (such as ``ABORT HISTORY``).  Partial surfacings
 (e.g. if the Iridium connection drops before the GPS line) are
 silently discarded.
 
+Iridium corruption can garble any line, so a line that matches a
+pattern but yields unparseable or physically impossible numbers
+(DDMM minutes ≥ 60, |latitude| > 90°, |longitude| > 180°, absurd fix
+age, non-finite sensor value) is logged and dropped rather than
+raised or stored — a corrupt fix must neither kill the service nor
+steer the glider.
+
 Typical usage::
 
     parser = DialogParser()
@@ -72,11 +79,50 @@ Typical usage::
 from __future__ import annotations
 
 import contextlib
+import logging
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from sfmc_api.coordinates import dddmm_to_decimal
+
+logger = logging.getLogger(__name__)
+
+#: Upper bound on a believable ``secs ago`` GPS fix age.  The glider
+#: emits ~1.8e308 as a no-fix sentinel, and Iridium corruption can
+#: produce arbitrary in-regex garbage; anything this old is not a fix.
+_GPS_AGE_MAX_SECS = 1e8
+
+
+def _try_float(text: str) -> float | None:
+    """Convert regex-captured numeric text, or ``None`` if degenerate.
+
+    The permissive character classes in the dialog patterns can match
+    strings ``float`` rejects (``4439..300``, ``-e+``) when Iridium
+    corrupts a line, and those must never raise out of the parser.
+    """
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _valid_ddmm(ddmm: float, max_degrees: int) -> bool:
+    """True if a DDMM.MMMM value is a physically possible coordinate.
+
+    Requires finite input, minutes < 60, and degrees within
+    ``±max_degrees`` (the pole/antimeridian itself only with zero
+    minutes).  A single corrupted digit usually produces a value that
+    still matches the GPS regex but fails one of these bounds.
+    """
+    if not math.isfinite(ddmm):
+        return False
+    degrees, minutes = divmod(abs(ddmm), 100.0)
+    if minutes >= 60.0:
+        return False
+    return degrees < max_degrees or (degrees == max_degrees and minutes == 0.0)
+
 
 # The glider firmware emits English month abbreviations regardless of
 # the host's locale.  Mapping them explicitly avoids ``strptime``'s
@@ -328,36 +374,49 @@ class DialogParser:
 
     def _try_gps_location(self, line: str) -> bool:
         m = GPS_LOCATION_RE.search(line)
-        if m and self._current is not None:
-            lat_ddmm = float(m.group(1))
-            lon_ddmm = float(m.group(2))
-            age = float(m.group(3))
-            self._current.gps_lat_ddmm = lat_ddmm
-            self._current.gps_lon_ddmm = lon_ddmm
-            self._current.gps_lat = dddmm_to_decimal(lat_ddmm)
-            self._current.gps_lon = dddmm_to_decimal(lon_ddmm)
-            self._current.gps_age_secs = age
-            self._has_gps = True
+        if not m or self._current is None:
+            return False
+        lat_ddmm = _try_float(m.group(1))
+        lon_ddmm = _try_float(m.group(2))
+        age = _try_float(m.group(3))
+        if (
+            lat_ddmm is None
+            or lon_ddmm is None
+            or age is None
+            or not _valid_ddmm(lat_ddmm, 90)
+            or not _valid_ddmm(lon_ddmm, 180)
+            or not 0.0 <= age <= _GPS_AGE_MAX_SECS
+        ):
+            # Consumed but not stored: a garbled fix must neither raise
+            # nor steer, and must not terminate the sensor block.
+            logger.warning("Rejected implausible GPS line: %r", line)
             return True
-        return False
+        self._current.gps_lat_ddmm = lat_ddmm
+        self._current.gps_lon_ddmm = lon_ddmm
+        self._current.gps_lat = dddmm_to_decimal(lat_ddmm)
+        self._current.gps_lon = dddmm_to_decimal(lon_ddmm)
+        self._current.gps_age_secs = age
+        self._has_gps = True
+        return True
 
     def _try_sensor(self, line: str) -> bool:
         m = SENSOR_RE.search(line)
-        if m and self._current is not None:
-            name = m.group(1)
-            unit = m.group(2)
-            value = float(m.group(3))
-            age = float(m.group(4))
-            self._current.sensors[name] = SensorReading(
-                name=name,
-                unit=unit,
-                value=value,
-                age_secs=age,
-            )
-            self._has_sensors = True
-            self._in_sensor_block = True
+        if not m or self._current is None:
+            return False
+        value = _try_float(m.group(3))
+        age = _try_float(m.group(4))
+        if value is None or age is None or not math.isfinite(value):
+            logger.warning("Rejected unparseable sensor line: %r", line)
             return True
-        return False
+        self._current.sensors[m.group(1)] = SensorReading(
+            name=m.group(1),
+            unit=m.group(2),
+            value=value,
+            age_secs=age,
+        )
+        self._has_sensors = True
+        self._in_sensor_block = True
+        return True
 
     # ── Helpers ─────────────────────────────────────────────────
 
