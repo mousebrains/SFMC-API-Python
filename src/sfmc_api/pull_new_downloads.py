@@ -121,6 +121,62 @@ _EXTRACT_CHUNK_BYTES = 64 * 1024
 
 _STATE_VERSION = 1
 
+#: Sanity bound for advancing the high-water mark: a Dinkum mtime this
+#: far beyond the local UTC clock is treated as a corrupt glider RTC
+#: (bad year, GPS week rollover) rather than real time.  The observed
+#: glider-vs-dockserver skew is tens of minutes, so three days cannot
+#: misfire on legitimate clock drift, while a future-dated mark —
+#: which never regresses — would silently prefilter away every real
+#: file forever.  A stalled mark only widens the listing window;
+#: name-based dedup keeps that harmless.
+_HWM_MAX_FUTURE = timedelta(days=3)
+
+
+def _mtime_implausibly_future(mtime: str) -> bool:
+    """True if *mtime* is too far in the future to trust for the mark."""
+    try:
+        dt = datetime.strptime(mtime, _MTIME_FMT).replace(tzinfo=UTC)
+    except ValueError:
+        return True  # unparseable timestamps must never set the mark
+    return dt > datetime.now(UTC) + _HWM_MAX_FUTURE
+
+
+def _sanitize_entry(entry: Any) -> dict[str, Any] | None:
+    """Validate one listing entry, returning a normalized copy or ``None``.
+
+    One malformed entry (missing/None ``fileName``, unparseable
+    ``dateTimeModified``, garbage ``fileSize``) must cost itself, not
+    the pass: an exception in a listing walk would make the identical
+    batch fail on every retry, permanently wedging all downloads.
+    A string-typed ``fileSize`` is normalized to ``int`` so the state
+    file the service writes stays loadable on restart.
+    """
+    if not isinstance(entry, dict):
+        logger.warning("skipping non-object listing entry: %.200r", entry)
+        return None
+    name = entry.get("fileName")
+    mtime = entry.get("dateTimeModified")
+    size = entry.get("fileSize")
+    if isinstance(size, str) and size.isdigit():
+        size = int(size)
+    valid = (
+        isinstance(name, str)
+        and name != ""
+        and isinstance(mtime, str)
+        and isinstance(size, int)
+        and not isinstance(size, bool)
+        and size >= 0
+    )
+    if valid:
+        try:
+            datetime.strptime(mtime, _MTIME_FMT)  # type: ignore[arg-type]
+        except ValueError:
+            valid = False
+    if not valid:
+        logger.warning("skipping malformed listing entry: %.200r", entry)
+        return None
+    return {"fileName": name, "dateTimeModified": mtime, "fileSize": size}
+
 
 # ── State file ───────────────────────────────────────────────────────
 
@@ -185,20 +241,52 @@ class PullState:
         return cls(hwm=hwm, files=files)
 
     def save(self, path: Path) -> None:
-        """Atomically write state to *path*."""
+        """Atomically and durably write state to *path*.
+
+        The temp file is fsynced before the rename and the directory
+        after it: ``write + replace`` alone is atomic against a process
+        crash but not against power loss, and a zero-length state file
+        crash-loops the service until someone deletes it — a recovery
+        that re-baselines and silently skips backlog.
+        """
         payload = json.dumps(
             {"version": _STATE_VERSION, "hwm": self.hwm, "files": self.files},
             indent=1,
         )
         tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(payload, encoding="utf-8")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
         tmp.replace(path)
+        try:
+            dir_fd = os.open(path.parent, os.O_RDONLY)
+        except OSError:
+            return  # directory fsync unsupported here; rename is still atomic
+        try:
+            os.fsync(dir_fd)
+        except OSError:
+            pass
+        finally:
+            os.close(dir_fd)
 
     def observe(self, name: str, mtime: str, size: int) -> None:
         """Record a file; Dinkum-named entries advance the high-water mark."""
         self.files[name] = {"size": size, "mtime": mtime}
-        if _DINKUM_NAME_RE.match(name) and (self.hwm is None or mtime > self.hwm):
-            self.hwm = mtime
+        if not _DINKUM_NAME_RE.match(name):
+            return
+        if self.hwm is not None and mtime <= self.hwm:
+            return
+        if _mtime_implausibly_future(mtime):
+            # The mark never regresses, so one future-dated entry would
+            # otherwise hide every real file forever with no warnings.
+            logger.warning(
+                "not advancing high-water mark to implausibly future %s (%s)",
+                mtime,
+                name,
+            )
+            return
+        self.hwm = mtime
 
     def is_new(self, name: str, mtime: str) -> bool:
         """True if *name* is unseen, or seen with a different mtime."""
@@ -295,7 +383,10 @@ def list_new_files(
         cutoff = cutoff_before(state.hwm, margin_minutes)
 
     new: list[dict[str, Any]] = []
-    for entry in _iter_listing(client, glider_name, cutoff):
+    for raw_entry in _iter_listing(client, glider_name, cutoff):
+        entry = _sanitize_entry(raw_entry)
+        if entry is None:
+            continue
         name = entry["fileName"]
         if connected and not _DINKUM_NAME_RE.match(name):
             logger.debug("deferring possibly in-flight entry %s", name)
@@ -446,14 +537,20 @@ def baseline(
     unset and every entry walked is recorded; reconciles then run
     unfiltered until the first rename appears.
     """
-    for entry in _iter_listing(client, glider_name, None):
+    for raw_entry in _iter_listing(client, glider_name, None):
+        entry = _sanitize_entry(raw_entry)
+        if entry is None:
+            continue
         state.observe(entry["fileName"], entry["dateTimeModified"], entry["fileSize"])
         if state.hwm is not None:
             break
 
     if state.hwm is not None:
         cutoff = cutoff_before(state.hwm, margin_minutes)
-        for entry in _iter_listing(client, glider_name, cutoff):
+        for raw_entry in _iter_listing(client, glider_name, cutoff):
+            entry = _sanitize_entry(raw_entry)
+            if entry is None:
+                continue
             state.observe(entry["fileName"], entry["dateTimeModified"], entry["fileSize"])
     else:
         logger.warning(
@@ -731,6 +828,29 @@ def _nonnegative_int(value: str) -> int:
     return n
 
 
+def _positive_float(value: str) -> float:
+    """argparse type: a finite float > 0.
+
+    Zero would busy-loop the listing endpoint (a 0-second poll interval
+    stays 0 through the 1.5x backoff), and a negative value raises
+    ValueError from ``queue.get`` deep inside the session loop, turning
+    every session into an eternal reconnect cycle that processes
+    nothing.
+    """
+    f = float(value)
+    if not (f > 0 and f != float("inf")):
+        raise argparse.ArgumentTypeError("must be a positive number of seconds")
+    return f
+
+
+def _positive_int(value: str) -> int:
+    """argparse type: an integer >= 1."""
+    n = int(value)
+    if n < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return n
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for ``sfmc-pull-new-downloads``."""
     parser = argparse.ArgumentParser(
@@ -784,7 +904,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--settle-poll",
-        type=float,
+        type=_positive_float,
         default=60.0,
         metavar="SECS",
         help=(
@@ -794,21 +914,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--settle-quiet",
-        type=int,
+        type=_positive_int,
         default=3,
         metavar="N",
         help="Quiet polls before a settle window ends (default: 3)",
     )
     parser.add_argument(
         "--settle-timeout",
-        type=float,
+        type=_positive_float,
         default=1800.0,
         metavar="SECS",
         help="Hard limit on a settle window (default: 1800)",
     )
     parser.add_argument(
         "--reconcile-interval",
-        type=float,
+        type=_positive_float,
         default=900.0,
         metavar="SECS",
         help="Idle listing check as missed-event backstop (default: 900)",
@@ -851,7 +971,8 @@ def main() -> None:
             # as seen without downloading it.
             if not state_path.exists():
                 baseline(client, args.glider_name, state, state_path, args.margin_minutes)
-            else:
+            elif args.once:
+                # Cron mode: a failed pass must fail loudly (exit 1).
                 caught_up = reconcile(
                     client,
                     args.glider_name,
@@ -859,6 +980,19 @@ def main() -> None:
                     state,
                     state_path,
                     args.margin_minutes,
+                    connected=glider_is_connected(client, args.glider_name),
+                )
+                if caught_up:
+                    logger.info("startup catch-up downloaded %d file(s)", caught_up)
+            else:
+                # Service mode: a transient boot-time failure must not
+                # exit before the resilient stream loop even starts —
+                # the idle reconcile and reconnect catch-up retry it.
+                caught_up = try_reconcile(
+                    client,
+                    args,
+                    state,
+                    state_path,
                     connected=glider_is_connected(client, args.glider_name),
                 )
                 if caught_up:

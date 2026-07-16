@@ -578,3 +578,116 @@ class TestStreamOnceMalformedEvents:
         )
         transfers.assert_called_once()
         assert transfers.call_args[0][1] == 40633
+
+
+class TestListingEntrySanitization:
+    """Finding 6: one malformed listing entry must cost itself, not
+    permanently wedge every future download pass."""
+
+    def test_malformed_entries_skipped_valid_kept(self) -> None:
+        client = MagicMock()
+        client.get_folder_file_listing.return_value = {
+            "limit": 20,
+            "results": [
+                {"fileName": None, "dateTimeModified": "2026-07-11 01:00:00", "fileSize": 1},
+                {"dateTimeModified": "2026-07-11 01:00:00", "fileSize": 1},
+                {"fileName": "g-2026-192-0-2.sbd", "dateTimeModified": "07/11/26", "fileSize": 1},
+                "not-an-object",
+                {
+                    "fileName": "g-2026-192-0-1.sbd",
+                    "dateTimeModified": "2026-07-11 01:23:44",
+                    "fileSize": 6841,
+                },
+            ],
+        }
+
+        new = list_new_files(client, "osusim", PullState(), margin_minutes=5)
+
+        assert [e["fileName"] for e in new] == ["g-2026-192-0-1.sbd"]
+
+    def test_string_filesize_normalized_to_int(self) -> None:
+        """Finding 17: a stringified size must not round-trip into a
+        state file that PullState.load then rejects on restart."""
+        client = MagicMock()
+        client.get_folder_file_listing.return_value = {
+            "limit": 20,
+            "results": [
+                {
+                    "fileName": "g-2026-192-0-1.sbd",
+                    "dateTimeModified": "2026-07-11 01:23:44",
+                    "fileSize": "6841",
+                },
+            ],
+        }
+
+        new = list_new_files(client, "osusim", PullState(), margin_minutes=5)
+
+        assert new[0]["fileSize"] == 6841
+        assert isinstance(new[0]["fileSize"], int)
+
+    def test_baseline_skips_malformed_entries(self, tmp_path: Path) -> None:
+        client = MagicMock()
+        client.get_folder_file_listing.return_value = {
+            "limit": 20,
+            "results": [
+                {"fileName": None, "dateTimeModified": "x", "fileSize": 1},
+                entry("g-2026-191-0-9.sbd", "2026-07-11 01:00:00", 694),
+            ],
+        }
+        state = PullState()
+
+        baseline(client, "osusim", state, tmp_path / "state.json", margin_minutes=5)
+
+        assert "g-2026-191-0-9.sbd" in state.files
+        assert len(state.files) == 1
+
+
+class TestHwmPlausibility:
+    """Finding 7: one future-dated Dinkum mtime must not silently
+    poison the high-water mark forever."""
+
+    def test_implausibly_future_mtime_does_not_advance_hwm(self) -> None:
+        state = PullState()
+        state.observe("g-2026-191-0-9.sbd", "2026-07-11 01:00:00", 694)
+        state.observe("g-2080-001-0-1.sbd", "2080-01-01 00:00:00", 100)
+        assert state.hwm == "2026-07-11 01:00:00"
+
+    def test_future_file_still_recorded_for_dedup(self) -> None:
+        state = PullState()
+        state.observe("g-2080-001-0-1.sbd", "2080-01-01 00:00:00", 100)
+        assert state.hwm is None
+        assert "g-2080-001-0-1.sbd" in state.files
+
+    def test_slightly_future_mtime_still_advances(self) -> None:
+        """Tens-of-minutes glider clock skew is real and must pass."""
+        from datetime import UTC, datetime, timedelta
+
+        near_future = (datetime.now(UTC) + timedelta(minutes=45)).strftime("%Y-%m-%d %H:%M:%S")
+        state = PullState()
+        state.observe("g-2026-196-0-1.sbd", near_future, 100)
+        assert state.hwm == near_future
+
+
+class TestIntervalArgValidation:
+    """Finding 18: interval options must reject zero/negative values
+    that busy-loop the listing endpoint or kill every session."""
+
+    @pytest.mark.parametrize("flag", ["--settle-poll", "--settle-timeout", "--reconcile-interval"])
+    @pytest.mark.parametrize("value", ["0", "-5", "inf"])
+    def test_nonpositive_intervals_rejected(self, flag: str, value: str) -> None:
+        from sfmc_api.pull_new_downloads import build_parser
+
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(["osusim", "/tmp/out", flag, value])
+
+    def test_settle_quiet_zero_rejected(self) -> None:
+        from sfmc_api.pull_new_downloads import build_parser
+
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(["osusim", "/tmp/out", "--settle-quiet", "0"])
+
+    def test_valid_intervals_accepted(self) -> None:
+        from sfmc_api.pull_new_downloads import build_parser
+
+        args = build_parser().parse_args(["osusim", "/tmp/out", "--settle-poll", "1.5"])
+        assert args.settle_poll == 1.5
