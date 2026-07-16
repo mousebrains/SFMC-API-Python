@@ -266,3 +266,53 @@ class TestMainArgparse:
         assert isinstance(mock_monitor.call_args.kwargs["stop"], threading.Event)
         assert signal.getsignal(signal.SIGINT) == previous_int
         assert signal.getsignal(signal.SIGTERM) == previous_term
+
+
+class TestOrderedDialogMalformedMessages:
+    """Server-data variance must cost one skipped message, not the
+    service (finding 3 of the robustness review)."""
+
+    def test_non_dict_messages_skipped(self) -> None:
+        q: Queue[Any] = Queue()
+        q.put([40633])  # bare array, verifiably real on the zmodem topic
+        q.put({"sequenceNumber": 0, "data": "a"})
+        q.put("junk")
+        q.put({"sequenceNumber": 1, "data": "b"})
+        q.put(None)
+        result = list(ordered_dialog(StompSubscription("sub", "/test", q)))
+        assert result == ["a", "b"]
+
+    def test_null_data_field_skipped(self) -> None:
+        q: Queue[Any] = Queue()
+        q.put({"sequenceNumber": 0, "data": None})
+        q.put({"sequenceNumber": 1, "data": "b"})
+        q.put(None)
+        result = list(ordered_dialog(StompSubscription("sub", "/test", q)))
+        assert result == ["b"]
+
+    def test_non_int_sequence_yields_immediately(self) -> None:
+        q: Queue[Any] = Queue()
+        q.put({"sequenceNumber": "seven", "data": "x"})
+        q.put(None)
+        result = list(ordered_dialog(StompSubscription("sub", "/test", q)))
+        assert result == ["x"]
+
+
+class TestMonitorScriptsMalformedEvents:
+    def test_non_dict_event_skipped(self) -> None:
+        from sfmc_api.monitor_glider import monitor_scripts
+
+        q: Queue[Any] = Queue()
+        q.put([1, 2, 3])
+        q.put(
+            {
+                "scriptName": "s.xml",
+                "scriptType": "factory",
+                "scriptState": "running",
+                "paused": False,
+            }
+        )
+        q.put(None)
+        log = MagicMock()
+        monitor_scripts(StompSubscription("sub", "/test", q), log, threading.Event())
+        log.info.assert_called_once()

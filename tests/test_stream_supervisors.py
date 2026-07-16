@@ -312,10 +312,19 @@ def test_follow_unexpected_dialog_processing_error_is_fatal(
     _reset_follower(stop, stop_after=None)
     client = _client()
     client.subscribe_glider_output.return_value = _subscription(
-        [{"sequenceNumber": 0, "data": object()}]
+        [{"sequenceNumber": 0, "data": "line\n"}]
     )
 
-    with pytest.raises(RuntimeError, match="dialog reader failed"):
+    # Malformed server data is skipped (not fatal), so a genuine code
+    # bug is injected at the dialog-processing boundary to verify the
+    # fatal-by-design policy for non-StompError worker failures.
+    with (
+        patch(
+            "sfmc_api.follow_glider.ordered_dialog",
+            side_effect=RuntimeError("injected bug"),
+        ),
+        pytest.raises(RuntimeError, match="dialog reader failed"),
+    ):
         follow_glider(
             client=client,
             glider_name="testbot",
@@ -512,9 +521,18 @@ def test_monitor_stop_interrupts_reconnect_wait() -> None:
 def test_monitor_unexpected_worker_error_is_fatal() -> None:
     client = _client()
     client.subscribe_glider_output.return_value = _subscription([], blocking=True)
-    client.subscribe_script_events.return_value = _subscription(["not-a-dict"])  # type: ignore[list-item]
+    client.subscribe_script_events.return_value = _subscription([{"scriptName": "s"}])
 
-    with pytest.raises(RuntimeError, match="script monitor failed"):
+    # Malformed server data is skipped (not fatal), so a genuine code
+    # bug is injected into the script worker to verify the
+    # fatal-by-design policy for non-StompError worker failures.
+    with (
+        patch(
+            "sfmc_api.monitor_glider.monitor_scripts",
+            side_effect=RuntimeError("injected bug"),
+        ),
+        pytest.raises(RuntimeError, match="script monitor failed"),
+    ):
         monitor_glider(
             client,
             "testbot",

@@ -894,3 +894,109 @@ class TestConnectLifecycleGuards:
         finally:
             mock_ws.send.side_effect = None
             conn.disconnect()
+
+
+class TestMalformedStreamData:
+    """Malformed stream data must cost one message, not the session
+    (findings 3, 8, and 10 of the robustness review)."""
+
+    def _connect_with_gated_frames(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig, frames: list[str]
+    ) -> tuple[StompConnection, Any]:
+        """Handshake, subscribe, then release *frames* to the receiver."""
+        mock_ws = MagicMock()
+        gate = threading.Event()
+        calls = {"n": 0}
+        frame_iter = iter(frames)
+
+        def gated_recv(timeout: float = 0) -> str:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _OPEN
+            if calls["n"] == 2:
+                return _CONNECTED
+            gate.wait(timeout=5)
+            try:
+                return next(frame_iter)
+            except StopIteration:
+                raise TimeoutError from None
+
+        mock_ws.recv.side_effect = gated_recv
+        mock_ws_connect.return_value = mock_ws
+
+        conn = StompConnection(config, "tok")
+        conn.connect()
+        sub = conn.subscribe("/topic/test")
+        gate.set()
+        return conn, sub
+
+    def test_sockjs_array_with_non_string_elements(self) -> None:
+        result = _sockjs_decode('a[null, 42, "MESSAGE\\n\\nbody\\u0000"]')
+        assert result is not None
+        assert len(result) == 1
+        assert result[0].startswith("MESSAGE")
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_null_body_wrapped_not_confused_with_close_sentinel(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig
+    ) -> None:
+        """A JSON body of literal ``null`` must not enqueue ``None``,
+        which every consumer reads as "subscription closed"."""
+        frame = _sockjs_message_frame("MESSAGE", {"subscription": "sub-0"}, "null")
+        conn, sub = self._connect_with_gated_frames(mock_ws_connect, config, [frame])
+
+        msg = sub.get(timeout=2)
+        assert msg == {"_raw": "null"}
+        assert conn._connected
+
+        conn.disconnect()
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_array_body_passes_through(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig
+    ) -> None:
+        """Bare JSON arrays are real on SFMC topics (zmodem events)."""
+        frame = _sockjs_message_frame("MESSAGE", {"subscription": "sub-0"}, "[40633]")
+        conn, sub = self._connect_with_gated_frames(mock_ws_connect, config, [frame])
+
+        msg = sub.get(timeout=2)
+        assert msg == [40633]
+
+        conn.disconnect()
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_scalar_body_wrapped(self, mock_ws_connect: MagicMock, config: SFMCConfig) -> None:
+        frame = _sockjs_message_frame("MESSAGE", {"subscription": "sub-0"}, "42")
+        conn, sub = self._connect_with_gated_frames(mock_ws_connect, config, [frame])
+
+        msg = sub.get(timeout=2)
+        assert msg == {"_raw": "42"}
+
+        conn.disconnect()
+
+    @patch("sfmc_api.stomp.ws_connect")
+    def test_dispatch_error_skips_frame_keeps_session(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig
+    ) -> None:
+        """An exception while dispatching one frame must not tear down
+        the session (previously misreported as a normal close)."""
+        from sfmc_api.stomp import _parse_frame as real_parse
+
+        def flaky(raw: str) -> Any:
+            if raw.startswith("POISON"):
+                raise RuntimeError("boom")
+            return real_parse(raw)
+
+        poison_then_good = (
+            'a["POISON\\n\\nx\\u0000","MESSAGE\\nsubscription:sub-0\\n\\n{\\"k\\":1}\\u0000"]'
+        )
+        with patch("sfmc_api.stomp._parse_frame", side_effect=flaky):
+            conn, sub = self._connect_with_gated_frames(
+                mock_ws_connect, config, [poison_then_good]
+            )
+            msg = sub.get(timeout=2)
+
+        assert msg == {"k": 1}
+        assert conn._connected
+
+        conn.disconnect()

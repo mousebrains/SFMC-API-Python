@@ -261,7 +261,7 @@ def _parse_log_line(line: str) -> str | None:
 
 def _file_reader(
     replay_path: str | Path,
-    out_queue: Queue[dict[str, Any] | StompError | None],
+    out_queue: Queue[dict[str, Any] | list[Any] | StompError | None],
     stop: threading.Event,
 ) -> None:
     """Background thread: read a log file and feed lines into a queue.
@@ -297,7 +297,7 @@ def _open_replay(
     Returns the subscription (which can be iterated exactly like a
     live STOMP subscription) and the reader thread (already started).
     """
-    q: Queue[dict[str, Any] | StompError | None] = Queue()
+    q: Queue[dict[str, Any] | list[Any] | StompError | None] = Queue()
     thread = threading.Thread(
         target=_file_reader,
         args=(replay_path, q, stop),

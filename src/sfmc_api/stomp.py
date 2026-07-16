@@ -153,10 +153,22 @@ def _sockjs_decode(data: str) -> list[str] | None:
     if frame_type == "a":
         try:
             messages = json.loads(data[1:])
-            return messages if isinstance(messages, list) else []
         except json.JSONDecodeError:
             logger.warning("Failed to decode SockJS message: %s", data[:200])
             return []
+        if not isinstance(messages, list):
+            return []
+        # Non-string elements (a[null], a[{...}]) would raise deep in
+        # frame parsing and tear down the whole session for one bad
+        # frame — drop the element, keep the session.
+        valid = [m for m in messages if isinstance(m, str)]
+        if len(valid) != len(messages):
+            logger.warning(
+                "Dropping %d non-string SockJS element(s): %s",
+                len(messages) - len(valid),
+                data[:200],
+            )
+        return valid
 
     logger.debug("Unknown SockJS frame type %r: %s", frame_type, data[:200])
     return []
@@ -176,12 +188,12 @@ class StompSubscription:
         self,
         sub_id: str,
         topic: str,
-        queue: Queue[dict[str, Any] | StompError | None],
+        queue: Queue[dict[str, Any] | list[Any] | StompError | None],
         connection: StompConnection | None = None,
     ) -> None:
         self._id = sub_id
         self._topic = topic
-        self._queue: Queue[dict[str, Any] | StompError | None] = queue
+        self._queue: Queue[dict[str, Any] | list[Any] | StompError | None] = queue
         self._connection = connection
         self._closed = threading.Event()
 
@@ -190,8 +202,13 @@ class StompSubscription:
         """The STOMP topic this subscription is listening to."""
         return self._topic
 
-    def __iter__(self) -> Iterator[dict[str, Any]]:
-        """Yield parsed JSON messages until the subscription is closed."""
+    def __iter__(self) -> Iterator[dict[str, Any] | list[Any]]:
+        """Yield parsed JSON message bodies until the subscription is closed.
+
+        Bodies are JSON objects on most topics, but bare JSON arrays on
+        some (zmodem transfer events are arrays of connection IDs) —
+        consumers must check the shape before use.
+        """
         while True:
             try:
                 msg = self.get(timeout=1.0)
@@ -201,7 +218,7 @@ class StompSubscription:
                 break
             yield msg
 
-    def get(self, timeout: float | None = None) -> dict[str, Any] | None:
+    def get(self, timeout: float | None = None) -> dict[str, Any] | list[Any] | None:
         """Get the next message, or ``None`` if the subscription closed.
 
         After :meth:`close`, messages still buffered in the queue are
@@ -461,7 +478,7 @@ class StompConnection:
             sub_id = f"sub-{self._next_sub_id}"
             self._next_sub_id += 1
 
-            queue: Queue[dict[str, Any] | StompError | None] = Queue(maxsize=maxsize)
+            queue: Queue[dict[str, Any] | list[Any] | StompError | None] = Queue(maxsize=maxsize)
             sub = StompSubscription(sub_id, topic, queue, connection=self)
             self._subscriptions[sub_id] = sub
             self._sub_topics[sub_id] = topic
@@ -525,36 +542,17 @@ class StompConnection:
                     logger.info("SockJS close frame received")
                     break
                 for msg_str in decoded:
-                    frame = _parse_frame(msg_str)
-
-                    if frame.command == "MESSAGE":
-                        sub_id = frame.headers.get("subscription", "")
-                        with self._lock:
-                            sub = self._subscriptions.get(sub_id)
-                        if sub is not None:
-                            try:
-                                payload: dict[str, Any] = json.loads(frame.body)
-                            except json.JSONDecodeError:
-                                payload = {"_raw": frame.body}
-                            try:
-                                sub._queue.put_nowait(payload)
-                            except Full:
-                                logger.warning(
-                                    "Subscription %s queue full, dropping message",
-                                    sub._id,
-                                )
-                    elif frame.command == "ERROR":
-                        logger.error("STOMP ERROR: %s", frame.body)
-                        err = StompError(f"STOMP server error: {frame.body}")
-                        with self._lock:
-                            subs = list(self._subscriptions.values())
-                        for sub in subs:
-                            with contextlib.suppress(Full):
-                                sub._queue.put_nowait(err)
-                    elif frame.command == "HEARTBEAT":
-                        pass
-                    else:
-                        logger.debug("STOMP frame: %s", frame.command)
+                    try:
+                        self._dispatch_message(msg_str)
+                    except Exception:
+                        # One malformed frame must cost at most itself,
+                        # not the session — and the failure must be
+                        # attributed here, not misreported downstream
+                        # as a normal close.
+                        logger.exception(
+                            "Error dispatching STOMP frame, skipping: %.200s",
+                            msg_str,
+                        )
         finally:
             # The connection is unusable once this thread exits: clear
             # the connected flag first so subscribe() fails fast
@@ -567,3 +565,43 @@ class StompConnection:
                 remaining = list(self._subscriptions.values())
             for sub in remaining:
                 sub.close()
+
+    def _dispatch_message(self, msg_str: str) -> None:
+        """Parse one STOMP frame string and route it to subscribers."""
+        frame = _parse_frame(msg_str)
+
+        if frame.command == "MESSAGE":
+            sub_id = frame.headers.get("subscription", "")
+            with self._lock:
+                sub = self._subscriptions.get(sub_id)
+            if sub is not None:
+                try:
+                    payload: dict[str, Any] | list[Any] = json.loads(frame.body)
+                except json.JSONDecodeError:
+                    payload = {"_raw": frame.body}
+                # Objects and arrays are both real on SFMC topics
+                # (zmodem events are bare arrays of connection IDs).
+                # Anything else — notably a literal ``null``, which
+                # would collide with the queue's close sentinel — is
+                # wrapped the same way as unparseable bodies.
+                if not isinstance(payload, dict | list):
+                    payload = {"_raw": frame.body}
+                try:
+                    sub._queue.put_nowait(payload)
+                except Full:
+                    logger.warning(
+                        "Subscription %s queue full, dropping message",
+                        sub._id,
+                    )
+        elif frame.command == "ERROR":
+            logger.error("STOMP ERROR: %s", frame.body)
+            err = StompError(f"STOMP server error: {frame.body}")
+            with self._lock:
+                subs = list(self._subscriptions.values())
+            for sub in subs:
+                with contextlib.suppress(Full):
+                    sub._queue.put_nowait(err)
+        elif frame.command == "HEARTBEAT":
+            pass
+        else:
+            logger.debug("STOMP frame: %s", frame.command)

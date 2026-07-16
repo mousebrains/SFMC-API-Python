@@ -526,3 +526,55 @@ class TestZipMemberSizeVerification:
 
         assert n == 1
         assert (outdir / "g-2026-192-0-2.sbd").read_bytes() == content
+
+
+class TestStreamOnceMalformedEvents:
+    """One malformed connection event must not tear down the STOMP
+    session (finding 16 of the robustness review)."""
+
+    def _run_stream_once(self, tmp_path: Path, events: list[Any]) -> tuple[MagicMock, MagicMock]:
+        import argparse
+        from unittest.mock import patch
+
+        from sfmc_api.pull_new_downloads import PullState, stream_once
+
+        client = MagicMock()
+        conn_q: queue_mod.Queue[Any] = queue_mod.Queue()
+        for e in events:
+            conn_q.put(e)
+        conn_q.put(None)  # close sentinel ends the session loop
+        zmodem_q: queue_mod.Queue[Any] = queue_mod.Queue()
+        client.subscribe_connection_events.return_value = StompSubscription("sub-0", "/t", conn_q)
+        client.subscribe_zmodem_transfer_events.return_value = StompSubscription(
+            "sub-1", "/t2", zmodem_q
+        )
+        args = argparse.Namespace(
+            glider_name="osusim",
+            settle_poll=1,
+            settle_quiet=2,
+            settle_timeout=30,
+            reconcile_interval=600,
+        )
+        with (
+            patch("sfmc_api.pull_new_downloads.glider_is_connected", return_value=False),
+            patch("sfmc_api.pull_new_downloads.try_reconcile", return_value=0) as reconcile,
+            patch("sfmc_api.pull_new_downloads.log_transfers") as transfers,
+        ):
+            stream_once(client, args, PullState(), tmp_path / "state.json")
+        return reconcile, transfers
+
+    def test_non_dict_events_skipped(self, tmp_path: Path) -> None:
+        _, transfers = self._run_stream_once(
+            tmp_path,
+            [[40633, "junk"], [{"active": False, "startDateTime": "s", "endDateTime": "e"}]],
+        )
+        # The id-less close event is tolerated: no transfer log, no crash.
+        transfers.assert_not_called()
+
+    def test_close_event_with_id_logs_transfers(self, tmp_path: Path) -> None:
+        _, transfers = self._run_stream_once(
+            tmp_path,
+            [[{"active": False, "id": 40633, "startDateTime": "s", "endDateTime": "e"}]],
+        )
+        transfers.assert_called_once()
+        assert transfers.call_args[0][1] == 40633

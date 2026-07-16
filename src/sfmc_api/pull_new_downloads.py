@@ -609,6 +609,11 @@ def stream_once(
             events = ([msg] if msg else []) + drained
             for event_list in events:
                 for event in event_list if isinstance(event_list, list) else [event_list]:
+                    if not isinstance(event, dict):
+                        # One malformed element must not tear down the
+                        # session and churn through a reconnect cycle.
+                        logger.warning("skipping non-object connection event: %.200r", event)
+                        continue
                     if event.get("active") is False:
                         logger.info(
                             "connection %s closed (%s — %s)",
@@ -617,7 +622,11 @@ def stream_once(
                             event.get("endDateTime"),
                         )
                         connected = False
-                        log_transfers(client, event["id"])
+                        conn_id = event.get("id")
+                        if conn_id is not None:
+                            log_transfers(client, conn_id)
+                        else:
+                            logger.warning("close event has no connection id: %.200r", event)
                         settle_until = now + args.settle_timeout
                         quiet_polls = 0
                         window_downloads = 0

@@ -90,8 +90,20 @@ def ordered_dialog(
 
     try:
         for msg in sub:
+            # Server-data variance (a bare array, a null field) must
+            # cost one skipped message, not the whole service: these
+            # workers run under a supervisor that treats unexpected
+            # exceptions as fatal code bugs.
+            if not isinstance(msg, dict):
+                logger.warning("ordered_dialog: skipping non-object message: %.200r", msg)
+                continue
             seq = msg.get("sequenceNumber")
             data = msg.get("data", "")
+            if not isinstance(data, str):
+                logger.warning("ordered_dialog: skipping non-string data: %.200r", msg)
+                continue
+            if not isinstance(seq, int):
+                seq = None
 
             if seq is None:
                 # No sequence info — yield immediately
@@ -289,6 +301,9 @@ def monitor_scripts(
     for event in sub:
         if stop.is_set():
             break
+        if not isinstance(event, dict):
+            logger.warning("monitor_scripts: skipping non-object event: %.200r", event)
+            continue
         script_name = event.get("scriptName", "?")
         script_type = event.get("scriptType", "?")
         script_state = event.get("scriptState", "?")
