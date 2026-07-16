@@ -1235,3 +1235,68 @@ class TestSetupLoggingHandlerLeak:
         setup_logging("leaktest", str(tmp_path / "a.log"))
 
         assert all(h.stream is None or h.stream.closed for h in old)
+
+
+class TestFollowStartupErrorClassification:
+    """Permanent client errors must fail fast at startup (review
+    follow-up on finding 14)."""
+
+    def test_404_fails_fast_even_with_reconnect(self) -> None:
+        from sfmc_api.exceptions import APIError
+
+        client = MagicMock(spec=SFMCClient)
+        client.get_glider_details.side_effect = APIError(404, "no such glider")
+
+        with pytest.raises(APIError):
+            follow_glider(
+                client=client,
+                glider_name="nosuch",
+                follower_class=BaseFollower,
+                dry_run=True,
+                reconnect_initial_delay=0.0,
+                reconnect_max_delay=0.0,
+                reconnect_jitter=0.0,
+            )
+
+        assert client.get_glider_details.call_count == 1
+
+
+class TestQueueBacklogWarnings:
+    """Review follow-up on finding 29: unbounded queues stay unbounded
+    (bounding them could block shutdown through the public sentinel
+    contract), but backlog depth must be visible."""
+
+    def test_deliver_surfacing_warns_on_backlog(self) -> None:
+        from sfmc_api.follow_glider import _QUEUE_BACKLOG_WARN, _deliver_surfacing
+
+        q_in: Queue[SurfacingEvent | None] = Queue()
+        for _ in range(_QUEUE_BACKLOG_WARN):
+            q_in.put(SurfacingEvent(vehicle_name="g"))
+        info_log = MagicMock(spec=logging.Logger)
+
+        delivered = _deliver_surfacing(
+            SurfacingEvent(vehicle_name="g", raw_lines=["x"]),
+            q_in,
+            None,
+            None,
+            info_log,
+        )
+
+        assert delivered
+        assert any("backlog" in str(call) for call in info_log.warning.call_args_list)
+
+    def test_send_files_warns_on_backlog(self, caplog: pytest.LogCaptureFixture) -> None:
+        class NoopFollower(BaseFollower):
+            def on_surfacing(self, event: SurfacingEvent) -> None:
+                pass
+
+        q_in: Queue[SurfacingEvent | None] = Queue()
+        q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
+        follower = NoopFollower(config={}, queue_in=q_in, queue_out=q_out)
+        for _ in range(9):
+            q_out.put({"to-glider": {"f.ma": "x"}})
+
+        with caplog.at_level("WARNING", logger="sfmc_api.follower"):
+            follower.send_files(to_glider={"g.ma": "y"})
+
+        assert any("upload backlog" in r.message for r in caplog.records)

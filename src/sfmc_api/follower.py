@@ -285,6 +285,12 @@ class BaseFollower(threading.Thread):
             output["to-science"] = to_science
         if output:
             self.queue_out.put(output)
+            depth = self.queue_out.qsize()
+            if depth > 8:
+                logger.warning(
+                    "upload backlog at %d batch(es) — uploads appear to be failing or stalled",
+                    depth,
+                )
 
     def shutdown(self) -> None:
         """Signal the follower to stop.

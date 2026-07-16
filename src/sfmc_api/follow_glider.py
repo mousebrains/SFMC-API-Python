@@ -158,7 +158,11 @@ from sfmc_api.monitor_glider import (
     ordered_dialog,
 )
 from sfmc_api.stomp import StompError, StompSubscription
-from sfmc_api.stream_reconnect import ReconnectBackoff, safe_stream_error
+from sfmc_api.stream_reconnect import (
+    ReconnectBackoff,
+    is_transient_error,
+    safe_stream_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -343,6 +347,12 @@ class _RecentSurfacingIds:
         return None
 
 
+#: Queue depth beyond which a backlog warning is logged.  Surfacings
+#: arrive hours apart, so more than this many waiting means the
+#: follower has been stuck or too slow for days.
+_QUEUE_BACKLOG_WARN = 8
+
+
 def _deliver_surfacing(
     event: SurfacingEvent | None,
     queue_in: Queue[SurfacingEvent | None],
@@ -360,6 +370,13 @@ def _deliver_surfacing(
     if stats is not None:
         stats.incr_surfacings()
     queue_in.put(event)
+    depth = queue_in.qsize()
+    if depth > _QUEUE_BACKLOG_WARN and info_log is not None:
+        info_log.warning(
+            "follower input backlog at %d surfacings — the follower "
+            "appears stuck or too slow, and will act on stale data",
+            depth,
+        )
     return True
 
 
@@ -1139,7 +1156,9 @@ def follow_glider(
                 details = client.get_glider_details(glider_name)
                 break
             except SFMCError as exc:
-                if not reconnect:
+                # Permanent client errors (404 misspelled glider, bad
+                # credentials) fail fast; only transient failures retry.
+                if not reconnect or not is_transient_error(exc):
                     raise
                 delay = startup_backoff.next_delay(subscribed_uptime=None)
                 info_log.warning(
@@ -1174,6 +1193,14 @@ def follow_glider(
         raise FileNotFoundError(f"Replay file not found: {replay}")
 
     # ── Set up persistent queues and workers ───────────────────
+    # Deliberately unbounded (review finding 29 tradeoff): both queues
+    # carry a None shutdown sentinel through the public BaseFollower
+    # contract, and bounding them would let a stuck consumer block
+    # shutdown() or the dialog reader — reintroducing the hang class
+    # fixed in _shutdown_follow_pipeline.  Items are small and arrive
+    # at surfacing cadence (hours), so growth is slow; backlog depth
+    # is surfaced instead as warnings in _deliver_surfacing and
+    # BaseFollower.send_files.
     queue_in: Queue[SurfacingEvent | None] = Queue()
     queue_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
 

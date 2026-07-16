@@ -35,7 +35,11 @@ from typing import Any
 from sfmc_api import SFMCClient
 from sfmc_api.exceptions import SFMCError
 from sfmc_api.stomp import MAX_SEQUENCE, StompError, StompSubscription
-from sfmc_api.stream_reconnect import ReconnectBackoff, safe_stream_error
+from sfmc_api.stream_reconnect import (
+    ReconnectBackoff,
+    is_transient_error,
+    safe_stream_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -474,7 +478,9 @@ def monitor_glider(
             _initial_status(client, glider_name, info_log)
             break
         except SFMCError as exc:
-            if not reconnect:
+            # Permanent client errors (404 misspelled glider, bad
+            # credentials) fail fast; only transient failures retry.
+            if not reconnect or not is_transient_error(exc):
                 raise
             delay = startup_backoff.next_delay(subscribed_uptime=None)
             info_log.warning(

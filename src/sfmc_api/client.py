@@ -314,10 +314,15 @@ class SFMCClient:
             if response.status_code == 429 and attempt < _MAX_RETRIES - 1:
                 raw_ms = response.headers.get("x-rate-limit-retry-after-milliseconds")
                 try:
-                    delay_s = int(raw_ms) / 1000 if raw_ms is not None else 2.0
+                    delay_ms = int(raw_ms) if raw_ms is not None else 2000
                 except (ValueError, TypeError):
-                    delay_s = 2.0
-                delay_s = min(max(delay_s, 0.0), _MAX_429_DELAY_SECONDS)
+                    delay_ms = 2000
+                # Clamp in integer milliseconds *before* the division:
+                # a syntactically valid but astronomically large header
+                # would otherwise raise OverflowError converting to
+                # float — not an SFMCError, so it would escape the
+                # callers' supervisors.
+                delay_s = min(max(delay_ms, 0), int(_MAX_429_DELAY_SECONDS * 1000)) / 1000
                 logger.warning(
                     "Rate limited on %s %s, retrying in %.1fs",
                     method,

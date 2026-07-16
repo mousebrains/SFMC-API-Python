@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from sfmc_api.exceptions import SFMCError
+from sfmc_api.exceptions import APIError, SFMCError
 from sfmc_api.monitor_glider import _log_with_time, build_parser, monitor_dialog, ordered_dialog
 from sfmc_api.stomp import MAX_SEQUENCE, StompError, StompSubscription
 
@@ -407,7 +407,7 @@ class TestStartupRetry:
 
         client = MagicMock()
         client.get_glider_details.side_effect = [
-            SFMCError("DNS not up yet"),
+            APIError(0, "DNS not up yet"),
             {"data": {"state": "connected", "id": 8}},
         ]
         # Succeed startup, then make the stream session end fatally to
@@ -451,3 +451,80 @@ class TestStartupRetry:
                 MagicMock(spec=logging.Logger),
                 reconnect=False,
             )
+
+
+class TestStartupErrorClassification:
+    """Permanent client errors must fail fast at startup; only
+    transient failures retry (review follow-up on finding 14)."""
+
+    def _monitor(self, client: MagicMock, **kwargs: Any) -> None:
+        from sfmc_api.monitor_glider import monitor_glider
+
+        monitor_glider(
+            client,
+            "g1",
+            MagicMock(spec=logging.Logger),
+            MagicMock(spec=logging.Logger),
+            MagicMock(spec=logging.Logger),
+            reconnect_initial_delay=0.0,
+            reconnect_max_delay=0.0,
+            reconnect_jitter=0.0,
+            **kwargs,
+        )
+
+    def test_404_fails_fast_even_with_reconnect(self) -> None:
+        client = MagicMock()
+        client.get_glider_details.side_effect = APIError(404, "no such glider")
+
+        with pytest.raises(APIError):
+            self._monitor(client)
+
+        assert client.get_glider_details.call_count == 1
+
+    def test_bad_credentials_fail_fast(self) -> None:
+        from sfmc_api.exceptions import AuthenticationError
+
+        client = MagicMock()
+        client.get_glider_details.side_effect = AuthenticationError("bad secret")
+
+        with pytest.raises(AuthenticationError):
+            self._monitor(client)
+
+    def test_server_error_is_retried(self) -> None:
+        stop = threading.Event()
+        client = MagicMock()
+        client.get_glider_details.side_effect = [
+            APIError(503, "maintenance"),
+            {"data": {"state": "connected", "id": 8}},
+        ]
+        client.get_active_deployment_details.return_value = {"data": {}}
+
+        def stop_soon(*args: Any, **kwargs: Any) -> MagicMock:
+            stop.set()
+            raise SFMCError("no stream in this test")
+
+        client.open_stream.side_effect = stop_soon
+
+        self._monitor(client, stop=stop)
+
+        assert client.get_glider_details.call_count == 2
+
+
+class TestIsTransientError:
+    def test_classification(self) -> None:
+        from sfmc_api.exceptions import (
+            APIError,
+            AuthenticationError,
+            RateLimitError,
+            SFMCError,
+        )
+        from sfmc_api.stream_reconnect import is_transient_error
+
+        assert is_transient_error(APIError(0, "transport"))
+        assert is_transient_error(APIError(500, "boom"))
+        assert is_transient_error(APIError(503, "maintenance"))
+        assert is_transient_error(RateLimitError(retry_after_seconds=1.0))
+        assert not is_transient_error(APIError(401, "expired"))
+        assert not is_transient_error(APIError(404, "no such glider"))
+        assert not is_transient_error(AuthenticationError("bad secret"))
+        assert not is_transient_error(SFMCError("unexpected shape"))

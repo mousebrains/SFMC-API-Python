@@ -1002,11 +1002,14 @@ class TestMalformedStreamData:
         conn.disconnect()
 
     @patch("sfmc_api.stomp.ws_connect")
-    def test_dispatch_error_skips_frame_keeps_session(
-        self, mock_ws_connect: MagicMock, config: SFMCConfig
+    def test_unexpected_dispatch_error_tears_down_session(
+        self, mock_ws_connect: MagicMock, config: SFMCConfig, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """An exception while dispatching one frame must not tear down
-        the session (previously misreported as a normal close)."""
+        """Server-data variance is handled by explicit guards, so an
+        exception escaping dispatch is an implementation fault: the
+        session must tear down loudly (supervisors then reconnect with
+        backoff) instead of running on, apparently healthy, while
+        possibly discarding every message."""
         from sfmc_api.stomp import _parse_frame as real_parse
 
         def flaky(raw: str) -> Any:
@@ -1014,17 +1017,17 @@ class TestMalformedStreamData:
                 raise RuntimeError("boom")
             return real_parse(raw)
 
-        poison_then_good = (
-            'a["POISON\\n\\nx\\u0000","MESSAGE\\nsubscription:sub-0\\n\\n{\\"k\\":1}\\u0000"]'
-        )
-        with patch("sfmc_api.stomp._parse_frame", side_effect=flaky):
-            conn, sub = self._connect_with_gated_frames(
-                mock_ws_connect, config, [poison_then_good]
-            )
-            msg = sub.get(timeout=2)
+        poison = 'a["POISON\\n\\nx\\u0000"]'
+        with (
+            patch("sfmc_api.stomp._parse_frame", side_effect=flaky),
+            caplog.at_level("ERROR", logger="sfmc_api.stomp"),
+        ):
+            conn, _sub = self._connect_with_gated_frames(mock_ws_connect, config, [poison])
+            assert conn.wait_disconnected(timeout=5)
 
-        assert msg == {"k": 1}
-        assert conn._connected
+        # Attributed at the dispatch layer, not misreported as a
+        # normal close.
+        assert any("dispatching STOMP frame" in r.message for r in caplog.records)
 
         conn.disconnect()
 

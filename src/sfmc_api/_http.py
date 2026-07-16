@@ -18,6 +18,12 @@ logger = logging.getLogger(__name__)
 
 __all__: list[str] = []  # internal module — no public exports
 
+#: Ceiling on the retry-after value reported through RateLimitError,
+#: in milliseconds.  Generous enough for any honest server; small
+#: enough that a garbage header can neither overflow float conversion
+#: nor drive a caller into an hours-long sleep.
+_MAX_RETRY_AFTER_MS = 3_600_000
+
 
 def build_http_client(config: SFMCConfig) -> httpx.Client:
     """Create an :class:`httpx.Client` pre-configured for an SFMC server.
@@ -65,11 +71,15 @@ def check_response(response: httpx.Response) -> None:
     if response.status_code == 429:
         ms = response.headers.get("x-rate-limit-retry-after-milliseconds", "0")
         try:
-            # Negative values are clamped: callers sleep on this figure
-            # and time.sleep raises on negatives.
-            retry_seconds = max(0.0, int(ms) / 1000)
+            ms_int = int(ms)
         except (ValueError, TypeError):
-            retry_seconds = 0.0
+            ms_int = 0
+        # Clamp in integer milliseconds *before* the division: callers
+        # sleep on this figure (negatives raise in time.sleep), and an
+        # astronomically large header would raise OverflowError
+        # converting to float — not an SFMCError, so it would escape
+        # the callers' supervisors.
+        retry_seconds = min(max(ms_int, 0), _MAX_RETRY_AFTER_MS) / 1000
         raise RateLimitError(retry_after_seconds=retry_seconds)
 
     raise APIError(response.status_code, response.text)

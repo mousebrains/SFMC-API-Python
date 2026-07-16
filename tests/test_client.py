@@ -1515,3 +1515,27 @@ class TestSigninResponseShapes:
                 http_client,
                 SFMCConfig(host="sfmc.test", client_id="c", secret="s"),
             )
+
+
+class TestOversized429Header:
+    """Review follow-up on finding 11: a syntactically valid but
+    astronomically large header must not raise OverflowError (not an
+    SFMCError) out of the retry path."""
+
+    @patch("sfmc_api.client.time")
+    @patch("sfmc_api.client.authenticate", return_value="tok")
+    @patch("sfmc_api.client.build_http_client")
+    def test_huge_integer_header_capped_not_overflow(
+        self, mock_build: MagicMock, mock_auth: MagicMock, mock_time: MagicMock
+    ) -> None:
+        mock_http = MagicMock(spec=httpx.Client)
+        mock_build.return_value = mock_http
+        mock_http.request.side_effect = [
+            make_mock_response(
+                429, {}, headers={"x-rate-limit-retry-after-milliseconds": "9" * 400}
+            ),
+            make_mock_response(200, {"data": {}}),
+        ]
+        client = SFMCClient(config=SFMCConfig(host="sfmc.test", client_id="c", secret="s"))
+        client.get_glider_details("g1")
+        mock_time.sleep.assert_called_once_with(60.0)

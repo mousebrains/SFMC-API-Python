@@ -603,14 +603,22 @@ class StompConnection:
                     try:
                         self._dispatch_message(msg_str)
                     except Exception:
-                        # One malformed frame must cost at most itself,
-                        # not the session — and the failure must be
-                        # attributed here, not misreported downstream
-                        # as a normal close.
+                        # Server-data variance is handled explicitly in
+                        # _sockjs_decode and _dispatch_message, so an
+                        # exception here is an implementation fault,
+                        # not malformed input.  Running on — appearing
+                        # healthy while possibly discarding every
+                        # subsequent message — would hide the bug
+                        # forever; tear the session down instead,
+                        # attributed here rather than misreported as a
+                        # normal close.  The application supervisors
+                        # reconnect with backoff, keeping the failure
+                        # loud and bounded.
                         logger.exception(
-                            "Error dispatching STOMP frame, skipping: %.200s",
+                            "Unexpected error dispatching STOMP frame; closing session: %.200s",
                             msg_str,
                         )
+                        return
         finally:
             # The connection is unusable once this thread exits: clear
             # the connected flag first so subscribe() fails fast
