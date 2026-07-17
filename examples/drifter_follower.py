@@ -344,6 +344,11 @@ class DrifterFollower(BaseFollower):
        ``goto_l{N}.ma`` file with all the waypoints.
     5. Calls :meth:`send_files` to queue the file for upload.
 
+    Trouble only this follower can see — the drifter feed unreadable,
+    the ``.ma`` file failing to generate — is emailed to the operator
+    via :meth:`~sfmc_api.follower.BaseFollower.notify` (active when
+    ``sfmc-follow`` runs with ``--notify-email``; otherwise a no-op).
+
     Configuration keys (loaded from your ``--config`` YAML file):
 
     ``input`` (str)
@@ -400,6 +405,18 @@ class DrifterFollower(BaseFollower):
         drifter_state = _get_drifter_state(nc_path)
         if drifter_state is None:
             logger.warning("Cannot read drifter state from %s", nc_path)
+            # Only this follower knows the drifter feed matters — the
+            # framework sees a healthy SFMC connection.  Email the
+            # operator directly.  Rate-limited per key (one email per
+            # 15 min while the condition persists) and a silent no-op
+            # unless sfmc-follow ran with --notify-email.
+            self.notify(
+                "drifter-feed-down",
+                "drifter position feed unavailable",
+                f"Could not read a drifter position from {nc_path}; "
+                "no new waypoints were generated for this surfacing. "
+                "The glider continues on its previous goto file.",
+            )
             return
 
         drifter_lat, drifter_lon, drift_vx, drift_vy = drifter_state
@@ -505,12 +522,24 @@ class DrifterFollower(BaseFollower):
             return
 
         # ── Generate .ma file and send ──────────────────────────
-        filename, content = generate_goto_ma(
-            waypoints=waypoints,
-            sequence_number=seq,
-            num_legs_to_run=-2,
-            list_when_wpt_dist=wpt_dist,
-        )
+        try:
+            filename, content = generate_goto_ma(
+                waypoints=waypoints,
+                sequence_number=seq,
+                num_legs_to_run=-2,
+                list_when_wpt_dist=wpt_dist,
+            )
+        except Exception as exc:
+            # A logic/validation failure here means the glider gets no
+            # new steering this surfacing — worth an operator email, not
+            # just a log line.  Re-raise so the framework also logs the
+            # traceback and counts the error.
+            self.notify(
+                "ma-generation-failed",
+                "could not generate goto .ma file",
+                f"generate_goto_ma failed: {exc}\nwaypoints={waypoints!r}",
+            )
+            raise
 
         logger.info(
             "Generated %s with %d waypoints (cumulative transit %.0fs)",

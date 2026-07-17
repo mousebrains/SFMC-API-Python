@@ -96,10 +96,11 @@ sfmc-follow --glider osu685 --follower drifter.py \
 Email is off unless at least one `--notify-email` is given, and it applies to
 live mode only — `--replay` reads a file and has no SFMC connection to watch.
 Delivery uses a local SMTP relay by default (`--smtp-host`, default
-`localhost`; `--smtp-port`, default 25; no auth or TLS); the From address
-defaults to `sfmc-follow@<fqdn>` (override with `--notify-from`). Sending runs
-on a background thread with per-message retries, so a slow mail server
-neither stalls reconnection nor eats the alert. Combining email alerting with
+`localhost`; `--smtp-port`, default 25; `--smtp-timeout`, default 10 s; no
+auth or TLS); the From address defaults to `sfmc-follow@<fqdn>` (override
+with `--notify-from`). Sending runs on a background thread with per-message
+retries, so a slow mail server neither stalls reconnection nor eats the
+alert. Combining email alerting with
 `--no-reconnect` prints a warning: exiting on the first stream loss means the
 threshold can never elapse — use systemd `OnFailure=` there instead.
 
@@ -128,6 +129,10 @@ per call with `min_gap_seconds=`), so re-raising a persistent condition every
 surfacing costs one email per window. Without `--notify-email` (or in replay
 mode) the call is a silent no-op that returns `False` — follower code needs
 no configuration awareness.
+
+For a working example see `examples/drifter_follower.py`, which notifies on
+its two failure modes: the drifter position feed being unreadable
+(`drifter-feed-down`) and `.ma` generation failing (`ma-generation-failed`).
 
 ## Simulation Modes
 
@@ -231,6 +236,17 @@ Logging:
   --log-level LEVEL       DEBUG, INFO, WARNING, ERROR (default: INFO)
   --log-max-size BYTES    Max log size before rotation (default: 10 MB)
   --log-backup-count N    Rotated backup files to keep (default: 5)
+
+Disconnect email notifications:
+  --notify-email ADDR     Alert address for sustained SFMC disconnects
+                          (repeatable; omit to disable email alerts)
+  --notify-after SECS     Downtime before the first alert (default: 300)
+  --notify-repeat SECS    Reminder cadence while still down; 0 = single
+                          alert per outage, minimum 60 (default: 3600)
+  --smtp-host HOST        SMTP relay (default: localhost)
+  --smtp-port PORT        SMTP relay port (default: 25)
+  --smtp-timeout SECS     SMTP connection timeout (default: 10)
+  --notify-from ADDR      From address (default: sfmc-follow@<fqdn>)
 ```
 
 ## End-of-run summary

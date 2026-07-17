@@ -102,8 +102,8 @@ sfmc-monitor-glider --notify-email ops@example.org --notify-email pat@example.or
 
 Email is off unless at least one `--notify-email` is given. Delivery uses a
 local SMTP relay by default (`--smtp-host`, default `localhost`; `--smtp-port`,
-default 25; no authentication or TLS) — the usual Debian/Ubuntu setup where a
-local MTA forwards to a campus mail server. The From address defaults to
+default 25; `--smtp-timeout`, default 10 s; no authentication or TLS) — the
+usual Debian/Ubuntu setup where a local MTA forwards to a campus mail server. The From address defaults to
 `sfmc-monitor-glider@<fqdn>` (override with `--notify-from`). Sending happens
 on a background thread with a few retries per message, so a slow or
 briefly-restarting mail server neither stalls reconnection nor eats the alert.

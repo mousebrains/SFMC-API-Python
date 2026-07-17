@@ -237,3 +237,65 @@ class TestDrifterFollowerOnSurfacing:
         output = q_out.get(timeout=2)
         assert output is not None
         assert "to-glider" in output
+
+
+class TestDrifterFollowerNotifications:
+    """The example follower emails the operator on its two failure modes."""
+
+    def _follower(self, config=None):
+        from drifter_follower import DrifterFollower
+
+        from sfmc_api.disconnect_notify import DisconnectNotifier
+
+        q_in: Queue[SurfacingEvent | None] = Queue()
+        q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
+        follower = DrifterFollower(
+            config=config
+            or {
+                "input": "drifter.nc",
+                "sequence_number": 30,
+                "geometry": [[1, 0]],
+                "glider": {"speed_horizontal": 0.5},
+            },
+            queue_in=q_in,
+            queue_out=q_out,
+        )
+        notifier = MagicMock(spec=DisconnectNotifier)
+        notifier.notify_event.return_value = True
+        follower.set_notifier(notifier)
+        return follower, notifier
+
+    def _make_event(self) -> SurfacingEvent:
+        return SurfacingEvent(
+            vehicle_name="testbot",
+            gps_lat=33.167,
+            gps_lon=-117.697,
+            sensors={},
+        )
+
+    @patch("drifter_follower._get_drifter_state")
+    def test_feed_down_notifies_operator(self, mock_drifter: MagicMock) -> None:
+        mock_drifter.return_value = None
+        follower, notifier = self._follower()
+
+        follower.on_surfacing(self._make_event())
+
+        notifier.notify_event.assert_called_once()
+        assert notifier.notify_event.call_args.args[0] == "drifter-feed-down"
+
+    @patch("drifter_follower.generate_goto_ma", side_effect=ValueError("bad DDMM"))
+    @patch("drifter_follower._get_drifter_state")
+    def test_ma_generation_failure_notifies_and_reraises(
+        self,
+        mock_drifter: MagicMock,
+        mock_gen: MagicMock,
+    ) -> None:
+        mock_drifter.return_value = (33.17, -117.70, 0.01, 0.01)
+        follower, notifier = self._follower()
+
+        with pytest.raises(ValueError, match="bad DDMM"):
+            follower.on_surfacing(self._make_event())
+
+        notifier.notify_event.assert_called_once()
+        assert notifier.notify_event.call_args.args[0] == "ma-generation-failed"
+        assert "bad DDMM" in notifier.notify_event.call_args.args[2]
