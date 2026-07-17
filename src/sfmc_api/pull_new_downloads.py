@@ -80,8 +80,14 @@ from typing import Any
 
 from . import __version__
 from .client import SFMCClient
+from .disconnect_notify import (
+    DisconnectNotifier,
+    add_notification_cli_args,
+    build_notifier,
+)
 from .exceptions import SFMCError
 from .stomp import StompError, StompSubscription
+from .stream_reconnect import ReconnectBackoff, is_transient_error, safe_stream_error
 
 __all__ = ["main"]
 
@@ -566,6 +572,43 @@ def baseline(
     )
 
 
+def baseline_with_retry(
+    client: SFMCClient,
+    glider_name: str,
+    state: PullState,
+    state_path: Path,
+    margin_minutes: int,
+    notifier: DisconnectNotifier | None = None,
+) -> None:
+    """Service-mode baseline: retry transient failures with backoff.
+
+    A service whose very first run starts at boot — before DNS/WAN is
+    up, or during an SFMC outage — must not crash-loop on a transient
+    failure the steady-state loop would have ridden out (the same
+    policy as the other startup paths).  Permanent errors (bad glider
+    name, bad credentials) still fail fast.  ``--once`` keeps the
+    fail-loud plain :func:`baseline`.
+
+    Each failed attempt is reported to *notifier* as a disconnect, so
+    an SFMC outage present from the first boot still produces the
+    sustained-outage alert.
+    """
+    backoff = ReconnectBackoff()
+    while True:
+        try:
+            baseline(client, glider_name, state, state_path, margin_minutes)
+            return
+        except SFMCError as exc:
+            if not is_transient_error(exc):
+                raise
+            delay = backoff.next_delay(subscribed_uptime=None)
+            reason = safe_stream_error(exc)
+            logger.warning("baseline failed (%s); retrying in %.1fs", reason, delay.actual)
+            if notifier is not None:
+                notifier.record_disconnect(reason=reason)
+            time.sleep(delay.actual)
+
+
 def glider_is_connected(client: SFMCClient, glider_name: str) -> bool:
     """True unless the glider's state is reported as ``disconnected``.
 
@@ -656,6 +699,7 @@ def stream_once(
     args: argparse.Namespace,
     state: PullState,
     state_path: Path,
+    notifier: DisconnectNotifier | None = None,
 ) -> None:
     """Run one STOMP session until the connection drops.
 
@@ -683,6 +727,10 @@ def stream_once(
             args.glider_name,
             "connected" if connected else "disconnected — waiting for a surfacing",
         )
+        # Subscribed => the SFMC stream is up.  (``connected`` above is
+        # the glider's dockserver state, a different thing.)
+        if notifier is not None:
+            notifier.record_connect()
 
         settle_until: float | None = None  # deadline of current settle window
         quiet_polls = 0
@@ -780,6 +828,7 @@ def run_stream(
     args: argparse.Namespace,
     state: PullState,
     state_path: Path,
+    notifier: DisconnectNotifier | None = None,
 ) -> None:
     """Stream events forever, reconnecting with backoff on drops.
 
@@ -793,11 +842,16 @@ def run_stream(
     while True:
         session_start = time.monotonic()
         try:
-            stream_once(client, args, state, state_path)
+            stream_once(client, args, state, state_path, notifier=notifier)
+            reason = "event stream closed"
         except StompError as exc:
             logger.warning("STOMP error: %s", exc)
+            reason = safe_stream_error(exc)
         except Exception as exc:
             logger.warning("stream session failed (%s: %s)", type(exc).__name__, exc)
+            reason = safe_stream_error(exc)
+        if notifier is not None:
+            notifier.record_disconnect(reason=reason)
         if time.monotonic() - session_start > 60.0:
             backoff = 15.0
         logger.info("reconnecting in %.0fs", backoff)
@@ -940,6 +994,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Enable debug logging",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    add_notification_cli_args(parser)
     return parser
 
 
@@ -961,6 +1016,18 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
 
+    # Built before any server contact so a down-at-boot SFMC is covered
+    # from the first request.  Streaming mode only: --once is cron mode,
+    # where failing loudly (exit 1) is the notification.
+    notifier: DisconnectNotifier | None = None
+    if not args.once:
+        notifier = build_notifier(
+            args,
+            program="sfmc-pull-new-downloads",
+            glider_name=args.glider_name,
+            log=logger,
+        )
+
     code = 0
     try:
         state = PullState.load(state_path)
@@ -970,7 +1037,19 @@ def main() -> None:
             # re-baselining then would mark everything that arrived since
             # as seen without downloading it.
             if not state_path.exists():
-                baseline(client, args.glider_name, state, state_path, args.margin_minutes)
+                if args.once:
+                    baseline(client, args.glider_name, state, state_path, args.margin_minutes)
+                else:
+                    # Service mode: retry transient first-run failures
+                    # instead of crash-looping under the service manager.
+                    baseline_with_retry(
+                        client,
+                        args.glider_name,
+                        state,
+                        state_path,
+                        args.margin_minutes,
+                        notifier,
+                    )
             elif args.once:
                 # Cron mode: a failed pass must fail loudly (exit 1).
                 caught_up = reconcile(
@@ -998,13 +1077,20 @@ def main() -> None:
                 if caught_up:
                     logger.info("startup catch-up downloaded %d file(s)", caught_up)
             if not args.once:
-                run_stream(client, args, state, state_path)
+                run_stream(client, args, state, state_path, notifier=notifier)
     except (SFMCError, OSError) as exc:
         sys.stderr.write(f"Error: {exc}\n")
+        if notifier is not None:
+            # If a DOWN alert went out, the operator must hear that the
+            # watcher itself is quitting (no RECOVERED will follow).
+            notifier.record_exit(reason=safe_stream_error(exc))
         code = 1
     except KeyboardInterrupt:
         sys.stderr.write("\nStopped.\n")
         code = 130
+    finally:
+        if notifier is not None:
+            notifier.close()
 
     sys.exit(code)
 

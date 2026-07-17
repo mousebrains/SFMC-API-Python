@@ -75,6 +75,60 @@ Pass `--no-reconnect` if an unexpected live stream loss should exit with
 status 1, for example so systemd `Restart=on-failure` owns recovery. Replay is
 always finite and never enters the reconnect supervisor.
 
+## Disconnect email alerts
+
+In live mode, an email can be sent when the SFMC connection stays down. Most
+drops reconnect within seconds, so nothing is sent until the connection has
+been down continuously for `--notify-after` seconds (default 300); a reminder
+then repeats every `--notify-repeat` seconds (default 3600; `0` disables
+reminders; minimum 60), and a single all-clear is sent on recovery. A drop
+that recovers before the threshold sends nothing, and a reconnect only ends
+the outage after the new session survives 60 seconds — so a flapping stream
+(subscribe, die, repeat) still counts as one continuous outage and alerts. If
+the process exits while an alerted outage is open, a final "exiting" notice
+is sent.
+
+```bash
+sfmc-follow --glider osu685 --follower drifter.py \
+    --notify-email ops@example.org
+```
+
+Email is off unless at least one `--notify-email` is given, and it applies to
+live mode only — `--replay` reads a file and has no SFMC connection to watch.
+Delivery uses a local SMTP relay by default (`--smtp-host`, default
+`localhost`; `--smtp-port`, default 25; no auth or TLS); the From address
+defaults to `sfmc-follow@<fqdn>` (override with `--notify-from`). Sending runs
+on a background thread with per-message retries, so a slow mail server
+neither stalls reconnection nor eats the alert. Combining email alerting with
+`--no-reconnect` prints a warning: exiting on the first stream loss means the
+threshold can never elapse — use systemd `OnFailure=` there instead.
+
+### Follower-initiated notifications
+
+Followers can email the operator about conditions only their own logic can
+see — an external float-position feed gone quiet, an `.ma` file that cannot
+be generated, a target outside the operating box:
+
+```python
+def on_surfacing(self, event):
+    fix = self.fetch_float_position()
+    if fix is None:
+        self.notify(
+            "float-feed-down",
+            "float position feed unavailable",
+            "No position from the drifter feed; holding the previous waypoint.",
+        )
+        return
+```
+
+`self.notify(key, summary, detail)` queues an email with the subject
+`[SFMC] <glider>: <summary>` and never blocks the follower thread. Repeats of
+the same *key* are rate-limited (default one email per 15 minutes, tunable
+per call with `min_gap_seconds=`), so re-raising a persistent condition every
+surfacing costs one email per window. Without `--notify-email` (or in replay
+mode) the call is a silent no-op that returns `False` — follower code needs
+no configuration awareness.
+
 ## Simulation Modes
 
 Two flags combine into four modes:

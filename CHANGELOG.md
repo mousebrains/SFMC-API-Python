@@ -28,6 +28,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Email alerts on a sustained loss of the SFMC connection for all three
+  long-running commands (`sfmc-follow`, `sfmc-monitor-glider`,
+  `sfmc-pull-new-downloads`). When the STOMP stream stays down past
+  `--notify-after` seconds (default 300), an alert is emailed to each
+  `--notify-email` recipient; reminders repeat every `--notify-repeat`
+  seconds while still down (default 3600, `0` for a single alert,
+  minimum 60 as a storm floor), and a single all-clear follows recovery.
+  Drops that recover before the threshold (flaps) stay silent, and a
+  reconnect only ends an outage after the new session survives 60
+  seconds — a stream that subscribes and dies over and over counts as
+  one continuous outage instead of resetting the clock. If the process
+  exits while an alerted outage is still open, a final "exiting, no
+  all-clear will follow" notice is sent. Delivery is via a local SMTP
+  relay by default (`--smtp-host`/`--smtp-port`, default `localhost:25`,
+  no auth/TLS) on a background thread with per-message retries, so a
+  slow or briefly-restarting mail server neither stalls a reconnect
+  loop nor eats the alert. Email alerting is off unless at least one
+  `--notify-email` is given; combining it with `--no-reconnect` logs a
+  warning, since exiting on the first stream loss means the threshold
+  can never elapse.
+- Follower plugins can email the operator at their own discretion via
+  `self.notify(key, summary, detail)` — for conditions only the
+  follower's logic can see (an external float-position feed gone quiet,
+  an `.ma` file that cannot be generated). Notifications are
+  rate-limited per condition key (default 15 min) and share the
+  disconnect-alert delivery machinery; without `--notify-email` the
+  call is a silent no-op.
+- `sfmc-pull-new-downloads` service mode now retries a transient
+  first-run baseline failure with backoff instead of exiting, matching
+  the boot-time policy of the other startup paths (`--once` still fails
+  loudly for cron).
 - `sfmc-monitor-glider` and live `sfmc-follow` now reconnect expected
   WebSocket/STOMP failures with capped, jittered exponential backoff and
   synchronized authentication refresh. Both support `--no-reconnect` for

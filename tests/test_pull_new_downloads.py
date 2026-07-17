@@ -691,3 +691,120 @@ class TestIntervalArgValidation:
 
         args = build_parser().parse_args(["osusim", "/tmp/out", "--settle-poll", "1.5"])
         assert args.settle_poll == 1.5
+
+
+class TestDisconnectNotifierWiring:
+    """sfmc-pull-new-downloads drives the disconnect notifier on the
+    same connected/disconnected edges as the other stream commands."""
+
+    def _args(self) -> Any:
+        import argparse
+
+        return argparse.Namespace(
+            glider_name="osusim",
+            settle_poll=1,
+            settle_quiet=2,
+            settle_timeout=30,
+            reconcile_interval=600,
+        )
+
+    def test_stream_once_records_connect_on_subscribe(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        from sfmc_api.disconnect_notify import DisconnectNotifier
+        from sfmc_api.pull_new_downloads import stream_once
+
+        notifier = MagicMock(spec=DisconnectNotifier)
+        client = MagicMock()
+        conn_q: queue_mod.Queue[Any] = queue_mod.Queue()
+        conn_q.put(None)  # close immediately: subscribe, then session ends
+        client.subscribe_connection_events.return_value = StompSubscription("s0", "/t", conn_q)
+        client.subscribe_zmodem_transfer_events.return_value = StompSubscription(
+            "s1", "/t2", queue_mod.Queue()
+        )
+        with (
+            patch("sfmc_api.pull_new_downloads.glider_is_connected", return_value=False),
+            patch("sfmc_api.pull_new_downloads.try_reconcile", return_value=0),
+        ):
+            stream_once(client, self._args(), PullState(), tmp_path / "state.json", notifier)
+
+        notifier.record_connect.assert_called_once_with()
+        # stream_once itself never records the drop; run_stream owns that.
+        notifier.record_disconnect.assert_not_called()
+
+    def test_run_stream_records_disconnect_each_session(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        from sfmc_api.disconnect_notify import DisconnectNotifier
+        from sfmc_api.pull_new_downloads import run_stream
+
+        notifier = MagicMock(spec=DisconnectNotifier)
+        client = MagicMock()
+
+        class _StopLoop(Exception):
+            pass
+
+        # Let one session "run" (return cleanly), then break the loop at
+        # the backoff sleep so run_stream's single iteration is observable.
+        with (
+            patch("sfmc_api.pull_new_downloads.stream_once", return_value=None) as once,
+            patch("sfmc_api.pull_new_downloads.try_reconcile", return_value=0),
+            patch("sfmc_api.pull_new_downloads.glider_is_connected", return_value=False),
+            patch("sfmc_api.pull_new_downloads.time.sleep", side_effect=_StopLoop),
+            pytest.raises(_StopLoop),
+        ):
+            run_stream(client, self._args(), PullState(), tmp_path / "state.json", notifier)
+
+        once.assert_called_once()
+        # The notifier was threaded into the session and told of the drop.
+        assert once.call_args.kwargs["notifier"] is notifier
+        notifier.record_disconnect.assert_called_once()
+        assert notifier.record_disconnect.call_args.kwargs["reason"] == "event stream closed"
+
+
+class TestBaselineWithRetry:
+    """Service-mode first-run baseline retries transient failures
+    instead of crash-looping under the service manager."""
+
+    def test_transient_failure_retries_then_succeeds(self) -> None:
+        from unittest.mock import patch
+
+        from sfmc_api.disconnect_notify import DisconnectNotifier
+        from sfmc_api.exceptions import RateLimitError
+        from sfmc_api.pull_new_downloads import baseline_with_retry
+
+        notifier = MagicMock(spec=DisconnectNotifier)
+        client = MagicMock()
+        with (
+            patch(
+                "sfmc_api.pull_new_downloads.baseline",
+                side_effect=[RateLimitError(0.0, "slow down"), None],
+            ) as base,
+            patch("sfmc_api.pull_new_downloads.time.sleep") as slept,
+        ):
+            baseline_with_retry(client, "osusim", PullState(), Path("state.json"), 5, notifier)
+
+        assert base.call_count == 2
+        slept.assert_called_once()
+        # The outage was reported so a down-at-first-boot SFMC still alerts.
+        notifier.record_disconnect.assert_called_once()
+
+    def test_permanent_failure_raises_immediately(self) -> None:
+        from unittest.mock import patch
+
+        from sfmc_api.disconnect_notify import DisconnectNotifier
+        from sfmc_api.pull_new_downloads import baseline_with_retry
+
+        notifier = MagicMock(spec=DisconnectNotifier)
+        with (
+            patch(
+                "sfmc_api.pull_new_downloads.baseline",
+                side_effect=SFMCError("Unexpected glider-details response"),
+            ),
+            patch("sfmc_api.pull_new_downloads.time.sleep") as slept,
+            pytest.raises(SFMCError),
+        ):
+            baseline_with_retry(MagicMock(), "osusim", PullState(), Path("s.json"), 5, notifier)
+
+        slept.assert_not_called()
+        notifier.record_disconnect.assert_not_called()

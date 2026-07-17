@@ -86,6 +86,33 @@ are downloaded.
 | `--settle-timeout SECS` | 1800 | Hard limit on a settle window (the only exit when a surfacing produced no new files) |
 | `--reconcile-interval SECS` | 900 | Idle backstop check |
 | `-v, --verbose` | off | Debug logging (includes per-request HTTP lines) |
+| `--notify-email ADDR` | none | Alert this address on a sustained SFMC disconnect (repeatable; omit to disable) |
+| `--notify-after SECS` | 300 | How long the SFMC connection must stay down before alerting |
+| `--notify-repeat SECS` | 3600 | Reminder cadence while still down (`0` = single alert per outage; minimum 60) |
+| `--smtp-host HOST` | `localhost` | SMTP relay for alert email |
+| `--smtp-port PORT` | 25 | SMTP relay port |
+| `--smtp-timeout SECS` | 10 | SMTP connection timeout |
+| `--notify-from ADDR` | `sfmc-pull-new-downloads@<fqdn>` | From address for alert email |
+
+## Disconnect email alerts
+
+With `--notify-email`, an email is sent when the SFMC stream stays down past
+`--notify-after` seconds (default 300) — long enough that ordinary reconnects
+stay silent. Reminders repeat every `--notify-repeat` seconds while down
+(default 3600; `0` for a single alert), and one all-clear follows recovery.
+A reconnect only ends the outage once the new session survives 60 seconds, so
+a flapping stream still counts as one continuous outage; if the process exits
+while an alerted outage is open, a final "exiting" notice is sent. This
+watches the connection to the **SFMC server**, not the glider's own
+dockserver connection. Streaming mode only; `--once` is cron mode, where the
+nonzero exit is the notification. Delivery defaults to a local SMTP relay
+(`localhost:25`, no auth/TLS) on a background thread with per-message
+retries, so a stalled mail server cannot hold up downloads.
+
+In service mode a *first-run* baseline that fails transiently (SFMC down at
+boot, DNS not up yet) now retries with backoff instead of exiting, and those
+failures count toward the outage clock — an SFMC outage present from the very
+first boot still produces the alert.
 
 ## Operational notes
 

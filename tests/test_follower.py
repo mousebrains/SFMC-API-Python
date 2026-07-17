@@ -270,3 +270,45 @@ class TestLoadFollowerClass:
         config = {"key": "value"}
         follower = cls(config=config, queue_in=q_in, queue_out=q_out)
         assert follower.config == {"key": "value"}
+
+
+class TestFollowerNotify:
+    """BaseFollower.notify — discretionary operator email from engine code."""
+
+    def _follower(self):
+        from queue import Queue
+
+        from sfmc_api.follower import BaseFollower
+
+        class Minimal(BaseFollower):
+            def on_surfacing(self, event) -> None:
+                pass
+
+        return Minimal(config={}, queue_in=Queue(), queue_out=Queue())
+
+    def test_notify_without_notifier_is_silent_noop(self) -> None:
+        follower = self._follower()
+        assert follower.notify("float-feed-down", "feed unavailable") is False
+
+    def test_notify_delegates_to_notifier(self) -> None:
+        from unittest.mock import MagicMock
+
+        from sfmc_api.disconnect_notify import DisconnectNotifier
+
+        follower = self._follower()
+        notifier = MagicMock(spec=DisconnectNotifier)
+        notifier.notify_event.return_value = True
+        follower.set_notifier(notifier)
+
+        assert follower.notify(
+            "ma-write-failed",
+            "could not generate goto.ma",
+            "solver returned no waypoint",
+            min_gap_seconds=600.0,
+        )
+        notifier.notify_event.assert_called_once_with(
+            "ma-write-failed",
+            "could not generate goto.ma",
+            "solver returned no waypoint",
+            min_gap_seconds=600.0,
+        )
