@@ -74,11 +74,58 @@ Use `--no-reconnect` to make an unexpected stream loss exit nonzero. This is
 useful with `Restart=on-failure`; intentional Ctrl-C or SIGTERM still performs
 clean shutdown.
 
+## Disconnect email alerts
+
+For an unattended service, an email can be sent when the SFMC connection stays
+down. Most drops reconnect within seconds and are not worth an alert, so
+nothing is sent until the connection has been down continuously for
+`--notify-after` seconds (default 300). While it stays down, a reminder repeats
+every `--notify-repeat` seconds (default 3600; `0` sends a single alert per
+outage; minimum 60), and a single all-clear is sent when the stream comes
+back. A drop that recovers before the threshold sends nothing.
+
+Two hardening details worth knowing:
+
+- A reconnect only ends the outage after the new session survives 60
+  seconds. A stream that subscribes and dies over and over — SFMC
+  half-alive — therefore counts as one continuous outage and still
+  alerts, instead of resetting the clock on every short-lived session.
+- If the process exits (fatal error) while an alerted outage is still
+  open, a final "exiting — no all-clear will follow" notice is sent, so
+  a sent DOWN alert is never left dangling.
+
+```bash
+# Alert two addresses if SFMC is unreachable for 5 minutes, hourly reminders
+sfmc-monitor-glider --notify-email ops@example.org --notify-email pat@example.org \
+    osu685 /var/log/sfmc/osu685.log
+```
+
+Email is off unless at least one `--notify-email` is given. Delivery uses a
+local SMTP relay by default (`--smtp-host`, default `localhost`; `--smtp-port`,
+default 25; `--smtp-timeout`, default 10 s; no authentication or TLS) — the
+usual Debian/Ubuntu setup where a local MTA forwards to a campus mail server. The From address defaults to
+`sfmc-monitor-glider@<fqdn>` (override with `--notify-from`). Sending happens
+on a background thread with a few retries per message, so a slow or
+briefly-restarting mail server neither stalls reconnection nor eats the alert.
+
+Do not combine email alerting with `--no-reconnect`: the process exits on the
+first stream loss, before `--notify-after` can elapse, so the alert never
+fires (a startup warning says so). With `--no-reconnect`, use your service
+manager's failure alerting (e.g. systemd `OnFailure=`) instead.
+
 ## Log Files
 
 When a log file path is provided, output goes to both the file and
 stderr.  The log file can later be replayed through `sfmc-follow
 --replay` for offline testing of follower plugins.
+
+## Running as a service
+
+A tuned, hardened example systemd unit for Debian/Ubuntu — dedicated
+service user, sandboxing, log directory, restart policy, and email
+alerting wired in — lives in `examples/systemd/`, with an install
+walkthrough in its README (service user, virtualenv, credentials in
+`/etc/sfmc`, local mail relay, logrotate).
 
 ## Programmatic Use
 

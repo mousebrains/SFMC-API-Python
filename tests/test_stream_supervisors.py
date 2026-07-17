@@ -14,6 +14,8 @@ import pytest
 
 from sfmc_api import SFMCClient
 from sfmc_api.dialog_parser import SurfacingEvent
+from sfmc_api.disconnect_notify import DisconnectNotifier
+from sfmc_api.exceptions import RateLimitError
 from sfmc_api.follow_glider import (
     RunStats,
     _open_replay,
@@ -578,3 +580,120 @@ def test_monitor_worker_join_timeout_prevents_overlapping_session() -> None:
         release.set()
 
     assert client.open_stream.call_count == 1
+
+
+# ── Disconnect notifier wiring ───────────────────────────────────────
+
+
+def test_monitor_drives_notifier_across_sessions() -> None:
+    """The monitor tells the notifier each subscribe and each drop."""
+    stop = threading.Event()
+    handler = _CollectingHandler(stop_on="third", stop=stop)
+    dialog_log = logging.getLogger("test.monitor.notifier.dialog")
+    dialog_log.handlers.clear()
+    dialog_log.propagate = False
+    dialog_log.setLevel(logging.INFO)
+    dialog_log.addHandler(handler)
+    notifier = MagicMock(spec=DisconnectNotifier)
+    client = _client()
+    client.subscribe_glider_output.side_effect = [
+        _subscription([{"sequenceNumber": 0, "data": "first\r\n"}]),
+        _subscription([{"sequenceNumber": 0, "data": "second\r\n"}]),
+        _subscription([{"sequenceNumber": 0, "data": "third\r\n"}], blocking=True),
+    ]
+    client.subscribe_script_events.side_effect = [
+        _subscription([], blocking=True),
+        _subscription([], blocking=True),
+        _subscription([], blocking=True),
+    ]
+
+    monitor_glider(
+        client,
+        "testbot",
+        dialog_log,
+        MagicMock(spec=logging.Logger),
+        MagicMock(spec=logging.Logger),
+        stop=stop,
+        reconnect_initial_delay=0.0,
+        reconnect_max_delay=0.0,
+        reconnect_jitter=0.0,
+        notifier=notifier,
+    )
+
+    # Three subscribes -> three connect edges; the two mid-run drops ->
+    # two disconnect edges (the third session ends via stop, not a drop).
+    assert notifier.record_connect.call_count == 3
+    assert notifier.record_disconnect.call_count == 2
+    # The supervisor never closes the notifier; main() owns that.
+    notifier.close.assert_not_called()
+
+
+def test_monitor_notifier_records_startup_failure() -> None:
+    """A transient failure of the startup status check counts as a
+    disconnect, and the later subscribe clears it."""
+    stop = threading.Event()
+    handler = _CollectingHandler(stop_on="connected", stop=stop)
+    dialog_log = logging.getLogger("test.monitor.notifier.startup")
+    dialog_log.handlers.clear()
+    dialog_log.propagate = False
+    dialog_log.setLevel(logging.INFO)
+    dialog_log.addHandler(handler)
+    notifier = MagicMock(spec=DisconnectNotifier)
+    client = _client()
+    # The startup status check reads glider details: fail transiently
+    # once (rate limited), then succeed so the stream loop can start.
+    client.get_glider_details.side_effect = [
+        RateLimitError(0.0, "slow down"),
+        {"data": {"state": "deployed", "id": 42}},
+    ]
+    client.subscribe_glider_output.return_value = _subscription(
+        [{"sequenceNumber": 0, "data": "connected\r\n"}], blocking=True
+    )
+    client.subscribe_script_events.return_value = _subscription([], blocking=True)
+
+    monitor_glider(
+        client,
+        "testbot",
+        dialog_log,
+        MagicMock(spec=logging.Logger),
+        MagicMock(spec=logging.Logger),
+        stop=stop,
+        reconnect_initial_delay=0.0,
+        reconnect_max_delay=0.0,
+        reconnect_jitter=0.0,
+        notifier=notifier,
+    )
+
+    assert notifier.record_disconnect.call_count >= 1
+    assert notifier.record_connect.call_count >= 1
+
+
+@patch("sfmc_api.follow_glider.setup_logging")
+def test_follow_drives_notifier_across_sessions(mock_setup_logging: MagicMock) -> None:
+    dialog_log, output_log, info_log = _mock_logs()
+    mock_setup_logging.return_value = (dialog_log, output_log, info_log)
+    stop = threading.Event()
+    _reset_follower(stop, stop_after=3)
+    notifier = MagicMock(spec=DisconnectNotifier)
+    client = _client()
+    client.subscribe_glider_output.side_effect = [
+        _subscription(_dialog_messages(second=38, mission_time=169339)),
+        _subscription(_dialog_messages(second=39, mission_time=169340)),
+        _subscription(_dialog_messages(second=40, mission_time=169341), blocking=True),
+    ]
+
+    follow_glider(
+        client=client,
+        glider_name="testbot",
+        follower_class=PersistentFollower,
+        dry_run=True,
+        stop=stop,
+        reconnect_initial_delay=0.0,
+        reconnect_max_delay=0.0,
+        reconnect_jitter=0.0,
+        notifier=notifier,
+    )
+
+    assert notifier.record_connect.call_count == 3
+    assert notifier.record_disconnect.call_count == 2
+    notifier.close.assert_not_called()

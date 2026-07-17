@@ -148,9 +148,12 @@ import threading
 from abc import abstractmethod
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sfmc_api.dialog_parser import SurfacingEvent
+
+if TYPE_CHECKING:
+    from sfmc_api.disconnect_notify import DisconnectNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +198,69 @@ class BaseFollower(threading.Thread):
         self.config = config
         self.queue_in = queue_in
         self.queue_out = queue_out
+        self._notifier: DisconnectNotifier | None = None
+
+    def set_notifier(self, notifier: DisconnectNotifier | None) -> None:
+        """Attach the operator-email notifier.
+
+        Called by the ``sfmc-follow`` framework before the pipeline
+        starts; follower code should not call this itself.  When no
+        ``--notify-email`` was given (or in replay mode) the notifier
+        stays ``None`` and :meth:`notify` is a silent no-op.
+        """
+        self._notifier = notifier
+
+    def notify(
+        self,
+        key: str,
+        summary: str,
+        detail: str = "",
+        *,
+        min_gap_seconds: float = 900.0,
+    ) -> bool:
+        """Email the operator about a condition only this follower sees.
+
+        For application-level trouble the framework cannot detect on
+        its own: an external float-position feed gone quiet, an ``.ma``
+        file that cannot be generated, a target outside the operating
+        box.  Delivery is non-blocking (background thread, retried),
+        and repeats of the same *key* within *min_gap_seconds* are
+        dropped — so calling this on every surfacing while a condition
+        persists costs one email per window, not one per surfacing.
+
+        Example::
+
+            def on_surfacing(self, event):
+                fix = self.fetch_float_position()
+                if fix is None:
+                    self.notify(
+                        "float-feed-down",
+                        "float position feed unavailable",
+                        "No position from the drifter feed; holding "
+                        "the previous waypoint.",
+                    )
+                    return
+
+        Args:
+            key: Stable identifier of the condition (e.g.
+                ``"float-feed-down"``).  Rate limiting is per key.
+            summary: One line for the email subject.
+            detail: Optional body text (subject line reused if empty).
+            min_gap_seconds: Minimum spacing between emails for this
+                key (default 900 = 15 min).
+
+        Returns:
+            ``True`` if an email was queued; ``False`` if notifications
+            are disabled or the key is still inside its rate window.
+        """
+        if self._notifier is None:
+            return False
+        return self._notifier.notify_event(
+            key,
+            summary,
+            detail,
+            min_gap_seconds=min_gap_seconds,
+        )
 
     def run(self) -> None:
         """Main loop: read surfacing events and call on_surfacing.

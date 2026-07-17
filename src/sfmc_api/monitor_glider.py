@@ -33,6 +33,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from sfmc_api import SFMCClient
+from sfmc_api.disconnect_notify import (
+    DisconnectNotifier,
+    add_notification_cli_args,
+    build_notifier,
+)
 from sfmc_api.exceptions import SFMCError
 from sfmc_api.stomp import MAX_SEQUENCE, StompError, StompSubscription
 from sfmc_api.stream_reconnect import (
@@ -457,6 +462,7 @@ def monitor_glider(
     reconnect_stable_after: float = 60.0,
     reconnect_jitter: float = 0.2,
     worker_join_timeout: float = 5.0,
+    notifier: DisconnectNotifier | None = None,
 ) -> None:
     """Monitor live streams until stopped, reconnecting after session loss."""
     if stop is None:
@@ -483,11 +489,14 @@ def monitor_glider(
             if not reconnect or not is_transient_error(exc):
                 raise
             delay = startup_backoff.next_delay(subscribed_uptime=None)
+            reason = safe_stream_error(exc)
             info_log.warning(
                 "startup status check failed (%s); retrying in %.1fs",
-                safe_stream_error(exc),
+                reason,
                 delay.actual,
             )
+            if notifier is not None:
+                notifier.record_disconnect(reason=reason)
             if stop.wait(delay.actual):
                 return
 
@@ -546,6 +555,8 @@ def monitor_glider(
                     subscribed_at = time.monotonic()
                     session_number += 1
                     info_log.info("stream session %d subscribed", session_number)
+                    if notifier is not None:
+                        notifier.record_connect()
                     if offline_since is not None:
                         info_log.info(
                             "stream session %d reconnected after %.1fs offline",
@@ -624,6 +635,8 @@ def monitor_glider(
                 reason,
                 detail,
             )
+        if notifier is not None:
+            notifier.record_disconnect(reason=detail)
         if not reconnect:
             raise StompError(f"stream session ended: {reason}: {detail}") from failure
 
@@ -666,6 +679,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Exit non-zero if the live stream disconnects",
     )
+    add_notification_cli_args(parser)
     return parser
 
 
@@ -695,6 +709,23 @@ def main() -> None:
         previous_handlers[signum] = signal.getsignal(signum)
         signal.signal(signum, request_stop)
 
+    notifier = build_notifier(
+        args,
+        program="sfmc-monitor-glider",
+        glider_name=args.glider_name,
+        log=info_log,
+    )
+    if notifier is not None and args.no_reconnect:
+        # The process exits on the first stream loss, long before
+        # --notify-after can elapse, so the threshold alert never fires
+        # (only a post-alert exit notice could, and it needs an alert
+        # first).  Say so loudly instead of silently mailing nothing.
+        info_log.warning(
+            "--no-reconnect exits on the first stream loss, before "
+            "--notify-after can elapse; disconnect emails will "
+            "effectively never be sent.  Use your service manager's "
+            "failure alerting (e.g. systemd OnFailure=) instead."
+        )
     try:
         with SFMCClient(host=args.host, config_path=args.credentials) as client:
             monitor_glider(
@@ -705,11 +736,18 @@ def main() -> None:
                 info_log,
                 stop=stop,
                 reconnect=not args.no_reconnect,
+                notifier=notifier,
             )
     except Exception as exc:
         info_log.error("Error: %s", safe_stream_error(exc))
+        if notifier is not None:
+            # If a DOWN alert went out, the operator must hear that the
+            # watcher itself is quitting (no RECOVERED will follow).
+            notifier.record_exit(reason=safe_stream_error(exc))
         sys.exit(1)
     finally:
+        if notifier is not None:
+            notifier.close()
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
 
