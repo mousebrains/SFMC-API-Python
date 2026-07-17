@@ -1,0 +1,113 @@
+# systemd unit: sfmc-monitor-glider for glider "foo" on sfmc.alpha.com,
+# emailing spam@spam.com when the SFMC connection stays down.
+#
+# Tuned and hardened for a modern Debian/Ubuntu system (systemd >= 247;
+# Debian 11+/Ubuntu 22.04+).  See README.md next to this file for the
+# full install walkthrough (service user, venv, credentials, MTA).
+#
+# Quick install:
+#   sudo cp sfmc-monitor-glider-foo.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now sfmc-monitor-glider-foo
+#
+# Adapt per deployment: glider name, --host, --notify-email, the
+# ExecStart venv path, and (if you rename the unit) SyslogIdentifier.
+
+[Unit]
+Description=SFMC dialog/script monitor for glider foo
+Documentation=https://github.com/mousebrains/SFMC-API-Python
+# The monitor retries transient startup failures itself, but there is
+# no point starting before the network is up.
+Wants=network-online.target
+After=network-online.target
+# A permanently-bad config (wrong credentials, misspelled glider) exits
+# nonzero fast; stop flapping after 5 failures in 10 minutes instead of
+# restarting forever.  `systemctl reset-failed` clears the latch.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+# Type=exec (vs simple) fails activation immediately if the binary is
+# missing or not executable, instead of reporting a false "started".
+Type=exec
+
+# Dedicated unprivileged user (see README):
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin sfmc
+User=sfmc
+Group=sfmc
+UMask=0077
+
+# ConfigurationDirectory creates /etc/sfmc; put credentials.json there
+# (root:sfmc, mode 0640).  LogsDirectory creates /var/log/sfmc owned by
+# the service user — the only writable path this unit needs.
+ConfigurationDirectory=sfmc
+LogsDirectory=sfmc
+LogsDirectoryMode=0750
+
+ExecStart=/opt/sfmc/venv/bin/sfmc-monitor-glider \
+    --host sfmc.alpha.com \
+    --credentials /etc/sfmc/credentials.json \
+    --notify-email spam@spam.com \
+    foo \
+    /var/log/sfmc/foo.log
+# Optional alert tuning (defaults shown):
+#   --notify-after 300     seconds down before the first email
+#   --notify-repeat 3600   reminder cadence while still down (0 = one alert)
+#   --notify-from ADDR     From address (default: sfmc-monitor-glider@<fqdn>)
+# Do NOT add --no-reconnect together with --notify-email: exiting on the
+# first stream loss means the email threshold can never elapse.  The
+# built-in reconnect (capped, jittered backoff) owns stream recovery;
+# Restart= below is only the backstop for fatal errors.
+
+Restart=on-failure
+RestartSec=30
+
+# SIGTERM triggers clean shutdown (flushes logs, closes the stream).
+TimeoutStopSec=30
+
+# stderr carries the same timestamped lines as the log file.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sfmc-monitor-foo
+
+# ── Resource guards ──────────────────────────────────────────────────
+# The monitor is a small single-purpose process; cap it so a leak can
+# never take the host down with it.
+MemoryHigh=256M
+MemoryMax=512M
+TasksMax=32
+
+# ── Sandboxing / hardening ───────────────────────────────────────────
+# Needs: outbound TCP (HTTPS/WSS to the SFMC server, SMTP to localhost),
+# read /etc/sfmc + the venv, write /var/log/sfmc.  Nothing else.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+PrivateUsers=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RemoveIPC=true
+KeyringMode=private
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# CPython 3.11+ runs fine without writable+executable memory; drop this
+# line if you add a native extension that needs runtime codegen.
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

@@ -119,6 +119,14 @@ When a log file path is provided, output goes to both the file and
 stderr.  The log file can later be replayed through `sfmc-follow
 --replay` for offline testing of follower plugins.
 
+## Running as a service
+
+A tuned, hardened example systemd unit for Debian/Ubuntu — dedicated
+service user, sandboxing, log directory, restart policy, and email
+alerting wired in — lives in `examples/systemd/`, with an install
+walkthrough in its README (service user, virtualenv, credentials in
+`/etc/sfmc`, local mail relay, logrotate).
+
 ## Programmatic Use
 
 ```python

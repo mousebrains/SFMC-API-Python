@@ -59,6 +59,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   first-run baseline failure with backoff instead of exiting, matching
   the boot-time policy of the other startup paths (`--once` still fails
   loudly for cron).
+- A tuned, hardened example systemd unit for running
+  `sfmc-monitor-glider` as a Debian/Ubuntu service (dedicated user,
+  sandboxing, restart policy, email alerting), with an install
+  walkthrough covering credentials, the local mail relay, and logrotate
+  (`examples/systemd/`).
 - `sfmc-monitor-glider` and live `sfmc-follow` now reconnect expected
   WebSocket/STOMP failures with capped, jittered exponential backoff and
   synchronized authentication refresh. Both support `--no-reconnect` for
