@@ -412,16 +412,14 @@ class StreamSupervisor:
         first_result: _WorkerResult | None = None
 
         try:
-            for name, target in session.workers:
-                thread = threading.Thread(
-                    target=_run_worker,
-                    args=(name, target, results),
-                    daemon=True,
-                    name=f"sfmc-{name}",
-                )
-                thread.start()
-                threads.append(thread)
-
+            # Everything that marks the session live happens *before*
+            # the workers start.  The subscriptions already exist, so
+            # messages queue up meanwhile and nothing is lost — but a
+            # consumer can now never observe data from a session that
+            # has not yet been counted.  With the order reversed, a
+            # reconnect could deliver its first line before the epoch
+            # advanced, so a reader comparing epochs would attribute
+            # new-session data to the old one.
             subscribed_at = time.monotonic()
             self._session_number += 1
             self._log.info("stream session %d subscribed", self._session_number)
@@ -436,6 +434,16 @@ class StreamSupervisor:
                 )
             if self._on_subscribed is not None:
                 self._on_subscribed(reconnected=reconnected)
+
+            for name, target in session.workers:
+                thread = threading.Thread(
+                    target=_run_worker,
+                    args=(name, target, results),
+                    daemon=True,
+                    name=f"sfmc-{name}",
+                )
+                thread.start()
+                threads.append(thread)
 
             while not self._stop.is_set():
                 if self._on_idle is not None:

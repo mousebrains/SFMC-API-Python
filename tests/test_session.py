@@ -248,6 +248,42 @@ class TestSupervisedReconnect:
         assert seen == ["first", "second"]
         assert epoch >= 2, "a reconnect must advance the epoch"
 
+    def test_epoch_advances_before_that_session_delivers_data(self) -> None:
+        """No consumer may see data from a session that is not yet counted.
+
+        CI caught the reverse order: the second session's first line
+        arrived before its epoch bump, so a reader comparing epochs
+        would have attributed new-session data to the old session —
+        which is exactly what CommandChannel uses the epoch to rule out.
+        """
+        client = MagicMock()
+        client.get_glider_details.return_value = {"data": {"id": 8, "state": "connected"}}
+        client.subscribe_glider_output.side_effect = [
+            _sub([{"sequenceNumber": 0, "data": "first\r\n"}]),  # closes immediately
+            _sub([{"sequenceNumber": 0, "data": "second\r\n"}], keep_open=True),
+        ]
+
+        session = GliderSession(
+            client,
+            "osu685",
+            reconnect=True,
+            reconnect_initial_delay=0.01,
+            reconnect_max_delay=0.01,
+            reconnect_jitter=0.0,
+        )
+        # Record the epoch observed at the moment each line is seen.
+        observed: list[tuple[str, int]] = []
+        session.on_line(lambda line: observed.append((line.text, session.epoch)))
+        session.start(timeout=5.0)
+        deadline = time.monotonic() + 5.0
+        while len(observed) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        session.close()
+
+        assert [text for text, _ in observed] == ["first", "second"]
+        assert observed[0][1] == 1, "first session's data must carry epoch 1"
+        assert observed[1][1] == 2, "second session's data must carry epoch 2"
+
 
 class TestThreadSafety:
     def test_concurrent_attach_and_publish(self) -> None:
