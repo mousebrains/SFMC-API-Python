@@ -70,6 +70,7 @@ import re
 import signal
 import sys
 import tempfile
+import threading
 import time
 import zipfile
 from collections.abc import Iterator
@@ -86,8 +87,14 @@ from .disconnect_notify import (
     build_notifier,
 )
 from .exceptions import SFMCError
-from .stomp import StompError, StompSubscription
-from .stream_reconnect import ReconnectBackoff, is_transient_error, safe_stream_error
+from .stomp import StompConnection, StompSubscription
+from .stream_reconnect import (
+    ReconnectBackoff,
+    StreamSession,
+    StreamSupervisor,
+    is_transient_error,
+    safe_stream_error,
+)
 
 __all__ = ["main"]
 
@@ -694,14 +701,26 @@ def _drain(sub: StompSubscription) -> tuple[list[Any], bool]:
         messages.append(msg)
 
 
-def stream_once(
+def _subscribe_pull(
+    client: SFMCClient,
+    args: argparse.Namespace,
+    stomp: StompConnection,
+) -> tuple[StompSubscription, StompSubscription]:
+    """Subscribe to the two topics the puller drives off."""
+    conn_sub = client.subscribe_connection_events(args.glider_name, stomp)
+    zmodem_sub = client.subscribe_zmodem_transfer_events(args.glider_name, stomp)
+    return conn_sub, zmodem_sub
+
+
+def stream_session(
     client: SFMCClient,
     args: argparse.Namespace,
     state: PullState,
     state_path: Path,
-    notifier: DisconnectNotifier | None = None,
+    conn_sub: StompSubscription,
+    zmodem_sub: StompSubscription,
 ) -> None:
-    """Run one STOMP session until the connection drops.
+    """Drive one subscribed session until its subscriptions close.
 
     Waits for connection-close events; after each, polls the listing
     for new files.  SFMC's rename delay is unpredictable (seconds to
@@ -718,109 +737,131 @@ def stream_once(
     Raises:
         StompError: If the server sends a STOMP error frame.
     """
-    with client.open_stream() as stomp:
-        conn_sub = client.subscribe_connection_events(args.glider_name, stomp)
-        zmodem_sub = client.subscribe_zmodem_transfer_events(args.glider_name, stomp)
-        connected = glider_is_connected(client, args.glider_name)
-        logger.info(
-            "subscribed; %s is %s",
-            args.glider_name,
-            "connected" if connected else "disconnected — waiting for a surfacing",
-        )
-        # Subscribed => the SFMC stream is up.  (``connected`` above is
-        # the glider's dockserver state, a different thing.)
-        if notifier is not None:
-            notifier.record_connect()
+    connected = glider_is_connected(client, args.glider_name)
+    logger.info(
+        "subscribed; %s is %s",
+        args.glider_name,
+        "connected" if connected else "disconnected — waiting for a surfacing",
+    )
 
-        settle_until: float | None = None  # deadline of current settle window
-        quiet_polls = 0
-        window_downloads = 0
-        poll_interval = args.settle_poll
-        next_poll = 0.0
-        last_activity = time.monotonic()
+    settle_until: float | None = None  # deadline of current settle window
+    quiet_polls = 0
+    window_downloads = 0
+    poll_interval = args.settle_poll
+    next_poll = 0.0
+    last_activity = time.monotonic()
 
-        while True:
-            try:
-                msg = conn_sub.get(timeout=poll_interval if settle_until else 30.0)
-            except queue.Empty:
-                msg = None
-            else:
-                if msg is None:
-                    logger.warning("event stream closed")
-                    return
-
-            now = time.monotonic()
-            drained, conn_closed = _drain(conn_sub)
-            events = ([msg] if msg else []) + drained
-            for event_list in events:
-                for event in event_list if isinstance(event_list, list) else [event_list]:
-                    if not isinstance(event, dict):
-                        # One malformed element must not tear down the
-                        # session and churn through a reconnect cycle.
-                        logger.warning("skipping non-object connection event: %.200r", event)
-                        continue
-                    if event.get("active") is False:
-                        logger.info(
-                            "connection %s closed (%s — %s)",
-                            event.get("id"),
-                            event.get("startDateTime"),
-                            event.get("endDateTime"),
-                        )
-                        connected = False
-                        conn_id = event.get("id")
-                        if conn_id is not None:
-                            log_transfers(client, conn_id)
-                        else:
-                            logger.warning("close event has no connection id: %.200r", event)
-                        settle_until = now + args.settle_timeout
-                        quiet_polls = 0
-                        window_downloads = 0
-                        poll_interval = args.settle_poll
-                        next_poll = now  # poll immediately
-                    elif event.get("active") is True:
-                        connected = True
-                        logger.info(
-                            "connection %s opened at %s",
-                            event.get("id"),
-                            event.get("startDateTime"),
-                        )
-
-            zmodem_bodies, zmodem_closed = _drain(zmodem_sub)
-            for body in zmodem_bodies:
-                logger.debug("zmodem transfer activity: %s", body)
-
-            if conn_closed or zmodem_closed:
+    while True:
+        try:
+            msg = conn_sub.get(timeout=poll_interval if settle_until else 30.0)
+        except queue.Empty:
+            msg = None
+        else:
+            if msg is None:
                 logger.warning("event stream closed")
                 return
 
-            if settle_until is not None and now >= next_poll:
-                downloaded = try_reconcile(client, args, state, state_path, connected=connected)
-                if downloaded:
-                    quiet_polls = 0
-                    window_downloads += downloaded
-                    poll_interval = args.settle_poll
-                    last_activity = now
-                else:
-                    quiet_polls += 1
-                    poll_interval = min(poll_interval * 1.5, 300.0)
-                next_poll = now + poll_interval
-                if window_downloads and quiet_polls >= args.settle_quiet:
-                    logger.info("settle window done: %d file(s) downloaded", window_downloads)
-                    settle_until = None
-                elif now >= settle_until:
+        now = time.monotonic()
+        drained, conn_closed = _drain(conn_sub)
+        events = ([msg] if msg else []) + drained
+        for event_list in events:
+            for event in event_list if isinstance(event_list, list) else [event_list]:
+                if not isinstance(event, dict):
+                    # One malformed element must not tear down the
+                    # session and churn through a reconnect cycle.
+                    logger.warning("skipping non-object connection event: %.200r", event)
+                    continue
+                if event.get("active") is False:
                     logger.info(
-                        "settle window ended after %ds with %d file(s); any "
-                        "pending renames will be caught by the idle reconcile",
-                        args.settle_timeout,
-                        window_downloads,
+                        "connection %s closed (%s — %s)",
+                        event.get("id"),
+                        event.get("startDateTime"),
+                        event.get("endDateTime"),
                     )
-                    settle_until = None
+                    connected = False
+                    conn_id = event.get("id")
+                    if conn_id is not None:
+                        log_transfers(client, conn_id)
+                    else:
+                        logger.warning("close event has no connection id: %.200r", event)
+                    settle_until = now + args.settle_timeout
+                    quiet_polls = 0
+                    window_downloads = 0
+                    poll_interval = args.settle_poll
+                    next_poll = now  # poll immediately
+                elif event.get("active") is True:
+                    connected = True
+                    logger.info(
+                        "connection %s opened at %s",
+                        event.get("id"),
+                        event.get("startDateTime"),
+                    )
 
-            if settle_until is None and now - last_activity >= args.reconcile_interval:
+        zmodem_bodies, zmodem_closed = _drain(zmodem_sub)
+        for body in zmodem_bodies:
+            logger.debug("zmodem transfer activity: %s", body)
+
+        if conn_closed or zmodem_closed:
+            logger.warning("event stream closed")
+            return
+
+        if settle_until is not None and now >= next_poll:
+            downloaded = try_reconcile(client, args, state, state_path, connected=connected)
+            if downloaded:
+                quiet_polls = 0
+                window_downloads += downloaded
+                poll_interval = args.settle_poll
                 last_activity = now
-                downloaded = try_reconcile(client, args, state, state_path, connected=connected)
-                if downloaded:
-                    logger.info("idle reconcile caught %d file(s)", downloaded)
+            else:
+                quiet_polls += 1
+                poll_interval = min(poll_interval * 1.5, 300.0)
+            next_poll = now + poll_interval
+            if window_downloads and quiet_polls >= args.settle_quiet:
+                logger.info("settle window done: %d file(s) downloaded", window_downloads)
+                settle_until = None
+            elif now >= settle_until:
+                logger.info(
+                    "settle window ended after %ds with %d file(s); any "
+                    "pending renames will be caught by the idle reconcile",
+                    args.settle_timeout,
+                    window_downloads,
+                )
+                settle_until = None
+
+        if settle_until is None and now - last_activity >= args.reconcile_interval:
+            last_activity = now
+            downloaded = try_reconcile(client, args, state, state_path, connected=connected)
+            if downloaded:
+                logger.info("idle reconcile caught %d file(s)", downloaded)
+
+
+def stream_once(
+    client: SFMCClient,
+    args: argparse.Namespace,
+    state: PullState,
+    state_path: Path,
+    notifier: DisconnectNotifier | None = None,
+) -> None:
+    """Open one unsupervised STOMP session and run it until it drops.
+
+    :func:`run_stream` is the supervised form and is what the service
+    uses; this is the single-session building block, useful when the
+    caller owns the retry policy.
+
+    Raises:
+        StompError: If the server sends a STOMP error frame.
+    """
+    with client.open_stream() as stomp:
+        conn_sub, zmodem_sub = _subscribe_pull(client, args, stomp)
+        # Subscribed => the SFMC stream is up.  (The glider's own
+        # dockserver state is a different thing, logged separately.)
+        if notifier is not None:
+            notifier.record_connect()
+        try:
+            stream_session(client, args, state, state_path, conn_sub, zmodem_sub)
+        finally:
+            conn_sub.close()
+            zmodem_sub.close()
 
 
 def run_stream(
@@ -829,34 +870,40 @@ def run_stream(
     state: PullState,
     state_path: Path,
     notifier: DisconnectNotifier | None = None,
+    stop: threading.Event | None = None,
 ) -> None:
     """Stream events forever, reconnecting with backoff on drops.
 
-    Survives anything short of KeyboardInterrupt/SystemExit: server
-    outages, auth hiccups, and malformed responses all reduce to a
+    Server outages, auth hiccups, and malformed responses reduce to a
     logged warning and a backed-off reconnect.  Backoff only resets
     after a session that lived a while, so a flapping stream cannot
-    reconnect-storm every 15 seconds forever.
+    reconnect-storm every 15 seconds forever.  After each drop the
+    listing is reconciled, catching anything that landed while the
+    stream was down.
+
+    Permanent failures — a misspelled glider name, bad credentials —
+    now fail fast, matching ``sfmc-monitor-glider`` and ``sfmc-follow``
+    rather than retrying forever behind a service that looks healthy.
+
+    Args:
+        stop: Shutdown signal.  Set it to end the loop at the next
+            session boundary; one is created if omitted.
     """
-    backoff = 15.0
-    while True:
-        session_start = time.monotonic()
-        try:
-            stream_once(client, args, state, state_path, notifier=notifier)
-            reason = "event stream closed"
-        except StompError as exc:
-            logger.warning("STOMP error: %s", exc)
-            reason = safe_stream_error(exc)
-        except Exception as exc:
-            logger.warning("stream session failed (%s: %s)", type(exc).__name__, exc)
-            reason = safe_stream_error(exc)
-        if notifier is not None:
-            notifier.record_disconnect(reason=reason)
-        if time.monotonic() - session_start > 60.0:
-            backoff = 15.0
-        logger.info("reconnecting in %.0fs", backoff)
-        time.sleep(backoff)
-        backoff = min(backoff * 2, 300.0)
+    stop_event = stop if stop is not None else threading.Event()
+
+    def setup(stomp: StompConnection) -> StreamSession:
+        conn_sub, zmodem_sub = _subscribe_pull(client, args, stomp)
+        return StreamSession(
+            subscriptions=(conn_sub, zmodem_sub),
+            workers=(
+                (
+                    "pull",
+                    lambda: stream_session(client, args, state, state_path, conn_sub, zmodem_sub),
+                ),
+            ),
+        )
+
+    def on_session_end() -> None:
         # Catch anything that arrived while the stream was down.
         try_reconcile(
             client,
@@ -865,6 +912,15 @@ def run_stream(
             state_path,
             connected=glider_is_connected(client, args.glider_name),
         )
+
+    StreamSupervisor(
+        client,
+        setup=setup,
+        stop=stop_event,
+        log=logger,
+        notifier=notifier,
+        on_session_end=on_session_end,
+    ).run()
 
 
 # ── Entry point ──────────────────────────────────────────────────────

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import queue as queue_mod
+import threading
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -740,26 +741,40 @@ class TestDisconnectNotifierWiring:
 
         notifier = MagicMock(spec=DisconnectNotifier)
         client = MagicMock()
+        stop = threading.Event()
 
-        class _StopLoop(Exception):
-            pass
+        def stop_after_reconcile(*args: Any, **kwargs: Any) -> int:
+            del args, kwargs
+            stop.set()
+            return 0
 
-        # Let one session "run" (return cleanly), then break the loop at
-        # the backoff sleep so run_stream's single iteration is observable.
+        # Let one session "run" (return cleanly); the post-drop
+        # reconcile then stops the loop, so a single supervised
+        # iteration is observable.
         with (
-            patch("sfmc_api.pull_new_downloads.stream_once", return_value=None) as once,
-            patch("sfmc_api.pull_new_downloads.try_reconcile", return_value=0),
+            patch("sfmc_api.pull_new_downloads.stream_session", return_value=None) as session,
+            patch(
+                "sfmc_api.pull_new_downloads.try_reconcile",
+                side_effect=stop_after_reconcile,
+            ) as reconcile,
             patch("sfmc_api.pull_new_downloads.glider_is_connected", return_value=False),
-            patch("sfmc_api.pull_new_downloads.time.sleep", side_effect=_StopLoop),
-            pytest.raises(_StopLoop),
         ):
-            run_stream(client, self._args(), PullState(), tmp_path / "state.json", notifier)
+            run_stream(
+                client,
+                self._args(),
+                PullState(),
+                tmp_path / "state.json",
+                notifier,
+                stop=stop,
+            )
 
-        once.assert_called_once()
-        # The notifier was threaded into the session and told of the drop.
-        assert once.call_args.kwargs["notifier"] is notifier
+        session.assert_called_once()
+        # The supervisor connected, then reported the drop, then
+        # reconciled to catch anything that landed while it was down.
+        notifier.record_connect.assert_called_once_with()
         notifier.record_disconnect.assert_called_once()
-        assert notifier.record_disconnect.call_args.kwargs["reason"] == "event stream closed"
+        assert notifier.record_disconnect.call_args.kwargs["reason"] == "normal subscription close"
+        reconcile.assert_called_once()
 
 
 class TestBaselineWithRetry:

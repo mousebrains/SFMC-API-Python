@@ -325,7 +325,7 @@ def test_follow_unexpected_dialog_processing_error_is_fatal(
             "sfmc_api.follow_glider.ordered_dialog",
             side_effect=RuntimeError("injected bug"),
         ),
-        pytest.raises(RuntimeError, match="dialog reader failed"),
+        pytest.raises(RuntimeError, match="dialog worker failed"),
     ):
         follow_glider(
             client=client,
@@ -533,7 +533,7 @@ def test_monitor_unexpected_worker_error_is_fatal() -> None:
             "sfmc_api.monitor_glider.monitor_scripts",
             side_effect=RuntimeError("injected bug"),
         ),
-        pytest.raises(RuntimeError, match="script monitor failed"),
+        pytest.raises(RuntimeError, match="script worker failed"),
     ):
         monitor_glider(
             client,
@@ -563,7 +563,7 @@ def test_monitor_worker_join_timeout_prevents_overlapping_session() -> None:
     try:
         with (
             patch("sfmc_api.monitor_glider.monitor_dialog", side_effect=stuck_dialog),
-            pytest.raises(RuntimeError, match="monitor worker did not stop"),
+            pytest.raises(RuntimeError, match="worker did not stop"),
         ):
             monitor_glider(
                 client,
