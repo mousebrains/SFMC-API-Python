@@ -85,7 +85,7 @@
   <!-- Line reassembly -->
   <rect x="350" y="436" width="260" height="40" rx="8" fill="#fefce8" stroke="#facc15" stroke-width="1"/>
   <text x="480" y="453" text-anchor="middle" font-weight="600" fill="#854d0e">Line Reassembly</text>
-  <text x="480" y="468" text-anchor="middle" font-size="10" fill="#a16207">_read_dialog() — splits on \r\n</text>
+  <text x="480" y="468" text-anchor="middle" font-size="10" fill="#a16207">LineAssembler — splits on \r\n</text>
 
   <line x1="480" y1="476" x2="480" y2="492" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
 

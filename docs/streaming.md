@@ -221,6 +221,86 @@ network.  The Node.js reference implementation queues out-of-order
 messages and replays them when gaps are filled (with wraparound at
 sequence 9007199254740991 → 0).
 
-The Python client provides ``sfmc_api.monitor_glider.ordered_dialog()``
-which implements this reordering.  The installed ``sfmc-monitor-glider``
-script uses it to reassemble dialog output into complete lines.
+The Python client implements this in `sfmc_api.dialog_stream`:
+
+* `ordered_dialog(sub)` — reorder by sequence number.
+* `LineAssembler` — reassemble fragments into complete lines
+  (fragments are *not* aligned to line boundaries, and line endings
+  are mixed CRLF/CR/LF).
+* `dialog_lines(sub)` — both at once, for consumers that do not need
+  to distinguish a clean shutdown from a dropped session.
+
+```python
+from sfmc_api.dialog_stream import dialog_lines
+
+with client.open_stream() as stomp:
+    sub = client.subscribe_glider_output("osu685", stomp)
+    for line in dialog_lines(sub):
+        print(line.text)
+```
+
+`ordered_dialog` is still importable from `sfmc_api.monitor_glider`
+for existing code.
+
+## Sessions: one stream, many consumers
+
+A `StompSubscription` feeds one queue, so one consumer.  That is
+enough when a program does one thing with a topic, but not when
+several parts need the same stream at once — logging the dialog *while*
+a command waits for its reply.  Subscribing twice would work but would
+run the reordering buffer twice over duplicated server traffic.
+
+`GliderSession` subscribes once per topic, runs the ordering and
+reassembly pipeline once, and fans the result out:
+
+```
+             ┌──────────────────── GliderSession ────────────────────┐
+             │                                                       │
+STOMP topic  │  one subscription → ordered_dialog → LineAssembler    │
+   ──────────┼─►                                          │          │
+             │                                            ▼          │
+             │                                     ┌─────────────┐   │
+             │                                     │ broadcaster │   │
+             │                                     └──┬───┬───┬──┘   │
+             │        Listener (bounded queue) ◄──────┘   │   │      │
+             │        Listener (bounded queue) ◄──────────┘   │      │
+             │        on_line(callback)        ◄──────────────┘      │
+             │                                                       │
+             │  supervised by StreamSupervisor: reconnects with      │
+             │  backoff, so listeners stay valid across drops        │
+             └───────────────────────────────────────────────────────┘
+```
+
+```python
+with client.session("osu685", topics=["dialog", "connections"]) as session:
+    session.on_line(lambda line: print(line.text))
+    for event in session.listen("connections"):
+        print(event)
+```
+
+Listener queues are bounded and drop their **oldest** entry when a
+consumer falls behind, counting the loss in `Listener.dropped`.  A
+consumer that must not miss data checks that count rather than
+trusting a silent stream.
+
+`session.epoch` increments once per successfully subscribed session:
+a consumer that captured an epoch and later sees a different one knows
+the stream dropped and reconnected in between, and therefore that it
+may have missed data.  That is how `CommandChannel` detects a drop
+mid-capture.
+
+## Reconnect supervision
+
+All the long-running commands (`sfmc-monitor-glider`, `sfmc-follow`,
+`sfmc-pull-new-downloads`) and `GliderSession` share one supervisor,
+`sfmc_api.stream_reconnect.StreamSupervisor`.  It owns token refresh
+before a retry, session numbering, `STREAM_BOUNDARY` logging,
+connect/disconnect notification, offline accounting, worker-failure
+classification, and the backed-off reconnect.  Callers supply only
+what differs, through hooks (`setup`, `on_subscribed`, `on_idle`,
+`on_session_end`).
+
+Failure policy: a worker raising `StompError` — or a session raising
+any `SFMCError` — is a transient loss and reconnects.  Any other
+worker exception is a code fault and propagates, because running on
+would look healthy while silently doing nothing.

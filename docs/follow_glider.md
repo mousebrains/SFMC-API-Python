@@ -31,8 +31,8 @@ The data flow is shown in [`docs/follow_dataflow.svg`](follow_dataflow.svg):
 ```
 Source (STOMP or log file)
   → StompSubscription queue
-  → ordered_dialog()        -- reorder by sequence number
-  → _read_dialog()          -- reassemble line fragments
+  → ordered_dialog()        -- reorder by sequence number  (dialog_stream)
+  → LineAssembler           -- reassemble line fragments   (dialog_stream)
   → DialogParser            -- state machine: GPS + sensors → SurfacingEvent
   → queue_in
   → Your Follower           -- on_surfacing() → send_files()

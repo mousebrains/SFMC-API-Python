@@ -127,7 +127,16 @@ first boot still produces the alert.
   treated as modified and downloaded again, overwriting the local
   copy.
 - The STOMP connection reconnects automatically with backoff
-  (15 s doubling to 5 min); a reconcile pass runs after each
-  reconnect so nothing is lost across the gap.
+  (15 s doubling to 5 min, with jitter); a reconcile pass runs after
+  each reconnect so nothing is lost across the gap.  This is the same
+  supervisor `sfmc-monitor-glider` and `sfmc-follow` use.
+- **Permanent errors exit rather than retry.**  A transient failure
+  (SFMC 5xx, rate limiting, a network blip) reconnects with backoff as
+  above, but a permanent one — a misspelled glider name, bad or
+  revoked credentials — stops the service so the misconfiguration is
+  visible to you and to systemd's restart accounting.  Earlier
+  versions retried everything forever, which left a broken
+  configuration looking like a healthy service that simply never
+  downloaded anything.
 - Stop with Ctrl-C or SIGTERM; state is saved after every batch, so
   restarting is always safe.
