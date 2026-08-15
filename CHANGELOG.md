@@ -158,6 +158,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   operator and to systemd's restart accounting. Its hand-rolled
   backoff is replaced by the shared `ReconnectBackoff`, which also
   adds jitter.
+- The dev-extra mypy floor moves from `>=1.10` to `>=2.3` (also in
+  `.pre-commit-config.yaml`, which the comment there asks to keep in
+  sync).  The source is clean under mypy 2.3.1 in `--strict`; the old
+  floor let a contributor's environment resolve to a 1.x that checks
+  materially less than CI does.
 - `sfmc-api-test` is **read-only by default**.  Pass `--allow-writes`
   to run the state-changing groups (upload/deploy/delete files,
   deployment creation, script-assignment cycling, send-command); the
