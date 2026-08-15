@@ -47,6 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `sfmc-api send-command GLIDER CMD --wait` (exit `2` when no complete
   reply arrived), with `--timeout`, `--quiet-for`, `--until`, and
   `--echo-anchor`. See [docs/script_control.md](docs/script_control.md).
+  A capture that hears nothing at all reports `reason="silent"` and
+  `complete=False`.  Live testing against a glider that was busy
+  transmitting produced exactly this case, and an earlier revision
+  reported it as `complete=True` with an empty `lines` — the false
+  reassurance the type exists to prevent.
 - **`sfmc-api probe-command GLIDER CMD`** — a diagnostic that dumps
   raw dialog frames with arrival offsets and sequence numbers around a
   submitted command, uninterpreted. It answers the one question this

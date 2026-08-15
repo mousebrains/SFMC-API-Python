@@ -168,8 +168,8 @@ with client.command_channel("osu685") as chan:
 
 | Field | Meaning |
 |-------|---------|
-| `complete` | Capture reached a defined stop (`terminator`, `quiet`, `max_lines`).  `False` means partial or absent — check `reason`. |
-| `reason` | `terminator`, `quiet`, `max_lines`, `timeout`, `disconnected`, `no_echo`. |
+| `complete` | Capture reached a defined stop **and heard something** (`terminator`, `quiet`, `max_lines`).  `False` means partial or absent — check `reason`. |
+| `reason` | `terminator`, `quiet`, `max_lines`, `silent`, `timeout`, `disconnected`, `no_echo`. |
 | `correlated` | `True` only when anchored to an echo of *this* command.  `False` means "what appeared on a shared terminal during the window". |
 | `dropped_lines` | Non-zero means the capture lagged and `lines` has gaps. |
 | `glider_connected` | Sampled only when no reply arrived, so you can tell "SFMC is broken" from "the glider is underwater". |
@@ -192,6 +192,29 @@ Defaults are sized for an Iridium link (`timeout=45`, `quiet=5`).
 There is no dependable prompt sentinel in Slocum dialog over a
 fragmented link, so the quiet window is the usual end-of-reply signal;
 `until=` is more precise when you know the command's final line.
+
+### What a live surfacing actually looked like
+
+Measured against the `osusim` simulator mid-mission, because it shapes
+how much you should trust an uncorrelated capture:
+
+* The glider's own banner states the rule — `Hit ! <GliderDos cmd>  to
+  execute <GliderDos cmd>` — so a command sent to a glider **running a
+  mission** needs the `!` prefix: `!get m_de_oil_vol`.
+* The surfacing was dominated by a file transfer.  The first command's
+  capture collected **615 lines of mission dialog** (`behavior
+  goto_wpt_601: …`, `Total Bytes sent/received: …`) and not one line of
+  answer.  It was correctly reported `correlated=False` — which is
+  precisely what that flag is for.  Treat an uncorrelated capture as a
+  transcript of a shared terminal, not as a reply.
+* Three later commands landed in a stretch with **no dialog at all**.
+  They are reported `silent`, not `complete`.
+* Whether the glider executed them is unknown: nothing came back either
+  way.  SFMC accepting a command remains the only thing a 200 proves.
+
+The practical lesson: send commands when the link is quiet, prefer
+`until=` over a quiet window when you know the answer's shape, and
+check `correlated` before reading `lines` as an answer.
 
 ### Echo anchoring — verify before trusting
 

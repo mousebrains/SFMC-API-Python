@@ -193,6 +193,34 @@ class TestStopReasons:
         assert len(reply.lines) == 5
         assert reply.complete is True
 
+    def test_total_silence_is_not_a_completed_reply(self) -> None:
+        """Hearing nothing must never read as a successful reply.
+
+        Observed live against osusim: commands submitted while the
+        glider was busy transmitting produced no dialog at all, and an
+        earlier version reported them ``complete=True`` with an empty
+        ``lines`` — the exact false reassurance this type exists to
+        prevent.
+        """
+        session = FakeSession()
+        channel, _ = _channel(session, timeout=5.0, quiet=0.2)
+        reply = channel.send("!get m_de_oil_vol")
+
+        assert reply.lines == ()
+        assert reply.reason == "silent"
+        assert reply.complete is False
+        assert bool(reply) is False
+
+    def test_quiet_still_completes_when_output_arrived(self) -> None:
+        """The quiet window is only an ending if there was a beginning."""
+        session = FakeSession()
+        channel, _ = _channel(session, timeout=5.0, quiet=0.2)
+        _emit_after(session, 0.05, "m_de_oil_vol=210.5")
+        reply = channel.send("!get m_de_oil_vol")
+
+        assert reply.reason == "quiet"
+        assert reply.complete is True
+
     def test_timeout_is_not_an_error(self) -> None:
         """A submerged glider answering nothing is normal, not a failure."""
         session = FakeSession(connected=False)

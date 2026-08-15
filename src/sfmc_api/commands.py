@@ -91,15 +91,27 @@ logger = logging.getLogger(__name__)
 #: Why reply capture stopped.
 #:
 #: ``terminator``   a line matched :attr:`ReplyPolicy.until`
-#: ``quiet``        no new output for :attr:`ReplyPolicy.quiet` seconds
+#: ``quiet``        output arrived, then stopped for
+#:                  :attr:`ReplyPolicy.quiet` seconds
 #: ``max_lines``    the line cap was reached; output may be truncated
+#: ``silent``       the quiet window elapsed without a single line —
+#:                  nothing was heard at all
 #: ``timeout``      :attr:`ReplyPolicy.timeout` expired with the reply
 #:                  still open — usual when the glider is submerged
 #: ``disconnected`` the event stream dropped during capture
 #: ``no_echo``      echo anchoring was on and no echo ever appeared
-StopReason = Literal["terminator", "quiet", "max_lines", "timeout", "disconnected", "no_echo"]
+StopReason = Literal[
+    "terminator", "quiet", "max_lines", "silent", "timeout", "disconnected", "no_echo"
+]
 
 #: Reasons that represent a capture which ran to a defined end.
+#:
+#: ``silent`` is deliberately absent.  A quiet window that elapsed
+#: without a single line means nothing was heard — reporting that as a
+#: completed reply is exactly the false reassurance this class exists
+#: to avoid.  Observed live: commands submitted while a glider was busy
+#: transmitting produced no output whatever, and an earlier version
+#: reported them ``complete=True`` with an empty ``lines``.
 _COMPLETE_REASONS: frozenset[str] = frozenset({"terminator", "quiet", "max_lines"})
 
 #: Serializes reply-capturing commands per glider across every channel
@@ -166,8 +178,10 @@ class CommandReply:
         submitted_at: ``time.time()`` when SFMC accepted the command.
         lines: Captured dialog lines, in order.
         complete: ``True`` if capture reached a defined stopping point
-            (terminator, quiet window, or line cap).  ``False`` means
-            the reply may be partial or absent — check *reason*.
+            *and* actually captured something (terminator, quiet
+            window, or line cap).  ``False`` means the reply may be
+            partial or absent — check *reason*.  A capture that heard
+            nothing at all is never ``complete``; it is ``silent``.
         reason: Why capture stopped; see :data:`StopReason`.
         correlated: ``True`` only when the capture was anchored to an
             echo of this command.  ``False`` means these lines are
@@ -429,7 +443,10 @@ class CommandChannel:
                 line = listener.get(timeout=min(0.5, remaining))
             except Empty:
                 if anchored and (time.monotonic() - last_event) >= policy.quiet:
-                    reason = "quiet"
+                    # Silence after output is an ended reply; silence
+                    # from the start means we never heard anything, and
+                    # must not be dressed up as a completed one.
+                    reason = "quiet" if lines else "silent"
                     break
                 continue
 
