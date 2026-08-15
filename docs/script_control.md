@@ -201,20 +201,42 @@ how much you should trust an uncorrelated capture:
 * The glider's own banner states the rule — `Hit ! <GliderDos cmd>  to
   execute <GliderDos cmd>` — so a command sent to a glider **running a
   mission** needs the `!` prefix: `!get m_de_oil_vol`.
-* The surfacing was dominated by a file transfer.  The first command's
-  capture collected **615 lines of mission dialog** (`behavior
-  goto_wpt_601: …`, `Total Bytes sent/received: …`) and not one line of
-  answer.  It was correctly reported `correlated=False` — which is
+* **The surfacing was dominated by a Zmodem file transfer, and a glider
+  does not service commands while one is running.**  This is the single
+  most useful thing to know before scripting against this API: a
+  command submitted during a transfer is accepted by SFMC and simply
+  goes unanswered.
+* The first command's capture collected **615 lines of mission dialog**
+  (`behavior goto_wpt_601: …`, `Total Bytes sent/received: …`) and not
+  one line of answer.  It was correctly reported `correlated=False` —
   precisely what that flag is for.  Treat an uncorrelated capture as a
   transcript of a shared terminal, not as a reply.
-* Three later commands landed in a stretch with **no dialog at all**.
-  They are reported `silent`, not `complete`.
+* Three later commands landed in a stretch with **no dialog at all**,
+  mid-transfer.  They are reported `silent`, not `complete`.
 * Whether the glider executed them is unknown: nothing came back either
   way.  SFMC accepting a command remains the only thing a 200 proves.
 
-The practical lesson: send commands when the link is quiet, prefer
-`until=` over a quiet window when you know the answer's shape, and
-check `correlated` before reading `lines` as an answer.
+### Timing a command
+
+A command is worth sending when the link is *idle* — not while files
+are moving.  Zmodem transfer activity is observable, so a script can
+wait for it rather than guess:
+
+```python
+with client.session("osu685", topics=("dialog", "zmodem")) as session:
+    transfers = session.listen("zmodem")
+    # ... wait for transfer activity to stop, then:
+    reply = chan.send("!get m_de_oil_vol")
+```
+
+`client.get_zmodem_transfers(connection_id)` gives the same picture over
+REST.  The practical rules:
+
+1. Send when the link is quiet; a command sent mid-transfer is expected
+   to go unanswered.
+2. Prefer `until=` over a quiet window when you know the answer's shape.
+3. Check `correlated` before reading `lines` as an answer.
+4. Treat `silent` as "not heard", never as "no output".
 
 ### Echo anchoring — verify before trusting
 
