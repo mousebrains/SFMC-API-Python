@@ -23,7 +23,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
@@ -32,6 +32,13 @@ from .auth import authenticate
 from .config import SFMCConfig
 from .exceptions import APIError, AuthenticationError
 from .stomp import StompConnection, StompSubscription
+
+if TYPE_CHECKING:  # pragma: no cover - imported lazily to avoid a cycle
+    from collections.abc import Iterable
+
+    from .commands import CommandChannel, ReplyPolicy
+    from .ops import OperationExecutor
+    from .session import GliderSession, Topic
 
 __all__ = ["SFMCClient"]
 
@@ -126,6 +133,8 @@ class SFMCClient:
         self._token: str | None = None
         self._token_lock = threading.Lock()
         self._auth_lock = threading.Lock()
+        self._glider_ids: dict[str, int] = {}
+        self._id_cache_lock = threading.Lock()
 
     # ── Context manager ──────────────────────────────────────────────
 
@@ -1757,9 +1766,11 @@ class SFMCClient:
         Listens on STOMP topic ``/topic/glider-link-output/{gliderId}``.
 
         Each message is a dict with ``sequenceNumber`` and ``data``
-        (the output text).  Messages may arrive out of order — see
-        ``sfmc_api.monitor_glider.ordered_dialog()`` for a
-        reordering implementation.
+        (the output text).  Messages may arrive out of order and are
+        not aligned to line boundaries; use
+        :func:`sfmc_api.dialog_stream.dialog_lines` to get ordered,
+        reassembled lines, or :meth:`session` to share one such stream
+        among several consumers.
 
         Args:
             glider_name: The registered name of the glider.
@@ -1872,12 +1883,147 @@ class SFMCClient:
         return stomp.subscribe(f"/topic/low-freq-glider-deployment-updates-{deployment_id}")
 
     def _get_glider_id(self, glider_name: str) -> int:
-        """Look up the numeric glider ID from the glider name."""
+        """Look up the numeric glider ID from the glider name.
+
+        Cached: a registered glider keeps its ID, and every
+        ``subscribe_*`` call needs it, so a session that reconnects
+        hourly would otherwise spend an HTTP round trip per topic per
+        reconnect.  Call :meth:`clear_glider_id_cache` after
+        re-registering a glider under the same name.
+        """
         _validate_path_segment(glider_name, "glider_name")
+        with self._id_cache_lock:
+            cached = self._glider_ids.get(glider_name)
+        if cached is not None:
+            return cached
+
         details = self.get_glider_details(glider_name)
         try:
-            return int(details["data"]["id"])
+            glider_id = int(details["data"]["id"])
         except (KeyError, TypeError, ValueError) as exc:
             raise APIError(
                 0, "Unexpected response from get_glider_details: missing data.id"
             ) from exc
+        with self._id_cache_lock:
+            self._glider_ids[glider_name] = glider_id
+        return glider_id
+
+    def clear_glider_id_cache(self) -> None:
+        """Forget cached glider IDs, forcing a fresh lookup."""
+        with self._id_cache_lock:
+            self._glider_ids.clear()
+
+    # ── Sessions, Commands & Async Operations ────────────────────────
+
+    def session(
+        self,
+        glider_name: str,
+        *,
+        topics: Iterable[Topic] = ("dialog",),
+        start: bool = True,
+        **kwargs: Any,
+    ) -> GliderSession:
+        """Open a supervised, multi-consumer event session for a glider.
+
+        Unlike :meth:`open_stream` plus a ``subscribe_*`` call — which
+        gives one queue to one consumer, and dies with the connection —
+        a session reconnects on its own and fans each topic out to as
+        many listeners and callbacks as you register::
+
+            with client.session("osu685", topics=["dialog", "connections"]) as s:
+                s.on_line(lambda line: print(line.text))
+                for event in s.listen("connections"):
+                    print(event)
+
+        Args:
+            glider_name: Registered glider name.
+            topics: Any of ``dialog``, ``connections``, ``scripts``,
+                ``zmodem``, ``deployment``.  Subscribe only to what
+                you consume.
+            start: Connect before returning, raising if the first
+                connection fails permanently.  ``False`` returns
+                immediately and connects in the background.
+            **kwargs: Forwarded to
+                :class:`~sfmc_api.session.GliderSession` (``stop``,
+                ``notifier``, ``log``, ``reconnect``, backoff
+                overrides).
+
+        Returns:
+            A :class:`~sfmc_api.session.GliderSession`.
+        """
+        from .session import GliderSession
+
+        _validate_path_segment(glider_name, "glider_name")
+        session = GliderSession(self, glider_name, topics=topics, **kwargs)
+        if start:
+            session.start()
+        return session
+
+    def command_channel(
+        self,
+        glider_name: str,
+        *,
+        policy: ReplyPolicy | None = None,
+        session: GliderSession | None = None,
+        **kwargs: Any,
+    ) -> CommandChannel:
+        """Open a channel that submits commands and captures replies.
+
+        Read :mod:`sfmc_api.commands` before relying on the reply: SFMC
+        acknowledging a command is not the glider running it, and the
+        dialog topic carries no correlation handle, so replies are
+        matched heuristically and may be absent entirely when the
+        glider is submerged::
+
+            with client.command_channel("osu685") as chan:
+                reply = chan.send("sensor m_battery")
+                print(reply.text if reply.complete else f"no reply: {reply.reason}")
+
+        Args:
+            glider_name: Registered glider name.
+            policy: Default stop conditions for reply capture.
+            session: An existing session to share — e.g. one a monitor
+                is already streaming dialog through.  When omitted, the
+                channel opens and owns its own session.
+            **kwargs: Forwarded to :meth:`session` when creating one.
+
+        Returns:
+            A :class:`~sfmc_api.commands.CommandChannel`.
+        """
+        from .commands import CommandChannel
+
+        _validate_path_segment(glider_name, "glider_name")
+        owns_session = session is None
+        if session is None:
+            session = self.session(glider_name, topics=("dialog",), **kwargs)
+        return CommandChannel(
+            self,
+            session,
+            policy=policy,
+            owns_session=owns_session,
+        )
+
+    def operations(self, max_workers: int | None = None) -> OperationExecutor:
+        """Create an executor for running any client method off-thread.
+
+        Every method on this class becomes asynchronous through it,
+        with no per-endpoint wrapper to drift out of date::
+
+            with client.operations() as ops:
+                future = ops.submit(client.get_glider_details, "osu685")
+                details = future.result(timeout=30)
+
+        Args:
+            max_workers: Concurrent operations.  Defaults to
+                :data:`~sfmc_api.ops.DEFAULT_MAX_WORKERS`; keep it
+                small, since SFMC rate-limits.
+
+        Returns:
+            An :class:`~sfmc_api.ops.OperationExecutor`.  Use it as a
+            context manager, or call ``shutdown()`` when done.
+        """
+        from .ops import DEFAULT_MAX_WORKERS, OperationExecutor
+
+        return OperationExecutor(
+            max_workers=DEFAULT_MAX_WORKERS if max_workers is None else max_workers
+        )

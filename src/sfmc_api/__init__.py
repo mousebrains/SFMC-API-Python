@@ -14,9 +14,11 @@ credentials.
 """
 
 from .client import SFMCClient
+from .commands import CommandChannel, CommandReply, ReplyPolicy
 from .config import SFMCConfig
 from .coordinates import dddmm_to_decimal, decimal_to_dddmm, km_to_degrees
 from .dialog_parser import DialogParser, SensorReading, SurfacingEvent
+from .dialog_stream import DialogLine, LineAssembler, dialog_lines, ordered_dialog
 from .exceptions import (
     APIError,
     AuthenticationError,
@@ -27,6 +29,8 @@ from .exceptions import (
 from .follow_glider import RunStats, follow_glider
 from .follower import BaseFollower, load_follower_class
 from .ma_writer import MAX_WAYPOINTS, generate_goto_ma
+from .ops import OperationExecutor, OperationResult
+from .session import GliderSession, Listener
 from .stomp import MAX_SEQUENCE, StompConnection, StompError, StompSubscription
 
 __all__ = [
@@ -35,9 +39,18 @@ __all__ = [
     "APIError",
     "AuthenticationError",
     "BaseFollower",
+    "CommandChannel",
+    "CommandReply",
     "ConfigError",
+    "DialogLine",
     "DialogParser",
+    "GliderSession",
+    "LineAssembler",
+    "Listener",
+    "OperationExecutor",
+    "OperationResult",
     "RateLimitError",
+    "ReplyPolicy",
     "RunStats",
     "SFMCClient",
     "SFMCConfig",
@@ -49,10 +62,12 @@ __all__ = [
     "SurfacingEvent",
     "dddmm_to_decimal",
     "decimal_to_dddmm",
+    "dialog_lines",
     "follow_glider",
     "generate_goto_ma",
     "km_to_degrees",
     "load_follower_class",
+    "ordered_dialog",
 ]
 
 __version__ = "0.2.0"
