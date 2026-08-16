@@ -504,16 +504,103 @@ The design already delivers script-assignment events, so this costs
 nothing structurally — but it must be documented as a requirement, not
 left as an exercise.
 
-### 3. Reachability of the behaviour
+### 3. Reachability of the behaviour — answered
 
-Some of what XML does may not be expressible through the REST API at
-all — anything touching dockserver-side comms behaviour (callback
-scheduling, modem dialling) rather than glider-side commands.  What is
-reachable today is: commands, file transfer both ways, plans, script
-control, and observation of everything over STOMP.
+I had flagged this as the risk that might sink full replacement:
+perhaps some XML behaviour is dockserver-side and unreachable over
+REST.  Reading the actual corpus (20 scripts from `gliderfmc1`,
+including `riot.xml`, the one running on osusim) settles it, and the
+answer is better than expected.
 
-**This is the open question the actual XML files would answer**, and it
-is why they are worth reading before committing to this use case.
+**The entire XML vocabulary is seven elements and four attributes:**
+
+```xml
+<gliderScript>
+  <initialState name="...">          <!-- also <state>, <finalState> -->
+    <transitions>
+      <transition matchExpression="REGEX" toState="NEXT">
+        <action type="glider" command="s *.sbd *.tbd -num=3"/>
+      </transition>
+      <transition timeout="10" toState="NEXT"/>   <!-- no match: a timer -->
+    </transitions>
+  </initialState>
+</gliderScript>
+```
+
+That is the whole engine: *in state S, wait for a dialog line matching
+a regex or for a timeout; optionally send a glider command; move to
+state T.*
+
+Measured over the corpus:
+
+| Fact | Count |
+|---|---|
+| `<action>` elements | 404 |
+| …of which `type="glider"` | **404 — all of them** |
+| Transitions with `timeout=` | 204 |
+| …of which have **no** `matchExpression` (pure timers) | **204 — all of them** |
+| Distinct action types other than `glider` | **none** |
+
+**Every action in every script is a glider command.**  There are no
+dockserver-side actions, no file-transfer primitives, no callback
+scheduling verbs — the callback scripts achieve their effect by sending
+the glider `callback 30` or `h 0 0`, which is an ordinary command.  So
+the whole action vocabulary is reachable through
+`PUT /v1/submit-command`, the endpoint the command channel already
+wraps.
+
+*(Correction to an earlier reading of mine: I initially reported a
+`num=` attribute on `<action>`.  That was an artefact of my own
+attribute regex matching inside the command string `-num=3`.  There is
+no such attribute.)*
+
+### 3a. What this changes in the design
+
+Two consequences, one of which is a firm requirement and one a risk.
+
+**Timers are mandatory, not a convenience.**  204 transitions fire on a
+timeout with no regex at all — "wait 10 s, then go to `sendzModem`".
+An engine that can only react to incoming events cannot express these
+scripts.  This resolves the open question about `tick` events: the
+engine needs a real timer facility, and per-state timeouts rather than
+only a global periodic tick:
+
+```python
+self.after(10.0, tag="sendzModem")     # -> a "timer" event, or cancelled
+```
+
+**Prompt matching may not survive line assembly.**  Several scripts
+match a GliderDos prompt:
+
+```
+matchExpression="(Glider(Dos|LAB) [AIN] (0|(-?[1-9]+))) &gt;"
+```
+
+Terminal prompts conventionally carry **no trailing newline**.  If that
+holds here, a prompt never terminates a line, so a line-only dialog
+stream would never emit it and a "smart XML" engine would silently
+never match — the worst kind of failure, because nothing errors.
+
+**This is a hypothesis, not a measurement.**  The osusim capture cannot
+settle it: the glider stayed in its mission throughout, so the only
+occurrences of `GliderDos` were inside banner text
+(`Hit ! <GliderDos cmd> to execute...`), never an actual prompt.  It is
+cheap to test — watch the dialog while the glider sits at GliderDos —
+and it must be tested before anyone builds prompt-driven logic on the
+line stream.
+
+If confirmed, the answer is not "use `dialog.raw` and reassemble by
+hand".  It is a third matching facility, because this is exactly what
+the SFMC engine must already do:
+
+```python
+def on_match(self, pattern: str) -> None: ...   # matched against the
+                                                # rolling buffer, including
+                                                # the unterminated tail
+```
+
+`LineAssembler.pending` already exposes that tail, so the mechanism
+exists; only the API around it would be new.
 
 ### 4. Failure semantics
 
@@ -523,7 +610,24 @@ told half of something.  The strike-counter policy and the audit log
 matter more here than anywhere else, and "no automatic retry of
 state-changing operations" stops being a nicety.
 
-### What is needed to go further
+### Feasibility verdict
+
+Replacing the XML engine is **feasible with the API as it stands**.
+Every action the corpus performs is a glider command; every trigger is
+either a dialog regex or a timeout; both are available.  What stands
+between the design and a working replacement is not API coverage but
+three engineering items, all identified above:
+
+1. a timer facility (required — 204 transitions depend on it);
+2. resolving the prompt/newline question, and adding buffer matching if
+   it confirms;
+3. the deployment posture — run adjacent to SFMC, keep a floor script.
+
+The remaining risk is operational, not technical: an engine that
+replaces the XML inherits responsibility for a glider in the water,
+across a network that the XML engine does not depend on.
+
+### Fetching the scripts
 
 The API exposes script **names** but not their **content**.  Verified
 against `gliderfmc1`, not assumed:
@@ -542,15 +646,10 @@ for a real glider folder and 404s for `scripts`, so `scripts` is not a
 glider folder at all.  The XML lives server-side in SFMC, and the
 `configuration` folder holds glider config, not scripts.
 
-So the XML must come from the SFMC host filesystem or the web UI.  The
-most informative set, in order:
-
-1. `riot.xml` — the user script actually running on osusim.
-2. `sfmc.xml` — the factory baseline, i.e. what "normal" looks like.
-3. `drifter.xml` — closest to the follower use case already solved.
-4. `IridCallback.xml` / `callbackPrimary.xml` — comms/callback logic,
-   the part most likely to be *unreachable* through the REST API and
-   therefore the part that decides whether full replacement is possible.
+So the XML must come from the SFMC host filesystem or the web UI.
+Twenty scripts were supplied that way and analysed above; they are kept
+in `SFMC-XML/`, which is git-ignored — they are not ours to
+redistribute and carry site-specific configuration.
 
 ## Adversarial review of this design
 
@@ -699,11 +798,11 @@ Each phase is independently useful and independently reviewable.
 
 ## Open questions
 
-1. Should `tick` events be on by default?  A periodic wake-up makes
-   time-based logic easy, and also makes it easy to write a busy loop.
-   For a formation engine a tick is close to necessary — "re-evaluate
-   the formation every 60 s" is the natural shape — which argues for
-   on-by-default at a slow interval.
+1. *(Resolved by the XML corpus: timers are required, not optional —
+   204 transitions fire on a timeout alone.  The open part is only the
+   shape: per-state `after(seconds, tag)`, a global periodic `tick`, or
+   both.  A formation engine wants the periodic form; the XML scripts
+   want the per-state one.)*
 2. Per-(glider, source) queue bounds: one number for all, or
    configurable per source?  A dialog flood and a connection-event
    trickle want different depths, but every extra knob is one more
