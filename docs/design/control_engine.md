@@ -28,13 +28,17 @@ engine; `sfmc-monitor-glider` becomes another.
 
 ## Goals
 
-- One event stream, several sources, each event tagged with its source
-  and the time it was received.
+- One event stream, several sources, each event tagged with its glider,
+  its source, and the time it was received.
+- **One or many gliders.**  The common case is one; a formation is
+  several, and coordinating them is the whole point of a formation
+  controller.  Multi-glider is designed in from the start rather than
+  retrofitted.
 - Dialog delivered **as assembled lines by default**, with raw chunks
   available for engines that want them.
 - Access to the whole SFMC API from engine code, without the engine
   managing threads, futures, reconnects, or rate limits.
-- Engines can add sources at runtime (subscribe to another topic).
+- Engines can add sources — and gliders — at runtime.
 - An engine that a scientist writes on a Tuesday should still be
   running correctly in six weeks.
 
@@ -71,6 +75,7 @@ the bar.
 ```python
 @dataclass(frozen=True)
 class Event:
+    glider: str          # which glider this concerns — always present
     source: str          # "dialog", "dialog.raw", "connections", "result", ...
     body: Any            # str for dialog, dict for STOMP topics, ...
     received_at: float   # time.time() when this arrived locally
@@ -78,6 +83,14 @@ class Event:
     request_id: int | None = None   # set on "result" / "error"
     tag: str | None = None          # caller's label, echoed back on results
 ```
+
+`glider` is **required, not optional**.  A single-glider engine can
+ignore it; a formation engine cannot function without it, and making it
+optional would mean every multi-glider engine starts with a `None`
+check that can only ever be dead code.  For the handful of operations
+that are not per-glider (`upload_cache_files` takes a group,
+`get_zmodem_transfers` takes a connection id), the `result` event
+carries the glider the engine named when it made the request.
 
 `received_at` is the **local host clock**, not the glider's.  Named
 explicitly because that confusion is guaranteed otherwise: glider time
@@ -146,13 +159,79 @@ docs and not just here:
    is a strong reason to prefer `dialog` unless chunks are genuinely
    required.
 
+## Multiple gliders
+
+A formation controller exists to make decisions *across* gliders —
+"osu685 is 400 m behind, slow osu684" — so the cross-glider case drives
+the design rather than being tolerated by it.  Four decisions follow.
+
+### One engine thread for the whole fleet
+
+Not one thread per glider.  Per-glider threads would isolate a slow
+handler, but they would also make every piece of cross-glider state a
+shared-mutable-state problem — which is precisely the class of bug this
+design exists to keep away from its authors.  A formation engine
+comparing two gliders' positions would need a lock, and would not have
+one.
+
+So: **one thread, one ordered queue, all gliders**.  The engine sees
+`osu684`'s dialog and `osu685`'s dialog in one sequence, and can hold
+fleet state in ordinary attributes with no locking.  The cost is that a
+slow `on_event` stalls the whole fleet, not one glider; the watchdog
+names the offending event, and heavy work belongs behind `request`.
+
+An engine that wants per-glider independence gets it by ignoring the
+other gliders — not by a second mechanism.
+
+### One session per glider
+
+Each glider gets its own `GliderSession`, and therefore its own STOMP
+connection, supervisor, and reconnect timer.
+
+- **Failures isolate.**  One glider's stream dropping does not blind the
+  engine to the rest of the fleet; it produces a `stream` event for
+  that glider and reconnects underneath.
+- **Epochs are per glider**, which is what a per-glider reconnect gap
+  means anyway.
+- It reuses PR #12 unchanged, N times.
+
+*Rejected for now:* multiplexing every glider's topics onto one shared
+STOMP connection.  It is possible — STOMP subscriptions are independent
+and `StompConnection.subscribe()` already takes an arbitrary topic — and
+it would use one socket instead of N.  But it converts an isolated
+failure into a correlated one: a single dropped WebSocket blinds the
+operator to the entire formation at once, which is the worst possible
+time to be blind.  Worth revisiting only if socket count becomes a real
+constraint; a formation is on the order of ten gliders, not hundreds.
+
+### Serialisation is per glider, rate limiting is global
+
+These pull in opposite directions and must not be conflated:
+
+- **Mutual exclusion is per glider.**  Two waypoint updates on `osu684`
+  must not interleave; an update on `osu684` and one on `osu685` may
+  run concurrently.  `OperationExecutor.serialized(glider, ...)`
+  already does exactly this — the `KeyedLock` was built for it.
+- **Rate limiting is fleet-wide.**  SFMC rate-limits the *account*, not
+  the glider.  A per-glider cap would multiply by fleet size and
+  produce exactly the 429 storm the cap exists to prevent.  One global
+  cap on outstanding requests, and one executor pool shared by all
+  gliders, sized for the server rather than the fleet.
+
+### Gliders join and leave at runtime
+
+A formation changes.  `add_glider(name)` starts a session and begins
+delivering its events; `remove_glider(name)` closes it.  Both are
+ordinary engine calls, so an engine can react to a glider going
+permanently silent.
+
 ## The engine API
 
 The whole surface an engine author must learn:
 
 ```python
 class BaseControlEngine:
-    sources: list[str] = ["dialog"]      # what to subscribe at start
+    sources: list[str] = ["dialog"]      # what to subscribe, per glider
 
     # ── you implement ────────────────────────────────────────────
     def on_start(self) -> None: ...
@@ -160,29 +239,43 @@ class BaseControlEngine:
     def on_stop(self) -> None: ...
 
     # ── you call ─────────────────────────────────────────────────
-    def request(self, op: str, *args, tag: str | None = None, **kwargs) -> int
-    def subscribe(self, source: str) -> None
-    def unsubscribe(self, source: str) -> None
+    def request(self, op: str, *args, glider: str, tag: str | None = None, **kwargs) -> int
+    def subscribe(self, source: str, glider: str | None = None) -> None
+    def unsubscribe(self, source: str, glider: str | None = None) -> None
+    def add_glider(self, name: str) -> None
+    def remove_glider(self, name: str) -> None
     def log(self, msg: str, *args) -> None
     def notify(self, key: str, summary: str, detail: str) -> None
+    @property
+    def gliders(self) -> tuple[str, ...]
     @property
     def client(self) -> SFMCClient      # escape hatch; see below
 ```
 
 `request` names an operation by its client method name and returns
-immediately with a request id:
+immediately with a request id.  A formation engine reads naturally:
 
 ```python
 def on_event(self, event):
     match event.source:
-        case "dialog":
-            if "Waypoint" in event.body:
-                self.request("get_mission_plan", self.glider, tag="plan")
+        case "dialog" if "Waypoint" in event.body:
+            self.request("get_mission_plan", event.glider,
+                         glider=event.glider, tag="plan")
         case "result" if event.tag == "plan":
-            self.plan = event.body          # ordinary state, no locks
+            self.plans[event.glider] = event.body   # fleet state, no locks
+            self.retask_formation()
         case "error" if event.tag == "plan":
-            self.log("plan fetch failed: %s", event.body)
+            self.log("%s: plan fetch failed: %s", event.glider, event.body)
 ```
+
+**`glider=` is a keyword, separate from the positional arguments**, and
+that redundancy is deliberate.  It names the *serialisation key*, not
+the argument.  Inferring it from `args[0]` would be right for most
+endpoints and quietly wrong for the ones that take something else —
+`get_zmodem_transfers(connection_id)`, `upload_cache_files(group_name)`
+— and "quietly wrong about which glider we locked" is not a failure mode
+worth accepting to save a keyword.  It also gives every `result` and
+`error` event a glider to carry.
 
 **Why a string, not the bound method?**  Because it gives the framework
 a place to stand: dry-run interception, write-gating, rate limiting,
@@ -237,42 +330,55 @@ preference:
 ## Threading model, and what is guaranteed
 
 ```
-   STOMP topics ─┐
-                 ├─► GliderSession fan-out ─► merge ─► inbound queue ─► engine thread
-   result/error ─┘                                                        (on_event)
-                                                                              │
-                                                                    request() │
-                                                                              ▼
-                                                              OperationExecutor (N workers)
-                                                                              │
-                                                        result/error events ──┘
+  osu684  GliderSession ─► fan-out ─┐
+  osu685  GliderSession ─► fan-out ─┤
+  osu686  GliderSession ─► fan-out ─┼─► merge ─► queue ─► engine thread
+                      result/error ─┘   (tags glider              (on_event)
+                                         + source)                     │
+                                                             request() │
+                                                                       ▼
+                                              OperationExecutor — one pool, all gliders
+                                              serialized per glider, capped fleet-wide
+                                                                       │
+                                                 result/error events ──┘
 ```
 
 Guarantees an engine author can rely on:
 
 1. `on_start`, every `on_event`, and `on_stop` run on **one** thread,
-   never concurrently.  Engine state needs no locking.
-2. Events from a single source arrive in order.
-3. `received_at` is non-decreasing within a source.
+   never concurrently — across the whole fleet.  Engine state, including
+   cross-glider state, needs no locking.
+2. Events from a single (glider, source) pair arrive in order.
+3. `received_at` is non-decreasing within a (glider, source) pair.
 4. A `result`/`error` event always follows the `request` that caused it.
 
 Explicitly **not** guaranteed, because pretending otherwise would be a
 lie that bites later:
 
-- Ordering *between* sources.  A `result` may land between two dialog
-  lines.  This is correct actor behaviour and the docs must say so.
+- Ordering *between* sources, or *between gliders*.  `osu685`'s dialog
+  may land between two of `osu684`'s lines, and a `result` may land
+  between two dialog lines.  This is correct actor behaviour and the
+  docs must say so.
 - That a result arrives at all before shutdown; `on_stop` may run with
   requests outstanding.
 - That every event was delivered — see backpressure.
+- That the fleet is in a consistent state at any instant.  Each glider
+  is observed independently, and one may be minutes stale while
+  another is current.  A formation engine must treat its fleet state as
+  a set of last-known values with per-glider timestamps, not a
+  snapshot.
 
 ## Backpressure
 
 Queues are bounded.  A slow engine must not grow memory without bound,
 and must not be lied to about what it missed.
 
-- Inbound queue per source, bounded, **drop oldest**.
+- Inbound queue per **(glider, source)**, bounded, **drop oldest**.
+  Per-glider bounds matter more than per-source ones: one glider
+  surfacing and dumping a mission's worth of dialog must not evict the
+  connection events of the five gliders still in the water.
 - Every drop increments a counter; a `dropped` event is delivered as
-  soon as the engine catches up.
+  soon as the engine catches up, naming the glider and source.
 - A `on_event` call that exceeds a watchdog threshold (default 30 s)
   logs a warning naming the engine and the event — the single most
   common way a novice will break this system is a slow `on_event`, and
@@ -379,11 +485,14 @@ result arrives before the next dialog line will be wrong occasionally
 and mysteriously.  *Mitigation:* say so in the docs, and make replay
 deliberately interleave results so the surprise happens on a laptop.
 
-**5. One engine thread is a bottleneck.**  A slow `on_event` stalls
-everything, and drops follow.  *Mitigation:* the watchdog names the
-offender; heavy work belongs behind `request`.  Multiple engine threads
-were rejected: they would hand every author a locking problem, which is
-exactly what this design exists to avoid.
+**5. One engine thread is a bottleneck, and now for the whole fleet.**
+A slow `on_event` stalls every glider, not one.  *Mitigation:* the
+watchdog names the offender; heavy work belongs behind `request`.
+Multiple engine threads were rejected: they would hand every author a
+locking problem for exactly the cross-glider state a formation
+controller exists to keep, which is the opposite of the goal.  If a
+fleet ever outgrows one thread, the escape is more processes — one
+engine per sub-formation — not more threads inside one.
 
 **6. The framework can now do real damage.**  An engine can assign a
 script or deploy a file on a glider in the water.  *Mitigation:* writes
@@ -421,39 +530,76 @@ multi-glider engines — go in from the start rather than being bolted on.
 
 **12. Nothing here has been built.**  The estimates above are
 judgement, not measurement, and the merge step in particular hides
-questions that only appear in code: whether per-source queues need
-independent bounds, and how a source that is added at runtime slots
-into an already-running merge.  Phase 1 exists to answer those before
-anything depends on the answers.
+questions that only appear in code: how a source or glider added at
+runtime slots into an already-running merge, and whether per-(glider,
+source) queues need independent bounds.  Phase 1 exists to answer those
+before anything depends on the answers.
+
+**13. Multi-glider makes every failure mode fan out.**  N sessions mean
+N reconnect loops, N sets of drops, N epochs, and an engine that must
+cope with the fleet being partially observed — one glider current,
+another twenty minutes stale.  A single-glider engine could ignore
+staleness; a formation engine that ignores it will steer on old
+positions.  *Mitigation:* per-glider timestamps are in the event model,
+and the "no consistent snapshot" caveat is stated as a guarantee we
+explicitly do not make.  There is no way to make this go away — it is
+the physics of gliders surfacing independently — so the design's job is
+to keep it visible rather than to hide it.
+
+**14. Was designing for the fleet the right call when most use is one
+glider?**  It costs a `glider` field the common case ignores, and a
+`glider=` keyword on every request.  That is a real tax on the majority
+case.  It is worth paying because the alternative — a single-glider
+API plus a later multi-glider one — is two frameworks, and because the
+decisions that are genuinely hard to reverse (one thread or many; where
+mutual exclusion and rate limiting sit) all had to be made now anyway.
+Retrofitting the threading model later would be a rewrite, not an
+addition.
 
 ## Phasing
 
 Each phase is independently useful and independently reviewable.
 
-1. **Merge + `Event`.**  N sources into one tagged queue, with drops
-   counted.  Testable with no engine at all.
+1. **Merge + `Event`.**  N (glider, source) streams into one tagged
+   queue, with drops counted per pair.  Multi-glider from the first
+   commit — the merge is where that is either easy or impossible, and
+   retrofitting it later would touch everything downstream.  Testable
+   with no engine at all: two fake sessions, assert tagging, ordering
+   within a pair, and drop accounting.
 2. **`BaseControlEngine` + runner, read-only.**  `sources`, `on_event`,
    `request` limited to read operations, results as events, replay
-   support.  A monitor-equivalent engine is the acceptance test.
+   support, `add_glider`/`remove_glider`.  Acceptance tests: a
+   monitor-equivalent engine on one glider, and a two-glider engine
+   that proves cross-glider state needs no locking.
 3. **Writes.**  Dry run, `--allow-writes`, per-glider serialisation,
-   audit log, rate limit.
-4. **`sfmc-control` CLI** and worked examples, including a
-   command-sending engine that waits for a quiet link (see
-   `docs/script_control.md` on Zmodem timing).
+   fleet-wide rate limit, audit log including the glider.
+4. **`sfmc-control` CLI** (`--glider` repeatable, like
+   `--notify-email`) and worked examples: a single-glider command
+   engine that waits for a quiet link (see `docs/script_control.md` on
+   Zmodem timing), and a two-glider formation engine.
 5. **Fold `BaseFollower` in** as a specialisation, keeping its public
-   API unchanged.
+   API unchanged — see open question 5 on whether it gains multi-glider
+   support or stays deliberately single.
 
 ## Open questions
 
 1. Should `tick` events be on by default?  A periodic wake-up makes
    time-based logic easy, and also makes it easy to write a busy loop.
-2. Per-source queue bounds, or one shared bound?  Per-source protects a
-   quiet control topic from a dialog flood, at the cost of another
-   number to explain.
-3. Should an engine be able to drive **several gliders**?  The event
-   model allows it (add a `glider` field), but per-glider serialisation
-   and the follower migration both assume one.  Deferring, but the
-   `Event` field should exist from the start so adding it is not a
-   breaking change.
-4. Does `on_stop` get a chance to flush outstanding requests, or is
-   shutdown always immediate?
+   For a formation engine a tick is close to necessary — "re-evaluate
+   the formation every 60 s" is the natural shape — which argues for
+   on-by-default at a slow interval.
+2. Per-(glider, source) queue bounds: one number for all, or
+   configurable per source?  A dialog flood and a connection-event
+   trickle want different depths, but every extra knob is one more
+   thing to explain to someone who should not have to care.
+3. Does `on_stop` get a chance to flush outstanding requests, or is
+   shutdown always immediate?  A formation engine mid-retask has more
+   to lose here than a single-glider one.
+4. What should happen when a glider named at startup does not exist?
+   Failing fast is right for a typo; refusing to start a six-glider
+   formation because one glider is not yet registered is not.  Probably:
+   start the rest, deliver an `error` event for the missing one.
+5. Should `sfmc-follow`'s migration expose multi-glider at all, or stay
+   deliberately single-glider?  Its `on_surfacing(event)` signature has
+   no glider in it, and adding one is a breaking change for existing
+   followers.
