@@ -455,6 +455,103 @@ handles `dialog`, feeds `DialogParser`, and calls `on_surfacing`.
 That retires the last duplicated pipeline in the package, which is the
 same anti-drift argument that motivated PR #12.
 
+## Case study: replacing the SFMC XML state engine
+
+A control engine is, structurally, what an SFMC XML script is: a state
+machine reacting to a glider's connection and dialog, issuing commands
+and file transfers.  Written in Python, with arbitrary logic and the
+whole API available, it could be a "smart XML".  That is an appealing
+goal and it changes the risk profile enough to be worth stating
+separately, because **this is the one use case where the framework
+becomes safety-critical rather than merely useful**.
+
+Four differences from XML, in descending order of how much they should
+worry you.
+
+### 1. Where the code runs (the serious one)
+
+SFMC runs XML **server-side, adjacent to the dockserver**.  A control
+engine runs on an operator's machine, across a network.  If that
+network drops, the XML engine keeps working and the control engine does
+not — and a glider that surfaces during the gap gets no control at all.
+For a monitoring or steering engine, missing a surfacing costs one
+cycle.  For an engine that has *replaced* the XML, missing one may mean
+a glider that never gets told what to do next.
+
+Two mitigations, and they compose:
+
+- **Run it next to SFMC.**  On the SFMC host or the same LAN, the
+  failure domain shrinks to roughly what XML already has.
+- **Keep a minimal XML script assigned as a floor.**  Defence in depth:
+  the XML handles the baseline surfacing correctly on its own, and the
+  engine adds intelligence when it is present.  This is strictly better
+  than an all-or-nothing cutover and should be the recommended
+  deployment.
+
+### 2. Two controllers, one glider
+
+If an XML script is assigned *and* an engine is running, both are
+steering.  They will fight, and the symptoms will be baffling.  A
+replacement engine must therefore:
+
+- assert exclusive control at startup — clear the assigned script, or
+  knowingly co-exist with a floor script as above;
+- **watch the `scripts` topic** for an assignment appearing underneath
+  it (another pilot using the SFMC web UI), and treat that as an event
+  worth alerting on rather than silently competing.
+
+The design already delivers script-assignment events, so this costs
+nothing structurally — but it must be documented as a requirement, not
+left as an exercise.
+
+### 3. Reachability of the behaviour
+
+Some of what XML does may not be expressible through the REST API at
+all — anything touching dockserver-side comms behaviour (callback
+scheduling, modem dialling) rather than glider-side commands.  What is
+reachable today is: commands, file transfer both ways, plans, script
+control, and observation of everything over STOMP.
+
+**This is the open question the actual XML files would answer**, and it
+is why they are worth reading before committing to this use case.
+
+### 4. Failure semantics
+
+An XML script that fails does so inside a system designed around it.  A
+Python engine that raises mid-surfacing may leave a glider having been
+told half of something.  The strike-counter policy and the audit log
+matter more here than anywhere else, and "no automatic retry of
+state-changing operations" stops being a nicety.
+
+### What is needed to go further
+
+The API exposes script **names** but not their **content**.  Verified
+against `gliderfmc1`, not assumed:
+
+| Attempt | Result |
+|---|---|
+| `GET /v1/scripts-for-glider/osusim` | names only — 11 factory, 7 user (`riot.xml`, `drifter.xml`, …) |
+| `download-glider-file osusim configuration riot.xml` | 404 — *no file riot.xml in folder configuration* |
+| `download-glider-file osusim scripts riot.xml` | 404 — *no file riot.xml in folder scripts* |
+| `get-folder-file-listing osusim scripts` (and `script`, `xml`, `user-scripts`, …) | `{}` — unknown folders return empty rather than erroring, so this proves nothing on its own |
+| `download-glider-files osusim scripts` (zip) | **404 — *Missing resource to download files*** |
+| `download-glider-files osusim configuration` (zip) | 4357-byte zip: `longterm.sta`, `proglets.dat`, `autoexec.mi` |
+
+The last two lines are the conclusive pair: the same endpoint succeeds
+for a real glider folder and 404s for `scripts`, so `scripts` is not a
+glider folder at all.  The XML lives server-side in SFMC, and the
+`configuration` folder holds glider config, not scripts.
+
+So the XML must come from the SFMC host filesystem or the web UI.  The
+most informative set, in order:
+
+1. `riot.xml` — the user script actually running on osusim.
+2. `sfmc.xml` — the factory baseline, i.e. what "normal" looks like.
+3. `drifter.xml` — closest to the follower use case already solved.
+4. `IridCallback.xml` / `callbackPrimary.xml` — comms/callback logic,
+   the part most likely to be *unreachable* through the REST API and
+   therefore the part that decides whether full replacement is possible.
+
 ## Adversarial review of this design
 
 Written against the proposal, not for it.
@@ -577,9 +674,28 @@ Each phase is independently useful and independently reviewable.
    `--notify-email`) and worked examples: a single-glider command
    engine that waits for a quiet link (see `docs/script_control.md` on
    Zmodem timing), and a two-glider formation engine.
-5. **Fold `BaseFollower` in** as a specialisation, keeping its public
-   API unchanged — see open question 5 on whether it gains multi-glider
-   support or stays deliberately single.
+5. **Fold `BaseFollower` in** as a specialisation, and give it
+   multi-glider support.  This is far less disruptive than it first
+   appears, because `SurfacingEvent.vehicle_name` **already carries the
+   glider identity** — `on_surfacing(event)` needs no signature change,
+   and every existing follower keeps working untouched.
+
+   The one surface that must change is `send_files`, which today
+   targets *the* glider implicitly.  It gains
+   `glider: str | None = None`, defaulting to the glider of the event
+   currently being handled.  A single-glider follower written last year
+   is unaffected; a formation follower passes the target explicitly:
+
+   ```python
+   def on_surfacing(self, event):
+       # event.vehicle_name has always been here
+       self.send_files(to_glider={"goto_l30.ma": ma})              # this glider
+       self.send_files(to_glider={"goto_l30.ma": other}, glider="osu686")
+   ```
+
+   `sfmc-follow --glider` becomes repeatable.  One follower instance
+   then sees surfacings from the whole formation, in the same single
+   thread, with the same no-locks guarantee.
 
 ## Open questions
 
@@ -599,7 +715,7 @@ Each phase is independently useful and independently reviewable.
    Failing fast is right for a typo; refusing to start a six-glider
    formation because one glider is not yet registered is not.  Probably:
    start the rest, deliver an `error` event for the missing one.
-5. Should `sfmc-follow`'s migration expose multi-glider at all, or stay
-   deliberately single-glider?  Its `on_surfacing(event)` signature has
-   no glider in it, and adding one is a breaking change for existing
-   followers.
+5. *(Resolved: `sfmc-follow` gains multi-glider — see phase 5.
+   `SurfacingEvent.vehicle_name` already carries the identity, so
+   `on_surfacing` is unchanged and only `send_files` grows an optional
+   `glider=`.)*
