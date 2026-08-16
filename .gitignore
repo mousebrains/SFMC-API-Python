@@ -19,3 +19,8 @@ venv/
 *.swo
 .DS_Store
 *.log
+
+# SFMC server-side XML state-engine scripts, kept locally as reference
+# input for the XML engine.  Not ours to redistribute, and they carry
+# site-specific configuration.
+SFMC-XML/
