@@ -677,6 +677,20 @@ class TestKeepalive:
     HTTP 400, and the exception killed the engine outright.
     """
 
+    def test_keepalives_are_off_unless_asked_for(self) -> None:
+        """During a mission a keepalive is traffic no script asked for.
+
+        The engine cannot tell a parked glider from a diving one —
+        ``connected`` reports the dockserver link, which stays up while
+        the glider is submerged — so the operator decides, and the
+        default is silence.
+        """
+        import inspect
+
+        from sfmc_api.xml_engine import run_live
+
+        assert inspect.signature(run_live).parameters["keepalive"].default is None
+
     def test_the_keepalive_is_not_an_empty_command(self) -> None:
         """An empty body is rejected HTTP 400 by SFMC."""
         from sfmc_api.xml_engine import KEEPALIVE_COMMAND

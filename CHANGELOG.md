@@ -94,7 +94,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     the stream legitimately drops every time the glider submerges.
     Connects, reconnects, and drops are reported, so a run that never
     comes up is visible rather than silent.
-  - The keepalive skips a disconnected glider.  A submerged glider is
+  - Keepalives are **off by default**.  They suit a glider parked at a
+    GliderDos prompt; during a mission they inject traffic no script
+    asked for into a vehicle that should be left alone.  The engine
+    cannot reliably tell those apart — `connected` reports the
+    dockserver link, which stays up while the glider is submerged — so
+    gating on connectivity is not enough and the operator decides.
+    Caught by the SFMC operator watching a live run do exactly the
+    wrong thing.
+  - The keepalive also skips a disconnected glider.  A submerged glider is
     *supposed* to be silent and its link is legitimately down; sending
     into that keeps nothing alive, and a command accepted for a
     disconnected glider may be queued and delivered on the next

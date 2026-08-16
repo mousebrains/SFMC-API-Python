@@ -128,8 +128,8 @@ SECONDS_PER_TIMEOUT_UNIT = 60.0
 #: run fail against a live glider.
 KEEPALIVE_COMMAND = "Ctrl-M"
 
-#: Default seconds of dialog silence before sending
-#: :data:`KEEPALIVE_COMMAND`.
+#: Suggested seconds of dialog silence before sending
+#: :data:`KEEPALIVE_COMMAND`, for callers that opt in.
 #:
 #: SFMC drops an idle link after about five minutes, so four leaves a
 #: minute of margin without sending more than necessary.  Validated
@@ -137,6 +137,9 @@ KEEPALIVE_COMMAND = "Ctrl-M"
 #: link ``connected`` for 6m47s across six keepalives, on a glider
 #: sitting at a GliderDos prompt that had otherwise been dropping after
 #: roughly five minutes of quiet.
+#:
+#: **Not a default.**  Keepalives are off unless asked for — see
+#: :func:`run_live`.
 KEEPALIVE_SECONDS = 240.0
 
 
@@ -788,7 +791,7 @@ def run_live(
     match_mode: MatchMode = "buffer",
     poll: float = 1.0,
     max_runtime: float | None = None,
-    keepalive: float | None = KEEPALIVE_SECONDS,
+    keepalive: float | None = None,
 ) -> list[Action]:
     """Drive a glider with *script* until it reaches a final state.
 
@@ -811,11 +814,17 @@ def run_live(
         match_mode: See :class:`XmlStateMachine`.
         poll: Seconds between timeout checks.
         max_runtime: Stop after this long regardless of state.
-        keepalive: Send a bare return after this many seconds of dialog
-            silence, to stop SFMC dropping the connection.  ``None``
-            disables it.  Only ever sends when *send* is True — a dry
-            run must transmit nothing, and so will be dropped if it
-            waits at a quiet prompt.
+        keepalive: Seconds of dialog silence after which to send
+            :data:`KEEPALIVE_COMMAND`, stopping SFMC dropping an idle
+            link.  **Off by default, and deliberately so.**  It is for
+            a glider parked at a GliderDos prompt; during a mission it
+            injects traffic no script asked for, into a vehicle that is
+            supposed to be left alone, and the engine cannot reliably
+            tell the two apart — ``connected`` reports the dockserver
+            link, which stays up while the glider is submerged.  So the
+            operator decides.  :data:`KEEPALIVE_SECONDS` is a sensible
+            value when you do want it.  Only ever sends when *send* is
+            True.
 
     Returns:
         Every action taken (or that would have been taken), in order.
@@ -957,12 +966,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--keepalive",
         type=float,
-        default=KEEPALIVE_SECONDS,
+        default=0.0,
         metavar="SECONDS",
         help=(
             f"With --send, send {KEEPALIVE_COMMAND} (a carriage return) after this "
             "much dialog silence, so SFMC does not drop the connection while "
-            "sitting at a GliderDos prompt (0 disables)"
+            "sitting at a GliderDos prompt.  OFF by default: during a mission "
+            f"this injects traffic no script asked for.  Try {KEEPALIVE_SECONDS:.0f}"
         ),
     )
     args = parser.parse_args(argv)

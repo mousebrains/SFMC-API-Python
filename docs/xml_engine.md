@@ -183,15 +183,27 @@ dialog at least once a minute.  It matters when the glider is sitting
 at a GliderDos prompt saying nothing — exactly where a script with a
 ten-minute timer would wait.
 
-`run_live()` therefore sends `Ctrl-M` — a carriage return, in the same
-literal form the scripts use for every other control character — after
-**four minutes** of dialog silence, leaving a minute of margin.
-Anything the script itself sends also defers it, since what counts is
-silence on the wire.
+`run_live()` can send `Ctrl-M` — a carriage return, in the same literal
+form the scripts use for every other control character — after a set
+period of dialog silence.  Anything the script itself sends also defers
+it, since what counts is silence on the wire.
 
-Validated against osusim on 2026-08-16: `Ctrl-M` at this cadence held
-the link `connected` for 6m47s across six keepalives, on a glider that
-had otherwise been idle-dropping.
+**It is off by default, and that is deliberate.**  A keepalive is right
+for a glider parked at a GliderDos prompt.  It is wrong during a
+mission, where it injects traffic no script asked for into a vehicle
+that should be left alone — and the engine cannot reliably tell the two
+apart, because `connected` reports the *dockserver link*, which stays
+up while the glider is submerged.  Gating on connectivity is therefore
+not enough, and the operator decides:
+
+```bash
+sfmc-xml-engine riot.xml --glider osu685 --send                  # silent (default)
+sfmc-xml-engine park.xml --glider osu685 --send --keepalive 240  # parked at GliderDos
+```
+
+Validated against osusim on 2026-08-16: `Ctrl-M` every four minutes
+held the link `connected` for 6m47s across six keepalives, on a glider
+at a prompt that had otherwise been idle-dropping.
 
 Two things this got wrong on the first attempt, both found by running
 it against a live glider rather than by reasoning about it:
@@ -376,7 +388,7 @@ sfmc-xml-engine SCRIPT.xml [--describe | --replay LOG | --glider NAME]
 | `--send` | off | **Actually transmit commands.**  Without it, nothing is sent |
 | `--match-mode {buffer,line}` | `buffer` | `buffer` can match an unterminated prompt; `line` cannot |
 | `--max-runtime SECONDS` | — | Stop after this long regardless of state |
-| `--keepalive SECONDS` | 240 | With `--send`, `Ctrl-M` after this much dialog silence (`0` disables) |
+| `--keepalive SECONDS` | 0 (off) | With `--send`, `Ctrl-M` after this much dialog silence.  Off by default: wrong during a mission |
 | `--host HOSTNAME` | — | Select host from a multi-host credentials file |
 | `--credentials PATH` | `~/.config/sfmc/credentials.json` | Credentials file |
 
