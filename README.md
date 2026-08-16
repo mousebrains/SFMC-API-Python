@@ -131,6 +131,28 @@ The included drifter follower example tracks a drifting target using
 a NetCDF position file and generates `goto_l*.ma` waypoint plans.
 See [docs/follow_glider.md](docs/follow_glider.md) for the full guide.
 
+### [XML Script Engine](docs/xml_engine.md)
+
+Parse and execute the XML state machine SFMC runs beside the
+dockserver — to read a script, replay one offline, or drive a glider:
+
+```bash
+# Show the state machine, no server contact
+sfmc-xml-engine riot.xml --describe
+
+# Replay against a recorded dialog log, sending nothing
+sfmc-xml-engine riot.xml --replay dialog.log
+
+# Live.  Prints WOULD SEND and transmits nothing without --send
+sfmc-xml-engine riot.xml --glider osu685
+sfmc-xml-engine riot.xml --glider osu685 --send --max-runtime 3600
+```
+
+**Nothing is sent without `--send`.**  Note the XML `timeout`
+attribute is in *minutes*.  See
+[docs/xml_engine.md](docs/xml_engine.md) for the language, the safety
+rails, and what is and is not validated against a live glider.
+
 ### Integration Tests
 
 ```bash
@@ -193,6 +215,7 @@ See [docs/configuration.md](docs/configuration.md) for full details.
 - [Monitor Glider](docs/monitor_glider.md) -- real-time dialog and script monitoring
 - [Pull New Downloads](docs/pull_new_downloads.md) -- event-driven mirroring of new from-glider files
 - [Follow Glider](docs/follow_glider.md) -- autonomous follower plugins and simulation modes
+- [XML Script Engine](docs/xml_engine.md) -- parse, replay, and run SFMC glider-script XML
 
 ## Getting Help
 

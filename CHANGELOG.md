@@ -28,6 +28,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **XML script engine.**  `sfmc-xml-engine` parses and executes the
+  XML state machine SFMC runs beside the dockserver, so the same
+  behaviour can run from Python — to understand a script
+  (`--describe`), to replay one offline against a recorded dialog log
+  (`--replay`), or to drive a glider (`--glider`).  Split in two on
+  purpose: `XmlStateMachine` is pure — no I/O, no clock of its own,
+  driven by `feed()` and `check_timeout()`, returning the actions a
+  caller may then perform — and `run_live()` wires it to a glider and
+  is the only part that can transmit.  Validated against the real
+  corpus rather than invented examples: all 20 reference scripts parse,
+  and replaying `riot.xml` against dialog captured from osusim
+  reproduces the seven-action sequence documented in that script's own
+  header, matching what the live SFMC engine did.  **Nothing is sent
+  without `--send`** — the default reports what it would do, because
+  the other default is a program that steers a glider the first time
+  somebody runs it to see what it does.  Unknown action types, dangling
+  `toState`, invalid regexes, malformed XML, and immediate-transition
+  cycles are all refused rather than assumed benign.  See
+  [docs/xml_engine.md](docs/xml_engine.md).
+  - The XML `timeout` attribute is **minutes**, not seconds.  Every
+    author in the corpus documents it that way — all 22 of `riot.xml`'s
+    timers carry "If nothing within 10 minutes", and
+    `vacuum_test_send_data_2hrs.xml` pairs `timeout="120"` with "a 120
+    minute (2 hours) timeout" — and the SFMC operator confirmed it.
+    Reading it as seconds is a 60x error in the dangerous direction: a
+    script meant to wait ten minutes for a glider to answer would give
+    up after ten seconds and act on the silence.  `Transition` names
+    the unit (`timeout_seconds`, `timeout_minutes`) so the file's
+    number cannot be mistaken for the running one, and a test pins it.
+  - Control characters are sent as literal text (`Ctrl-C`, `Ctrl-R`,
+    `Ctrl-W`), confirmed live against osusim: the dockserver echoes
+    `^C` inline at the head of a glider output line, which also means a
+    control character's reply is not correlated by echo anchoring.
+  - `run_live()` sends a bare return after 60 seconds of dialog silence
+    (`--keepalive`, `0` disables), because SFMC drops the connection
+    after roughly 90 seconds of inactivity.  A mission in progress
+    produces dialog at least every minute so this never fires; a glider
+    sitting at a GliderDos prompt says nothing at all, and that is
+    where the drop happens.  It only ever sends with `--send`, so a dry
+    run waiting at a quiet prompt will still be dropped.
+  - `--replay` now strips `sfmc-monitor-glider`'s log prefix.  Its
+    format is `%(asctime)s %(name)s  %(message)s` with a dotted name
+    (`sfmc.osusim.DIALOG`), which the original stripper — written for a
+    bare-uppercase capture format — did not match.  A stripper that
+    fails to match does not skip the line: it falls through to the
+    raw-capture path, feeding the timestamp, the logger name, and the
+    tool's own `INFO` bookkeeping straight to the matcher.
+  - Known limitation: `run_live()` matches line-by-line whatever
+    `--match-mode` says, because the dialog listener publishes only
+    newline-terminated lines and drops the unterminated tail at a
+    session boundary.  A GliderDos prompt followed by more output still
+    matches; a trailing idle prompt can be dropped before it arrives.
+    Documented rather than papered over.
 - **Command replies.** `client.command_channel(glider)` submits a
   command and captures what the glider says back, returning a
   `CommandReply` instead of only SFMC's acceptance. The reply is

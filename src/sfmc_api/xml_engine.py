@@ -14,16 +14,17 @@ The whole SFMC script language is seven elements and four attributes::
           <transition matchExpression="REGEX" toState="NEXT">
             <action type="glider" command="s *.sbd *.tbd"/>
           </transition>
-          <transition timeout="10" toState="NEXT"/>
+          <transition timeout="10" toState="NEXT"/>   <!-- 10 MINUTES -->
         </transitions>
       </initialState>
     </gliderScript>
 
 *In state S, wait for glider output matching a regex or for a timeout;
 optionally send commands; move to state T.*  That is all of it.  Across
-the 20-script reference corpus every one of the 404 actions is
+the 20-script reference corpus every one of the 397 live actions is
 ``type="glider"`` — the language has no other verb — so an interpreter
-needs exactly one capability beyond bookkeeping: send a command.
+needs exactly one capability beyond bookkeeping: send a command.  (The
+corpus holds 404 ``<action>`` tags; seven are inside XML comments.)
 
 Split deliberately in two:
 
@@ -31,7 +32,9 @@ Split deliberately in two:
   about SFMC, and is driven by :meth:`~XmlStateMachine.feed` and
   :meth:`~XmlStateMachine.check_timeout`.  All the interesting
   behaviour, and all the tests, live here.
-* :class:`XmlEngineRunner` wires it to a live glider.
+* :func:`run_live` wires it to a glider, and is the only part of this
+  module that can transmit anything.  :func:`replay` runs a script
+  against a recorded log instead, sending nothing.
 
 Usage::
 
@@ -58,6 +61,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from .client import SFMCClient
 
 __all__ = [
+    "SECONDS_PER_TIMEOUT_UNIT",
     "Action",
     "MatchMode",
     "Script",
@@ -65,7 +69,10 @@ __all__ = [
     "State",
     "Transition",
     "XmlStateMachine",
+    "describe",
     "parse_script",
+    "replay",
+    "run_live",
 ]
 
 logger = logging.getLogger(__name__)
@@ -87,6 +94,22 @@ MatchMode = str
 #: multi-line match, short enough that a glider emitting megabytes
 #: without a match cannot grow it without bound.
 MAX_BUFFER_CHARS = 64 * 1024
+
+#: Seconds per unit of the XML ``timeout`` attribute.
+#:
+#: SFMC's ``timeout`` is expressed in **minutes**, not seconds.  Nothing
+#: in the XML says so, which is exactly why it is worth stating here:
+#: every author in the reference corpus documents it as minutes in their
+#: own comments — all 22 of ``riot.xml``'s timers carry "If nothing
+#: within 10 minutes", and ``vacuum_test_send_data_2hrs.xml`` pairs
+#: ``timeout="120"`` with "a 120 minute (2 hours) timeout" and a
+#: filename that says the same.  Confirmed by the SFMC operator whose
+#: scripts these are.
+#:
+#: Reading it as seconds is a 60x error in the dangerous direction: a
+#: script meant to wait 10 minutes for a glider to answer would give up
+#: after 10 seconds and act on the silence.
+SECONDS_PER_TIMEOUT_UNIT = 60.0
 
 
 def _cut_at(offset: int) -> Callable[[int], int]:
@@ -117,15 +140,21 @@ class Action:
 class Transition:
     """One edge out of a state.
 
-    Exactly one of *match* or *timeout* is set: across the reference
-    corpus, all 1023 regex transitions have no timeout and all 204
-    timeout transitions have no regex.
+    Exactly one of *match* or *timeout_seconds* is set: across the
+    reference corpus, all 1023 ``matchExpression`` transitions have no
+    timeout and all 204 timeout transitions have no regex.
 
     Attributes:
         to_state: Name of the state to enter.
         match: Compiled ``matchExpression``, or ``None`` for a timer.
         pattern: The original expression text, for logs.
-        timeout: Seconds to wait, or ``None`` for a match transition.
+        timeout_seconds: How long to wait, or ``None`` for a match
+            transition.  Named for its unit on purpose: the XML
+            attribute is in **minutes** (see
+            :data:`SECONDS_PER_TIMEOUT_UNIT`) and a bare ``timeout``
+            invites reading the file's number as seconds.
+        timeout_minutes: The value exactly as the XML wrote it, for
+            display and for comparing against the script.
         actions: Commands to send when this transition is taken, in
             document order.
         immediate: ``True`` when ``matchExpression`` was empty.  Such a
@@ -136,7 +165,8 @@ class Transition:
     to_state: str
     match: re.Pattern[str] | None
     pattern: str | None
-    timeout: float | None
+    timeout_seconds: float | None
+    timeout_minutes: float | None = None
     actions: tuple[Action, ...] = ()
     immediate: bool = False
 
@@ -268,14 +298,16 @@ def _parse_transition(node: ET.Element, script: str, state: str) -> Transition:
             "has neither matchExpression nor timeout"
         )
 
-    timeout: float | None = None
+    minutes: float | None = None
+    seconds: float | None = None
     if raw_timeout is not None:
         try:
-            timeout = float(raw_timeout)
+            minutes = float(raw_timeout)
         except ValueError:
             raise ScriptError(
                 f"{script}: transition to {to_state!r} has non-numeric timeout {raw_timeout!r}"
             ) from None
+        seconds = minutes * SECONDS_PER_TIMEOUT_UNIT
 
     pattern: re.Pattern[str] | None = None
     immediate = False
@@ -300,7 +332,8 @@ def _parse_transition(node: ET.Element, script: str, state: str) -> Transition:
         to_state=to_state,
         match=pattern,
         pattern=raw_match,
-        timeout=timeout,
+        timeout_seconds=seconds,
+        timeout_minutes=minutes,
         actions=tuple(_parse_actions(node, script, state)),
         immediate=immediate,
     )
@@ -381,9 +414,9 @@ class XmlStateMachine:
         timeout = self._current_timeout()
         if timeout is None:
             return None
-        if timeout.timeout is None:  # pragma: no cover - guarded by _current_timeout
+        if timeout.timeout_seconds is None:  # pragma: no cover - guarded by _current_timeout
             return None
-        return max(0.0, timeout.timeout - (self.now() - self._entered_at))
+        return max(0.0, timeout.timeout_seconds - (self.now() - self._entered_at))
 
     # ── Driving ──────────────────────────────────────────────────────
 
@@ -435,11 +468,14 @@ class XmlStateMachine:
         if self.finished:
             return []
         transition = self._current_timeout()
-        if transition is None or transition.timeout is None:
+        if transition is None or transition.timeout_seconds is None:
             return []
-        if self.now() - self._entered_at < transition.timeout:
+        if self.now() - self._entered_at < transition.timeout_seconds:
             return []
-        self._trace(f"{self._state.name}: timeout after {transition.timeout}s")
+        self._trace(
+            f"{self._state.name}: timeout after "
+            f"{transition.timeout_minutes}min ({transition.timeout_seconds}s)"
+        )
         actions = self._take(transition)
         if not self.finished:
             actions.extend(self._run_immediate())
@@ -454,7 +490,7 @@ class XmlStateMachine:
 
     def _current_timeout(self) -> Transition | None:
         for transition in self._state.transitions:
-            if transition.timeout is not None:
+            if transition.timeout_seconds is not None:
                 return transition
         return None
 
@@ -536,8 +572,8 @@ def describe(script: Script) -> str:
         marker = "  [final]" if state.is_final else ""
         lines.append(f"\nstate {name}{marker}")
         for transition in state.transitions:
-            if transition.timeout is not None:
-                trigger = f"after {transition.timeout}s"
+            if transition.timeout_seconds is not None:
+                trigger = f"after {transition.timeout_minutes}min ({transition.timeout_seconds}s)"
             elif transition.immediate:
                 trigger = "immediately"
             else:
@@ -601,8 +637,19 @@ def run_live(
     match_mode: MatchMode = "buffer",
     poll: float = 1.0,
     max_runtime: float | None = None,
+    keepalive: float | None = 60.0,
 ) -> list[Action]:
     """Drive a glider with *script* until it reaches a final state.
+
+    .. note::
+
+       Matching is line-oriented here whatever *match_mode* says.  The
+       dialog listener this reads from publishes only newline-terminated
+       lines and drops any unterminated tail at a session boundary, so
+       ``"buffer"`` mode's ability to match an unterminated GliderDos
+       prompt does not reach the live path.  A prompt followed by more
+       output still matches; a trailing idle prompt may be dropped
+       before it arrives.  See ``docs/xml_engine.md``.
 
     Args:
         client: An :class:`~sfmc_api.client.SFMCClient`.
@@ -615,20 +662,35 @@ def run_live(
         match_mode: See :class:`XmlStateMachine`.
         poll: Seconds between timeout checks.
         max_runtime: Stop after this long regardless of state.
+        keepalive: Send a bare return after this many seconds of dialog
+            silence, to stop SFMC dropping the connection.  ``None``
+            disables it.  Only ever sends when *send* is True — a dry
+            run must transmit nothing, and so will be dropped if it
+            waits at a quiet prompt.
 
     Returns:
         Every action taken (or that would have been taken), in order.
+        Keepalive returns are not actions and are not included.
     """
     machine = XmlStateMachine(script, match_mode=match_mode, on_trace=_emit)
     performed: list[Action] = []
     mode = "SENDING" if send else "dry run — nothing will be sent"
     print(f"running {script.name} against {glider} [{mode}]", flush=True)
 
+    # SFMC drops the connection after roughly 90 seconds of inactivity.
+    # A mission in progress produces dialog at least every minute, so
+    # this never fires; a glider sitting at a GliderDos prompt says
+    # nothing at all, and that is where the drop happens.  Silence on
+    # the stream is what counts, so anything we send also defers it.
+    last_activity = time.monotonic()
+
     def dispatch(actions: list[Action]) -> None:
+        nonlocal last_activity
         for action in actions:
             performed.append(action)
             if send:
                 client.send_command(glider, action.command)
+                last_activity = time.monotonic()
                 print(f"    SENT: {action.command}", flush=True)
             else:
                 print(f"    WOULD SEND: {action.command}", flush=True)
@@ -646,10 +708,15 @@ def run_live(
             except Exception:  # queue.Empty and friends
                 line = None
             if line is not None:
+                last_activity = time.monotonic()
                 # The engine matches raw text, so put the terminator
                 # back: scripts match against the stream, not a list.
                 dispatch(machine.feed(line.text + "\r\n"))
             dispatch(machine.check_timeout())
+            if keepalive is not None and send and time.monotonic() - last_activity >= keepalive:
+                client.send_command(glider, "")
+                last_activity = time.monotonic()
+                print(f"    keepalive: bare return after {keepalive}s quiet", flush=True)
         listener.close()
     return performed
 
@@ -676,8 +743,27 @@ def main(argv: list[str] | None = None) -> int:
         default="buffer",
         help="buffer (default) can match an unterminated prompt; line cannot",
     )
-    parser.add_argument("--host", help="SFMC host")
+    parser.add_argument(
+        "--host",
+        help="SFMC server hostname (selects entry from multi-host credentials file)",
+    )
+    parser.add_argument(
+        "--credentials",
+        metavar="PATH",
+        help="Path to credentials JSON file (default: ~/.config/sfmc/credentials.json)",
+    )
     parser.add_argument("--max-runtime", type=float, help="Stop after this many seconds")
+    parser.add_argument(
+        "--keepalive",
+        type=float,
+        default=60.0,
+        metavar="SECONDS",
+        help=(
+            "With --send, send a bare return after this much dialog silence, "
+            "so SFMC does not drop the connection while sitting at a GliderDos "
+            "prompt (0 disables)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -710,7 +796,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from .client import SFMCClient
 
-    with SFMCClient(host=args.host) as client:
+    with SFMCClient(host=args.host, config_path=args.credentials) as client:
         actions = run_live(
             client,
             args.glider,
@@ -718,13 +804,22 @@ def main(argv: list[str] | None = None) -> int:
             send=args.send,
             match_mode=args.match_mode,
             max_runtime=args.max_runtime,
+            keepalive=args.keepalive or None,
         )
     print(f"\n{len(actions)} action(s) {'sent' if args.send else 'would have been sent'}")
     return 0
 
 
-#: A capture line: ISO timestamp, a kind, then the payload.
-_LOG_LINE_RE = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+\s+([A-Z?]+)\s{2}(.*)$")
+#: A capture line: ISO timestamp, a kind, two spaces, then the payload.
+#:
+#: The kind may be bare (``DIALOG``) or the tail of a dotted logger name
+#: (``sfmc.osusim.DIALOG``, which is what ``sfmc-monitor-glider``
+#: writes — ``%(asctime)s %(name)s  %(message)s`` with a name of
+#: ``sfmc.{glider}.{DIALOG,SCRIPT,INFO}``).  Both are accepted because
+#: both exist in real captures, and a stripper that silently fails to
+#: match feeds the capturing tool's own bookkeeping to the matcher
+#: instead of skipping it.
+_LOG_LINE_RE = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+\s+(?:[\w.]*\.)?([A-Z?]+)\s{2}(.*)$")
 
 
 def _strip_log_prefix(raw: str) -> str | None:

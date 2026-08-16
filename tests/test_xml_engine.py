@@ -68,7 +68,11 @@ class TestParsing:
         """
         )
         transition = parsed.states["a"].transitions[0]
-        assert transition.timeout == 10.0
+        # The XML attribute is MINUTES.  Reading it as seconds would
+        # abandon a surfacing after 10 seconds of quiet instead of 10
+        # minutes, so the unit is pinned here rather than assumed.
+        assert transition.timeout_minutes == 10.0
+        assert transition.timeout_seconds == 600.0
         assert transition.match is None
 
     @pytest.mark.parametrize(
@@ -324,23 +328,31 @@ class TestTimeouts:
     def test_timeout_does_not_fire_early(self) -> None:
         machine, clock = self._machine()
         machine.start()
-        clock[0] = 9.9
+        clock[0] = 599.9
+        assert machine.check_timeout() == []
+        assert machine.state == "a"
+
+    def test_a_timeout_in_minutes_does_not_fire_after_that_many_seconds(self) -> None:
+        """The 60x bug, pinned: timeout="10" is ten minutes, not ten seconds."""
+        machine, clock = self._machine()
+        machine.start()
+        clock[0] = 10.0
         assert machine.check_timeout() == []
         assert machine.state == "a"
 
     def test_timeout_fires_when_due(self) -> None:
         machine, clock = self._machine()
         machine.start()
-        clock[0] = 10.0
+        clock[0] = 600.0
         assert [a.command for a in machine.check_timeout()] == ["timed out"]
         assert machine.state == "b"
 
     def test_timeout_remaining_counts_down(self) -> None:
         machine, clock = self._machine()
         machine.start()
-        assert machine.timeout_remaining == 10.0
+        assert machine.timeout_remaining == 600.0
         clock[0] = 4.0
-        assert machine.timeout_remaining == 6.0
+        assert machine.timeout_remaining == 596.0
 
     def test_timeout_clock_restarts_on_entering_a_state(self) -> None:
         clock = [0.0]
@@ -363,10 +375,10 @@ class TestTimeouts:
             now=lambda: clock[0],
         )
         machine.start()
-        clock[0] = 100.0  # a long time passes in state 'a'
+        clock[0] = 6000.0  # a long time passes in state 'a'
         machine.feed("go\r\n")  # entering 'b' restarts its clock
         assert machine.check_timeout() == []
-        clock[0] = 110.0
+        clock[0] = 6600.0  # ten minutes after entering 'b'
         assert [a.command for a in machine.check_timeout()] == ["late"]
 
 
@@ -466,6 +478,41 @@ class TestReplayInput:
         assert _strip_log_prefix("2026-08-15T19:01:34.352 SEND    !get m_de_oil_vol\n") is None
         assert _strip_log_prefix("2026-08-15T17:52:58.740 POLL    state=disconnected\n") is None
         assert _strip_log_prefix("2026-08-15T19:03:01.836 REPLY   {...}\n") is None
+
+    def test_sfmc_monitor_glider_logs_are_stripped(self) -> None:
+        """The kind may be the tail of a dotted logger name.
+
+        ``sfmc-monitor-glider`` writes ``%(asctime)s %(name)s  %(message)s``
+        with a name of ``sfmc.{glider}.{DIALOG,SCRIPT,INFO}``.  A
+        stripper that fails to match here does not skip the line — it
+        falls through to the raw-capture path and feeds the timestamp,
+        the logger name, and the tool's own INFO bookkeeping straight
+        to the matcher.
+        """
+        from sfmc_api.xml_engine import _strip_log_prefix
+
+        assert (
+            _strip_log_prefix(
+                "2026-08-16T13:13:28.026434 sfmc.osusim.DIALOG  Vehicle Name: osusim\n"
+            )
+            == "Vehicle Name: osusim\r\n"
+        )
+        # The glider's own indentation survives; only the two separator
+        # spaces are consumed.
+        assert (
+            _strip_log_prefix(
+                "2026-08-16T13:13:28.02 sfmc.osusim.DIALOG     sensor:m_battery=15.4\n"
+            )
+            == "   sensor:m_battery=15.4\r\n"
+        )
+        assert (
+            _strip_log_prefix("2026-08-16T13:05:26.615340 sfmc.osusim.INFO  Monitoring osusim\n")
+            is None
+        )
+        assert (
+            _strip_log_prefix("2026-08-16T13:05:27.171257 sfmc.osusim.SCRIPT  state=running\n")
+            is None
+        )
 
     def test_a_raw_capture_without_prefixes_passes_through(self) -> None:
         from sfmc_api.xml_engine import _strip_log_prefix
