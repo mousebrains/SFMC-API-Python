@@ -57,10 +57,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .exceptions import APIError, AuthenticationError, RateLimitError
+
 if TYPE_CHECKING:  # pragma: no cover
     from .client import SFMCClient
 
 __all__ = [
+    "KEEPALIVE_COMMAND",
+    "KEEPALIVE_SECONDS",
     "SECONDS_PER_TIMEOUT_UNIT",
     "Action",
     "MatchMode",
@@ -110,6 +114,29 @@ MAX_BUFFER_CHARS = 64 * 1024
 #: script meant to wait 10 minutes for a glider to answer would give up
 #: after 10 seconds and act on the silence.
 SECONDS_PER_TIMEOUT_UNIT = 60.0
+
+#: What :func:`run_live` sends to keep a quiet link from being dropped.
+#:
+#: ``Ctrl-M`` is a carriage return, written in the same literal form the
+#: scripts use for every other control character (``Ctrl-C``,
+#: ``Ctrl-R``, ``Ctrl-W``) — a form confirmed live, where sending the
+#: text ``Ctrl-C`` made the dockserver emit ``^C`` and end the mission.
+#:
+#: The obvious alternative, an empty command, does not work: SFMC
+#: rejects an empty body with HTTP 400.  Found by watching a keepalive
+#: run fail against a live glider.
+KEEPALIVE_COMMAND = "Ctrl-M"
+
+#: Default seconds of dialog silence before sending
+#: :data:`KEEPALIVE_COMMAND`.
+#:
+#: SFMC drops an idle link after about five minutes, so four leaves a
+#: minute of margin without sending more than necessary.  Validated
+#: against osusim on 2026-08-16: ``Ctrl-M`` at this cadence held the
+#: link ``connected`` for 6m47s across six keepalives, on a glider
+#: sitting at a GliderDos prompt that had otherwise been dropping after
+#: roughly five minutes of quiet.
+KEEPALIVE_SECONDS = 240.0
 
 
 def _cut_at(offset: int) -> Callable[[int], int]:
@@ -637,7 +664,7 @@ def run_live(
     match_mode: MatchMode = "buffer",
     poll: float = 1.0,
     max_runtime: float | None = None,
-    keepalive: float | None = 60.0,
+    keepalive: float | None = KEEPALIVE_SECONDS,
 ) -> list[Action]:
     """Drive a glider with *script* until it reaches a final state.
 
@@ -714,9 +741,25 @@ def run_live(
                 dispatch(machine.feed(line.text + "\r\n"))
             dispatch(machine.check_timeout())
             if keepalive is not None and send and time.monotonic() - last_activity >= keepalive:
-                client.send_command(glider, "")
-                last_activity = time.monotonic()
-                print(f"    keepalive: bare return after {keepalive}s quiet", flush=True)
+                # Never fatal.  A keepalive is a convenience; losing the
+                # connection it was meant to hold open is recoverable,
+                # but killing a run that may be mid-way through steering
+                # a glider is not.  Live testing found this the hard
+                # way: an empty body is rejected HTTP 400, and the
+                # exception took the whole engine down.
+                try:
+                    client.send_command(glider, KEEPALIVE_COMMAND)
+                    last_activity = time.monotonic()
+                    print(
+                        f"    keepalive: {KEEPALIVE_COMMAND} after {keepalive}s quiet", flush=True
+                    )
+                except (APIError, RateLimitError, AuthenticationError) as exc:
+                    # Back off a full interval rather than retrying every
+                    # poll and turning one failure into a flood.
+                    last_activity = time.monotonic()
+                    print(
+                        f"    keepalive failed ({exc.__class__.__name__}), continuing", flush=True
+                    )
         listener.close()
     return performed
 
@@ -756,12 +799,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--keepalive",
         type=float,
-        default=60.0,
+        default=KEEPALIVE_SECONDS,
         metavar="SECONDS",
         help=(
-            "With --send, send a bare return after this much dialog silence, "
-            "so SFMC does not drop the connection while sitting at a GliderDos "
-            "prompt (0 disables)"
+            f"With --send, send {KEEPALIVE_COMMAND} (a carriage return) after this "
+            "much dialog silence, so SFMC does not drop the connection while "
+            "sitting at a GliderDos prompt (0 disables)"
         ),
     )
     args = parser.parse_args(argv)

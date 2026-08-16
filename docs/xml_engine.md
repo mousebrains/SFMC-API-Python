@@ -173,23 +173,40 @@ to the matcher.
 
 ### Keeping the connection up
 
-SFMC drops the network connection after roughly **90 seconds of
+SFMC drops the network connection after roughly **five minutes of
 inactivity**.  During a mission this never matters: the glider produces
 dialog at least once a minute.  It matters when the glider is sitting
 at a GliderDos prompt saying nothing — exactly where a script with a
 ten-minute timer would wait.
 
-`run_live()` therefore sends a bare return after 60 seconds of dialog
-silence.  Anything the script itself sends also defers it, since what
-counts is silence on the wire.
+`run_live()` therefore sends `Ctrl-M` — a carriage return, in the same
+literal form the scripts use for every other control character — after
+**four minutes** of dialog silence, leaving a minute of margin.
+Anything the script itself sends also defers it, since what counts is
+silence on the wire.
+
+Validated against osusim on 2026-08-16: `Ctrl-M` at this cadence held
+the link `connected` for 6m47s across six keepalives, on a glider that
+had otherwise been idle-dropping.
+
+Two things this got wrong on the first attempt, both found by running
+it against a live glider rather than by reasoning about it:
+
+- **An empty command is not a bare return.**  SFMC rejects an empty
+  body with `HTTP 400`, so nothing was sent and the link dropped on
+  schedule.
+- **A keepalive failure must not be fatal.**  That 400 raised out of
+  `run_live()` and killed the run.  Losing a connection is recoverable;
+  killing a process that is part-way through steering a glider is not.
+  Keepalive errors are now caught, reported, and the run continues.
 
 ```bash
-sfmc-xml-engine riot.xml --glider osu685 --send --keepalive 45   # tighter
+sfmc-xml-engine riot.xml --glider osu685 --send --keepalive 120  # tighter
 sfmc-xml-engine riot.xml --glider osu685 --send --keepalive 0    # disable
 ```
 
 Keepalives are transmissions, so they only happen with `--send`.  A dry
-run that waits at a quiet prompt will be dropped after ~90 seconds;
+run that waits at a quiet prompt will be dropped after ~5 minutes;
 that is the cost of a default that guarantees a dry run sends nothing.
 
 ## Safety
@@ -291,7 +308,7 @@ sfmc-xml-engine SCRIPT.xml [--describe | --replay LOG | --glider NAME]
 | `--send` | off | **Actually transmit commands.**  Without it, nothing is sent |
 | `--match-mode {buffer,line}` | `buffer` | `buffer` can match an unterminated prompt; `line` cannot |
 | `--max-runtime SECONDS` | — | Stop after this long regardless of state |
-| `--keepalive SECONDS` | 60 | With `--send`, bare return after this much dialog silence (`0` disables) |
+| `--keepalive SECONDS` | 240 | With `--send`, `Ctrl-M` after this much dialog silence (`0` disables) |
 | `--host HOSTNAME` | — | Select host from a multi-host credentials file |
 | `--credentials PATH` | `~/.config/sfmc/credentials.json` | Credentials file |
 

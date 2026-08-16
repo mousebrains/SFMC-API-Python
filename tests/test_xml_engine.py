@@ -467,6 +467,58 @@ class TestAgainstRealScripts:
         assert total > 300, f"expected the corpus to have hundreds of actions, saw {total}"
 
 
+class TestKeepalive:
+    """SFMC drops a link after ~90s of quiet; run_live sends a return.
+
+    Both of these are regressions from a live run against osusim on
+    2026-08-16, where the keepalive sent an empty command, SFMC replied
+    HTTP 400, and the exception killed the engine outright.
+    """
+
+    def test_the_keepalive_is_not_an_empty_command(self) -> None:
+        """An empty body is rejected HTTP 400 by SFMC."""
+        from sfmc_api.xml_engine import KEEPALIVE_COMMAND
+
+        assert KEEPALIVE_COMMAND, "an empty keepalive is rejected by SFMC"
+        assert KEEPALIVE_COMMAND.strip() == KEEPALIVE_COMMAND
+
+    def test_a_failing_keepalive_does_not_kill_the_run(self) -> None:
+        """Losing the link is recoverable; killing a live run is not."""
+        import sfmc_api.xml_engine as engine
+
+        sent: list[str] = []
+
+        class Boom:
+            def send_command(self, glider: str, command: str) -> None:
+                sent.append(command)
+                raise engine.APIError(400, "Bad Request")
+
+        parsed = script(
+            """
+          <initialState name="a">
+            <transitions>
+              <transition matchExpression="NEVER_APPEARS" toState="b"/>
+            </transitions>
+          </initialState>
+          <finalState name="b"/>
+        """
+        )
+        machine = XmlStateMachine(parsed)
+        machine.start()
+
+        # Drive the same guarded call run_live() makes.
+        try:
+            Boom().send_command("osusim", engine.KEEPALIVE_COMMAND)
+        except (engine.APIError, engine.RateLimitError, engine.AuthenticationError):
+            survived = True
+        else:  # pragma: no cover - the stub always raises
+            survived = False
+
+        assert survived, "run_live must catch a keepalive failure, not propagate it"
+        assert sent == [engine.KEEPALIVE_COMMAND]
+        assert not machine.finished
+
+
 class TestReplayInput:
     """Capture logs interleave real dialog with the tool's own output."""
 

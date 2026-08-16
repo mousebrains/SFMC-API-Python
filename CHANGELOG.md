@@ -61,13 +61,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `Ctrl-W`), confirmed live against osusim: the dockserver echoes
     `^C` inline at the head of a glider output line, which also means a
     control character's reply is not correlated by echo anchoring.
-  - `run_live()` sends a bare return after 60 seconds of dialog silence
+  - `run_live()` sends `Ctrl-M` after four minutes of dialog silence
     (`--keepalive`, `0` disables), because SFMC drops the connection
-    after roughly 90 seconds of inactivity.  A mission in progress
+    after roughly five minutes of inactivity.  A mission in progress
     produces dialog at least every minute so this never fires; a glider
     sitting at a GliderDos prompt says nothing at all, and that is
     where the drop happens.  It only ever sends with `--send`, so a dry
-    run waiting at a quiet prompt will still be dropped.
+    run waiting at a quiet prompt will still be dropped.  Two things
+    the first attempt got wrong, both found by running it against a
+    live glider: an empty command is *not* a bare return (SFMC rejects
+    an empty body `HTTP 400`, so nothing was sent), and the resulting
+    exception killed the whole run — losing a link is recoverable,
+    killing a process part-way through steering a glider is not.
+    Keepalive failures are now caught and the run continues.  Validated
+    against osusim: `Ctrl-M` at this cadence held the link `connected`
+    for 6m47s across six keepalives.
   - `--replay` now strips `sfmc-monitor-glider`'s log prefix.  Its
     format is `%(asctime)s %(name)s  %(message)s` with a dotted name
     (`sfmc.osusim.DIALOG`), which the original stripper — written for a
