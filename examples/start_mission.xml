@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!--
+Starts a mission from the GliderDos prompt, then falls out so the next
+script in the chain takes over.
+
+Written to sit in front of riot.xml, which begins by waiting for a
+surfacing and so cannot start the mission it then shepherds:
+
+    sfmc-xml-engine start_mission.xml riot.xml <glider flags> <send flag>
+
+This is an ordinary SFMC script.  Chaining happens in the runner, not
+in the XML, so nothing here relies on a language feature SFMC does not
+have.
+
+Change the mission name below to suit.  It is riot_sim.mi here because
+that is what get-newest-mission-status reports for osusim.
+-->
+
+<gliderScript>
+
+    <!--
+    An empty matchExpression fires on entry, so the command goes out as
+    soon as the script starts, without waiting for the glider to say
+    anything first.
+    -->
+    <initialState name="startMission">
+        <transitions>
+            <transition matchExpression="" toState="verifyStarted">
+                <action type="glider" command="run riot_sim.mi" />
+            </transition>
+        </transitions>
+    </initialState>
+
+    <!--
+    Wait for evidence the mission is actually running before handing
+    over.  "LOG FILE OPENED" is glider output at mission start, and is
+    matched the same way by vacuum_test_send_data_2hrs.xml.
+
+    Deliberately NOT matching the mission name: the dockserver echoes
+    submitted commands, so a pattern like /riot_sim/ would match the
+    echo of our own "run" and prove nothing.
+
+    The timer is a fallback, not the happy path.  If the confirmation
+    is missed the chain still advances rather than stranding here, and
+    riot.xml simply waits for the surfacing as it always does.  The
+    value is 2 MINUTES, because the timeout attribute is in minutes.
+    -->
+    <state name="verifyStarted">
+        <transitions>
+            <transition matchExpression="LOG FILE OPENED" toState="handoff" />
+            <transition timeout="2" toState="handoff" />
+        </transitions>
+    </state>
+
+    <!-- Reaching a final state is what hands control to the next script. -->
+    <finalState name="handoff">
+    </finalState>
+
+</gliderScript>

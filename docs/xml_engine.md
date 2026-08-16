@@ -213,6 +213,70 @@ Keepalives are transmissions, so they only happen with `--send`.  A dry
 run that waits at a quiet prompt will be dropped after ~5 minutes;
 that is the cost of a default that guarantees a dry run sends nothing.
 
+## Chaining scripts
+
+Several scripts run back to back — reaching a final state starts the
+next:
+
+```bash
+sfmc-xml-engine start_mission.xml riot.xml --glider osusim --send
+```
+
+SFMC's language has no chaining. A `<finalState>` simply ends the run,
+and across the whole corpus there is no attribute naming a successor:
+1227 `toState` and nothing else. So this composes at the **runner**
+level rather than inventing an attribute, which matters — every script
+in a chain stays a script SFMC itself could run, and the point of
+running them here is to emulate SFMC.
+
+It exists for the step SFMC does out of band. `riot.xml` begins by
+waiting for a surfacing, so it cannot start the mission it then
+shepherds. A small script in front of it closes that gap:
+
+```xml
+<initialState name="startMission">
+    <transitions>
+        <!-- empty matchExpression: fire on entry -->
+        <transition matchExpression="" toState="verifyStarted">
+            <action type="glider" command="run riot_sim.mi" />
+        </transition>
+    </transitions>
+</initialState>
+<state name="verifyStarted">
+    <transitions>
+        <transition matchExpression="LOG FILE OPENED" toState="handoff" />
+        <transition timeout="2" toState="handoff" />
+    </transitions>
+</state>
+<finalState name="handoff" />
+```
+
+Two things worth copying from that example. It matches `LOG FILE
+OPENED` rather than the mission name, because the dockserver echoes
+submitted commands and a `/riot_sim/` pattern would match the echo of
+its own `run` and prove nothing. And the timer is a fallback rather
+than the happy path, so a missed confirmation advances the chain
+instead of stranding it.
+
+**Each script starts with a fresh match buffer.** Text that arrived
+before a script began is not its to act on, and carrying a buffer
+across the boundary would let a permissive first pattern fire on
+history. The cost is that unconsumed text at the moment of hand-off is
+dropped; the hand-off does no I/O, so nothing arriving *during* it is
+lost.
+
+In the API, pass a list where a script goes:
+
+```python
+run_live(client, "osusim", [starter, riot], send=True)
+replay([starter, riot], dialog)
+```
+
+Note that a **dry run of such a chain will not start the mission** —
+the `run` is not transmitted, so no surfacing follows and the second
+script simply waits. A dry run proves the chaining and the hand-off;
+proving what the chain does at a surfacing needs `--send`.
+
 ## Safety
 
 This module can command a glider, so the defaults are set against that:

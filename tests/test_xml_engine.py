@@ -467,6 +467,95 @@ class TestAgainstRealScripts:
         assert total > 300, f"expected the corpus to have hundreds of actions, saw {total}"
 
 
+class TestScriptChain:
+    """Chaining composes runs; it does not extend the XML language."""
+
+    STARTER = """
+      <initialState name="issue">
+        <transitions>
+          <transition matchExpression="" toState="done">
+            <action type="glider" command="run riot_sim.mi"/>
+          </transition>
+        </transitions>
+      </initialState>
+      <finalState name="done"/>
+    """
+
+    def _chain(self, *bodies: str, **kwargs: object) -> object:
+        from sfmc_api.xml_engine import ScriptChain
+
+        return ScriptChain(tuple(script(b) for b in bodies), **kwargs)  # type: ignore[arg-type]
+
+    def test_a_final_state_starts_the_next_script(self) -> None:
+        chain = self._chain(self.STARTER, SIMPLE)
+        # The starter fires on entry, finishes, and hands straight over.
+        assert [a.command for a in chain.start()] == ["run riot_sim.mi"]  # type: ignore[attr-defined]
+        assert not chain.finished  # type: ignore[attr-defined]
+        actions = chain.feed("Hit Control-R to RESUME\r\n")  # type: ignore[attr-defined]
+        assert [a.command for a in actions] == ["h 0 0"]
+        assert chain.finished  # type: ignore[attr-defined]
+
+    def test_one_script_behaves_exactly_like_the_machine(self) -> None:
+        chain = self._chain(SIMPLE)
+        assert chain.start() == []  # type: ignore[attr-defined]
+        assert chain.state == "wait"  # type: ignore[attr-defined]
+        assert [a.command for a in chain.feed("RESUME\r\n")] == ["h 0 0"]  # type: ignore[attr-defined]
+        assert chain.finished  # type: ignore[attr-defined]
+
+    def test_each_script_starts_with_a_fresh_buffer(self) -> None:
+        """History is not the next script's to act on.
+
+        The starter finishes without consuming "RESUME", which the
+        second script would otherwise match at once on text that
+        arrived before it existed.
+        """
+        chain = self._chain(
+            """
+          <initialState name="a">
+            <transitions>
+              <transition matchExpression="GO" toState="done"/>
+            </transitions>
+          </initialState>
+          <finalState name="done"/>
+        """,
+            SIMPLE,
+        )
+        chain.start()  # type: ignore[attr-defined]
+        # One feed carries both the starter's trigger and text the
+        # second script would match.
+        assert chain.feed("RESUME then GO\r\n") == []  # type: ignore[attr-defined]
+        assert not chain.finished  # type: ignore[attr-defined]
+        # It only fires on text that arrives after the hand-off.
+        assert [a.command for a in chain.feed("RESUME\r\n")] == ["h 0 0"]  # type: ignore[attr-defined]
+
+    def test_state_is_qualified_by_script_when_chained(self) -> None:
+        chain = self._chain(self.STARTER, SIMPLE)
+        chain.start()  # type: ignore[attr-defined]
+        assert chain.state.endswith(":wait")  # type: ignore[attr-defined]
+
+    def test_an_empty_chain_is_refused(self) -> None:
+        from sfmc_api.xml_engine import ScriptChain
+
+        with pytest.raises(ValueError, match="at least one script"):
+            ScriptChain(())
+
+    def test_traces_the_hand_off(self) -> None:
+        seen: list[str] = []
+        chain = self._chain(self.STARTER, SIMPLE, on_trace=seen.append)
+        chain.start()  # type: ignore[attr-defined]
+        assert any("chaining to" in line for line in seen)
+
+    def test_replay_accepts_a_chain(self) -> None:
+        from sfmc_api.xml_engine import replay
+
+        actions = replay(
+            [script(self.STARTER), script(SIMPLE)],
+            iter(["Hit Control-R to RESUME\r\n"]),
+            verbose=False,
+        )
+        assert [a.command for a in actions] == ["run riot_sim.mi", "h 0 0"]
+
+
 class TestRunLive:
     """run_live() reads raw chunks, so buffer mode works live."""
 

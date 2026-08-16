@@ -6,7 +6,7 @@ behaviour can run from Python — as a way to understand a script, to
 replay one offline against recorded dialog, or to drive a glider
 directly.
 
-The whole SFMC script language is seven elements and four attributes::
+The whole SFMC script language is seven elements and six attributes::
 
     <gliderScript>
       <initialState name="...">              <!-- also <state>, <finalState> -->
@@ -52,7 +52,7 @@ import logging
 import re
 import time
 import xml.etree.ElementTree as ET
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -69,6 +69,7 @@ __all__ = [
     "Action",
     "MatchMode",
     "Script",
+    "ScriptChain",
     "ScriptError",
     "State",
     "Transition",
@@ -592,6 +593,129 @@ class XmlStateMachine:
         return list(transition.actions)
 
 
+@dataclass
+class ScriptChain:
+    """Runs scripts back to back: a final state starts the next one.
+
+    SFMC's language has no chaining.  A ``<finalState>`` simply ends the
+    run, and across the whole corpus there is no attribute that names a
+    successor — 1227 ``toState`` and nothing else.  So this composes at
+    the runner level rather than inventing an attribute: **every script
+    in a chain stays a script SFMC itself could run**, which is the
+    point, since the reason to run them here is to emulate SFMC.
+
+    Useful for the step SFMC does out of band.  ``riot.xml`` begins by
+    waiting for a surfacing; it cannot start the mission it then
+    shepherds.  Chain a small script that issues ``run`` in front of it
+    and the pair covers the whole procedure.
+
+    Each script starts with a **fresh match buffer**.  Text that arrived
+    before a script began is not its to act on, and carrying a buffer
+    across the boundary would let a permissive first pattern in the next
+    script fire on history.  The cost is that unconsumed text at the
+    moment of hand-off is dropped; the hand-off itself does no I/O, so
+    nothing arriving *during* it is lost.
+
+    Presents the same interface as :class:`XmlStateMachine`, and a
+    one-script chain behaves exactly like the machine alone.
+
+    Args:
+        scripts: The scripts to run, in order.  At least one.
+        match_mode: See :class:`XmlStateMachine`.
+        on_trace: Called at every state change, match, timeout, and
+            hand-off.
+        now: Clock, injectable for tests.
+    """
+
+    scripts: tuple[Script, ...]
+    match_mode: MatchMode = "buffer"
+    on_trace: Callable[[str], None] | None = None
+    now: Callable[[], float] = time.monotonic
+
+    _index: int = field(init=False, default=0)
+    _machine: XmlStateMachine = field(init=False)
+
+    def __post_init__(self) -> None:
+        if not self.scripts:
+            raise ValueError("a chain needs at least one script")
+        self._machine = self._build(0)
+
+    def _build(self, index: int) -> XmlStateMachine:
+        return XmlStateMachine(
+            self.scripts[index],
+            match_mode=self.match_mode,
+            on_trace=self.on_trace,
+            now=self.now,
+        )
+
+    # ── Introspection ────────────────────────────────────────────────
+
+    @property
+    def script(self) -> Script:
+        """The script currently running."""
+        return self.scripts[self._index]
+
+    @property
+    def state(self) -> str:
+        """Current state name, qualified by script when chained."""
+        if len(self.scripts) == 1:
+            return self._machine.state
+        return f"{self.script.name}:{self._machine.state}"
+
+    @property
+    def finished(self) -> bool:
+        """True only once the *last* script has reached a final state."""
+        return self._machine.finished and self._index == len(self.scripts) - 1
+
+    @property
+    def timeout_remaining(self) -> float | None:
+        return self._machine.timeout_remaining
+
+    # ── Driving ──────────────────────────────────────────────────────
+
+    def start(self) -> list[Action]:
+        actions = self._machine.start()
+        actions.extend(self._advance())
+        return actions
+
+    def feed(self, text: str) -> list[Action]:
+        if self.finished:
+            return []
+        actions = self._machine.feed(text)
+        actions.extend(self._advance())
+        return actions
+
+    def check_timeout(self) -> list[Action]:
+        if self.finished:
+            return []
+        actions = self._machine.check_timeout()
+        actions.extend(self._advance())
+        return actions
+
+    def _advance(self) -> list[Action]:
+        """Start successors while the current script has finished."""
+        actions: list[Action] = []
+        while self._machine.finished and self._index < len(self.scripts) - 1:
+            self._index += 1
+            if self.on_trace is not None:
+                self.on_trace(
+                    f"chaining to {self.script.name} ({self._index + 1}/{len(self.scripts)})"
+                )
+            self._machine = self._build(self._index)
+            actions.extend(self._machine.start())
+        return actions
+
+
+def _as_chain(
+    script: Script | Sequence[Script],
+    *,
+    match_mode: MatchMode,
+    on_trace: Callable[[str], None] | None,
+) -> ScriptChain:
+    scripts = (script,) if isinstance(script, Script) else tuple(script)
+    return ScriptChain(scripts, match_mode=match_mode, on_trace=on_trace)
+
+
 def describe(script: Script) -> str:
     """Render a script as readable text, for review without XML."""
     lines = [f"script {script.name}  (initial: {script.initial})"]
@@ -619,7 +743,7 @@ def _emit(trace: str) -> None:
 
 
 def replay(
-    script: Script,
+    script: Script | Sequence[Script],
     dialog: Iterator[str],
     *,
     match_mode: MatchMode = "buffer",
@@ -642,7 +766,7 @@ def replay(
     Returns:
         Every action the script would have taken, in order.
     """
-    machine = XmlStateMachine(
+    machine = _as_chain(
         script,
         match_mode=match_mode,
         on_trace=_emit if verbose else None,
@@ -658,7 +782,7 @@ def replay(
 def run_live(
     client: SFMCClient,
     glider: str,
-    script: Script,
+    script: Script | Sequence[Script],
     *,
     send: bool = False,
     match_mode: MatchMode = "buffer",
@@ -697,12 +821,13 @@ def run_live(
         Every action taken (or that would have been taken), in order.
         Keepalive returns are not actions and are not included.
     """
-    machine = XmlStateMachine(script, match_mode=match_mode, on_trace=_emit)
+    machine = _as_chain(script, match_mode=match_mode, on_trace=_emit)
     performed: list[Action] = []
     mode = "SENDING" if send else "dry run — nothing will be sent"
-    print(f"running {script.name} against {glider} [{mode}]", flush=True)
+    names = " -> ".join(one.name for one in machine.scripts)
+    print(f"running {names} against {glider} [{mode}]", flush=True)
 
-    # SFMC drops the connection after roughly 90 seconds of inactivity.
+    # SFMC drops the connection after roughly five minutes of inactivity.
     # A mission in progress produces dialog at least every minute, so
     # this never fires; a glider sitting at a GliderDos prompt says
     # nothing at all, and that is where the drop happens.  Silence on
@@ -770,7 +895,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Parse, replay, or run an SFMC glider-script XML file.",
     )
-    parser.add_argument("script", metavar="SCRIPT.xml")
+    parser.add_argument(
+        "script",
+        metavar="SCRIPT.xml",
+        nargs="+",
+        help=(
+            "One or more scripts.  Several run as a chain: reaching a final "
+            "state starts the next, each with a fresh match buffer"
+        ),
+    )
     parser.add_argument("--describe", action="store_true", help="Print the state machine and exit")
     parser.add_argument("--replay", metavar="DIALOG.log", help="Replay against a recorded log")
     parser.add_argument("--glider", help="Run against this glider (dry run unless --send)")
@@ -809,13 +942,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        parsed = parse_script(args.script)
+        parsed = [parse_script(path) for path in args.script]
     except ScriptError as exc:
         print(f"error: {exc}", flush=True)
         return 2
 
     if args.describe:
-        print(describe(parsed))
+        print("\n\n".join(describe(one) for one in parsed))
         return 0
 
     if args.replay:

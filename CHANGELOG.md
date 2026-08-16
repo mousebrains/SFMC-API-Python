@@ -47,6 +47,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `toState`, invalid regexes, malformed XML, and immediate-transition
   cycles are all refused rather than assumed benign.  See
   [docs/xml_engine.md](docs/xml_engine.md).
+  - **Script chaining.**  `sfmc-xml-engine a.xml b.xml` runs scripts
+    back to back: reaching a final state starts the next.  SFMC's
+    language has no chaining — a `<finalState>` just ends the run, and
+    the corpus has no attribute naming a successor — so this composes
+    at the runner level rather than inventing an attribute, keeping
+    every script in a chain something SFMC itself could run.  It exists
+    for the step SFMC does out of band: `riot.xml` begins by waiting
+    for a surfacing and so cannot start the mission it then shepherds.
+    Each script starts with a fresh match buffer, so a permissive first
+    pattern cannot fire on text that arrived before its script existed.
   - The XML `timeout` attribute is **minutes**, not seconds.  Every
     author in the corpus documents it that way — all 22 of `riot.xml`'s
     timers carry "If nothing within 10 minutes", and
