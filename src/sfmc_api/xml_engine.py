@@ -668,15 +668,13 @@ def run_live(
 ) -> list[Action]:
     """Drive a glider with *script* until it reaches a final state.
 
-    .. note::
-
-       Matching is line-oriented here whatever *match_mode* says.  The
-       dialog listener this reads from publishes only newline-terminated
-       lines and drops any unterminated tail at a session boundary, so
-       ``"buffer"`` mode's ability to match an unterminated GliderDos
-       prompt does not reach the live path.  A prompt followed by more
-       output still matches; a trailing idle prompt may be dropped
-       before it arrives.  See ``docs/xml_engine.md``.
+    Reads the *raw* dialog stream
+    (:meth:`~sfmc_api.session.GliderSession.raw_dialog_listener`) rather
+    than reassembled lines, and feeds each chunk to the machine
+    untouched.  That is what makes ``match_mode="buffer"`` mean the same
+    thing live as it does in :func:`replay`: a GliderDos prompt carries
+    no trailing newline, so it never becomes a complete line, and a
+    line consumer would never see an idle one.
 
     Args:
         client: An :class:`~sfmc_api.client.SFMCClient`.
@@ -724,21 +722,22 @@ def run_live(
 
     deadline = None if max_runtime is None else time.monotonic() + max_runtime
     with client.session(glider, topics=("dialog",)) as session:
-        listener = session.dialog_listener()
+        listener = session.raw_dialog_listener()
         dispatch(machine.start())
         while not machine.finished:
             if deadline is not None and time.monotonic() > deadline:
                 print("    stopping: max runtime reached", flush=True)
                 break
             try:
-                line = listener.get(timeout=poll)
+                chunk = listener.get(timeout=poll)
             except Exception:  # queue.Empty and friends
-                line = None
-            if line is not None:
+                chunk = None
+            if chunk is not None:
                 last_activity = time.monotonic()
-                # The engine matches raw text, so put the terminator
-                # back: scripts match against the stream, not a list.
-                dispatch(machine.feed(line.text + "\r\n"))
+                # Fed exactly as it arrived.  Reassembling into lines
+                # and re-adding a terminator would lose the one thing
+                # buffer mode exists to match: an unterminated prompt.
+                dispatch(machine.feed(chunk))
             dispatch(machine.check_timeout())
             if keepalive is not None and send and time.monotonic() - last_activity >= keepalive:
                 # Never fatal.  A keepalive is a convenience; losing the

@@ -151,25 +151,29 @@ reason about and adequate for scripts that match ordinary dialog
 output, but it cannot match a prompt.  That inability is pinned by a
 test rather than left to be discovered at sea.
 
-### Live matching is line-oriented regardless of mode
+### Live matching uses the raw stream
 
-**A limitation worth knowing before trusting a prompt-matching script
-live.**  `run_live()` consumes `GliderSession.dialog_listener()`, and
-that pump publishes only *complete* lines, dropping any unterminated
-tail at a session boundary.  So in the live path the state machine sees
-newline-terminated lines whatever `--match-mode` says, and `buffer`
-mode's advantage does not reach it.
+`run_live()` reads `GliderSession.raw_dialog_listener()` — the
+sequence-ordered dialog chunks exactly as they arrive, with no line
+reassembly — and feeds each one to the machine untouched.  So
+`--match-mode` means the same thing live as it does in replay, and a
+prompt matches whether or not anything terminates the line it sits on.
+A prompt split across chunks (`Glider` / `Dos N ` / `-1 > `) matches
+too, because the rolling buffer spans them.
 
-In practice a prompt is usually followed by more output, which
-terminates it — a capture from osusim on 2026-08-16 shows
-`GliderDos N -1 >` arriving as an ordinary line twice.  But the same
-session also discarded a 16-byte unterminated fragment at its boundary,
-and `GliderDos N -1 >` is exactly 16 bytes: a trailing idle prompt, the
-last thing a glider says before going quiet, can be dropped before any
-consumer sees it.
+This was not the original design, and the difference is not academic.
+`run_live()` first consumed the *line* stream, which publishes only
+newline-terminated lines and discards the unterminated tail at a
+session boundary — so an idle GliderDos prompt reached no consumer at
+all.  Observed three times against osusim on 2026-08-16 as
+`stream boundary discarded 16-byte unterminated fragment`;
+`GliderDos N -1 >` is exactly 16 bytes.  Nine of the twenty reference
+scripts trigger on that prompt, so for them the live path would have
+hung forever at a quiet glider.
 
-Replay does not have this problem — `--replay` feeds raw text straight
-to the matcher.
+`dialog_listener()` is still the right choice for anything that works
+in lines — logging, parsing surfacings, the follower.  Use
+`raw_dialog_listener()` when you match against the stream.
 
 ### Keeping the connection up
 

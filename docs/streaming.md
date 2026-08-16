@@ -256,15 +256,15 @@ reassembly pipeline once, and fans the result out:
 ```
              ┌──────────────────── GliderSession ────────────────────┐
              │                                                       │
-STOMP topic  │  one subscription → ordered_dialog → LineAssembler    │
-   ──────────┼─►                                          │          │
-             │                                            ▼          │
-             │                                     ┌─────────────┐   │
-             │                                     │ broadcaster │   │
-             │                                     └──┬───┬───┬──┘   │
-             │        Listener (bounded queue) ◄──────┘   │   │      │
-             │        Listener (bounded queue) ◄──────────┘   │      │
-             │        on_line(callback)        ◄──────────────┘      │
+STOMP topic  │  one subscription → ordered_dialog ──┬─► LineAssembler│
+   ──────────┼─►                                    │        │       │
+             │                                      ▼        ▼       │
+             │                            ┌───────────┐ ┌─────────┐  │
+             │                            │ raw b'cast│ │ b'cast  │  │
+             │                            └─────┬─────┘ └─┬───┬───┘  │
+             │  raw_dialog_listener()  ◄────────┘         │   │      │
+             │  Listener (bounded queue) ◄────────────────┘   │      │
+             │  on_line(callback)        ◄────────────────────┘      │
              │                                                       │
              │  supervised by StreamSupervisor: reconnects with      │
              │  backoff, so listeners stay valid across drops        │
@@ -277,6 +277,22 @@ with client.session("osu685", topics=["dialog", "connections"]) as session:
     for event in session.listen("connections"):
         print(event)
 ```
+
+### Lines or raw chunks
+
+`dialog_listener()` / `on_line()` give reassembled lines, and are what
+almost everything wants — logging, parsing surfacings, the follower.
+
+`raw_dialog_listener()` / `on_raw_dialog()` give the ordered chunks
+*before* line assembly, exactly as they arrived. Use them when you
+match against the stream rather than against lines. The distinction
+matters for one specific reason: a terminal prompt such as
+`GliderDos N -1 >` carries no trailing newline, so it never completes a
+line — it stays in the assembler's buffer and is discarded at the
+session boundary, logged as `stream boundary discarded N-byte
+unterminated fragment`. A line consumer therefore never sees an idle
+prompt at all. `sfmc-xml-engine` reads the raw stream for exactly this
+reason; see [xml_engine.md](xml_engine.md).
 
 Listener queues are bounded and drop their **oldest** entry when a
 consumer falls behind, counting the loss in `Listener.dropped`.  A

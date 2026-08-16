@@ -83,12 +83,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     fails to match does not skip the line: it falls through to the
     raw-capture path, feeding the timestamp, the logger name, and the
     tool's own `INFO` bookkeeping straight to the matcher.
-  - Known limitation: `run_live()` matches line-by-line whatever
-    `--match-mode` says, because the dialog listener publishes only
-    newline-terminated lines and drops the unterminated tail at a
-    session boundary.  A GliderDos prompt followed by more output still
-    matches; a trailing idle prompt can be dropped before it arrives.
-    Documented rather than papered over.
+  - `run_live()` drives the machine from the raw dialog stream, so
+    `--match-mode` means the same thing live as in replay.  It first
+    used reassembled lines, which publish only newline-terminated text
+    and discard the unterminated tail at a session boundary — so an
+    idle GliderDos prompt reached no consumer at all, and the nine of
+    twenty reference scripts that trigger on that prompt would have
+    hung forever at a quiet glider.  Seen three times against osusim as
+    `stream boundary discarded 16-byte unterminated fragment`, which is
+    exactly the length of `GliderDos N -1 >`.
+- **`GliderSession.raw_dialog_listener()` and `on_raw_dialog()`** —
+  the sequence-ordered dialog chunks before line assembly, for
+  consumers that match against the stream rather than against lines.
+  `dialog_listener()` is unchanged and remains right for anything that
+  works in lines; the raw stream exists because a terminal prompt
+  carries no trailing newline, so it never becomes a complete line and
+  a line consumer never sees an idle one.
 - **Command replies.** `client.command_channel(glider)` submits a
   command and captures what the glider says back, returning a
   `CommandReply` instead of only SFMC's acceptance. The reply is

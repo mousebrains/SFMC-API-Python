@@ -115,6 +115,71 @@ class TestGliderSession:
         assert line_two is not None and line_two.text == "hello"
         assert client.subscribe_glider_output.call_count == 1
 
+    def test_raw_listener_sees_an_unterminated_prompt(self) -> None:
+        """The line stream cannot deliver a GliderDos prompt.
+
+        A prompt carries no trailing newline, so it never completes a
+        line: it sits in the assembler's buffer and is discarded at the
+        session boundary.  Nine of the twenty known SFMC scripts trigger
+        on that prompt, so a stream matcher needs the raw chunks.
+        """
+        client = _client(
+            [{"sequenceNumber": 0, "data": "done\r\nGliderDos N -1 > "}],
+            keep_open=True,
+        )
+        session = GliderSession(client, "osu685", reconnect=False)
+        raw = session.raw_dialog_listener()
+        lines = session.dialog_listener()
+        session.start(timeout=5.0)
+        try:
+            chunk = raw.get(timeout=5.0)
+            line = lines.get(timeout=5.0)
+        finally:
+            session.close()
+
+        assert chunk == "done\r\nGliderDos N -1 > "
+        assert "GliderDos" in (chunk or "")
+        # The line consumer gets only the terminated part; the prompt is
+        # still buffered and will be dropped at the boundary.
+        assert line is not None and line.text == "done"
+        assert lines.get(timeout=0.2) is None
+
+    def test_raw_chunks_are_not_reassembled(self) -> None:
+        """Chunks arrive as sent — half lines and all."""
+        client = _client(
+            [
+                {"sequenceNumber": 0, "data": "abc"},
+                {"sequenceNumber": 1, "data": "def\r\n"},
+            ],
+            keep_open=True,
+        )
+        session = GliderSession(client, "osu685", reconnect=False)
+        raw = session.raw_dialog_listener()
+        session.start(timeout=5.0)
+        try:
+            first = raw.get(timeout=5.0)
+            second = raw.get(timeout=5.0)
+        finally:
+            session.close()
+        assert [first, second] == ["abc", "def\r\n"]
+
+    def test_raw_callbacks_receive_chunks(self) -> None:
+        client = _client([{"sequenceNumber": 0, "data": "xy"}], keep_open=True)
+        session = GliderSession(client, "osu685", reconnect=False)
+        seen: list[str] = []
+        session.on_raw_dialog(seen.append)
+        session.start(timeout=5.0)
+        deadline = time.monotonic() + 5.0
+        while not seen and time.monotonic() < deadline:
+            time.sleep(0.01)
+        session.close()
+        assert seen == ["xy"]
+
+    def test_raw_listener_needs_the_dialog_topic(self) -> None:
+        session = GliderSession(MagicMock(), "osu685", topics=["scripts"])
+        with pytest.raises(ValueError, match="not subscribed"):
+            session.raw_dialog_listener()
+
     def test_callbacks_receive_lines(self) -> None:
         client = _client([{"sequenceNumber": 0, "data": "abc\r\n"}], keep_open=True)
         session = GliderSession(client, "osu685", reconnect=False)

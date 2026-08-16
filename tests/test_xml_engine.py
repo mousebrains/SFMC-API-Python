@@ -467,6 +467,103 @@ class TestAgainstRealScripts:
         assert total > 300, f"expected the corpus to have hundreds of actions, saw {total}"
 
 
+class TestRunLive:
+    """run_live() reads raw chunks, so buffer mode works live."""
+
+    PROMPT_SCRIPT = """
+      <initialState name="wait">
+        <transitions>
+          <transition matchExpression="(Glider(Dos|LAB) [AIN] (0|(-?[1-9]+))) &gt;" toState="go">
+            <action type="glider" command="whoru"/>
+          </transition>
+        </transitions>
+      </initialState>
+      <finalState name="go"/>
+    """
+
+    def _client(self, chunks: list[str]) -> tuple[object, list[str]]:
+        from sfmc_api.session import Listener
+
+        sent: list[str] = []
+        listener: Listener[str] = Listener()
+        for chunk in chunks:
+            listener._publish(chunk)
+
+        class FakeSession:
+            def __enter__(self) -> FakeSession:
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                return None
+
+            def raw_dialog_listener(self) -> Listener[str]:
+                return listener
+
+        class FakeClient:
+            def session(self, glider: str, topics: tuple[str, ...]) -> FakeSession:
+                return FakeSession()
+
+            def send_command(self, glider: str, command: str) -> None:
+                sent.append(command)
+
+        return FakeClient(), sent
+
+    def test_matches_an_unterminated_prompt(self) -> None:
+        """The case the whole raw-stream change exists for.
+
+        A GliderDos prompt has no trailing newline.  Driven from
+        reassembled lines this never matched and the script hung; driven
+        from raw chunks it fires.
+        """
+        from sfmc_api.xml_engine import run_live
+
+        client, sent = self._client(["GliderDos N -1 > "])
+        actions = run_live(
+            client,  # type: ignore[arg-type]
+            "osusim",
+            script(self.PROMPT_SCRIPT),
+            send=True,
+            keepalive=None,
+            poll=0.01,
+            max_runtime=5.0,
+        )
+        assert [a.command for a in actions] == ["whoru"]
+        assert sent == ["whoru"]
+
+    def test_a_prompt_split_across_chunks_still_matches(self) -> None:
+        """Chunks respect no line or token boundary."""
+        from sfmc_api.xml_engine import run_live
+
+        client, sent = self._client(["noise\r\nGlider", "Dos N ", "-1 > "])
+        actions = run_live(
+            client,  # type: ignore[arg-type]
+            "osusim",
+            script(self.PROMPT_SCRIPT),
+            send=True,
+            keepalive=None,
+            poll=0.01,
+            max_runtime=5.0,
+        )
+        assert [a.command for a in actions] == ["whoru"]
+        assert sent == ["whoru"]
+
+    def test_dry_run_sends_nothing(self) -> None:
+        from sfmc_api.xml_engine import run_live
+
+        client, sent = self._client(["GliderDos N -1 > "])
+        actions = run_live(
+            client,  # type: ignore[arg-type]
+            "osusim",
+            script(self.PROMPT_SCRIPT),
+            send=False,
+            keepalive=None,
+            poll=0.01,
+            max_runtime=5.0,
+        )
+        assert [a.command for a in actions] == ["whoru"]
+        assert sent == [], "a dry run must transmit nothing"
+
+
 class TestKeepalive:
     """SFMC drops a link after ~90s of quiet; run_live sends a return.
 
