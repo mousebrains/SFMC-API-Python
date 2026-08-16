@@ -40,6 +40,26 @@ with SFMCClient() as client:
     print(details)
 ```
 
+Send a command and read the glider's reply.  Note that SFMC accepting
+a command is not the glider running it — a submerged glider will not
+answer until it surfaces, so the reply says whether it completed and
+why it stopped ([details](docs/script_control.md)):
+
+```python
+with client.command_channel("osu685") as chan:
+    reply = chan.send("sensor m_battery")
+    print(reply.text if reply.complete else f"no reply: {reply.reason}")
+```
+
+Any operation can run off-thread, returning a `Future` that also works
+with `asyncio` ([details](docs/async_operations.md)):
+
+```python
+with client.operations() as ops:
+    future = ops.submit(client.get_glider_details, "osu685")
+    details = future.result(timeout=30)
+```
+
 ### Command-Line Interface
 
 ```bash
@@ -49,6 +69,7 @@ sfmc-api get-glider-details osu685               # query a glider
 sfmc-api get-waypoint-plan osu685                # get navigation plan
 sfmc-api get-folder-file-listing osu685 from-glider  # list files
 sfmc-api subscribe-connection-events osu685      # stream events (Ctrl-C to stop)
+sfmc-api send-command osu685 'sensor m_battery' --wait  # command + reply
 sfmc-api --compact get-glider-details osu685     # single-line JSON
 sfmc-api --help                                  # see all subcommands
 ```
@@ -165,7 +186,8 @@ See [docs/configuration.md](docs/configuration.md) for full details.
 - [CLI Reference](docs/cli.md) -- command-line interface
 - [Glider Management](docs/glider_management.md) -- queries, registration, deployment
 - [Plans](docs/plans.md) -- mission plan queries, updates, and deployments
-- [Script Control](docs/script_control.md) -- script assignment and commands
+- [Script Control](docs/script_control.md) -- script assignment, commands, and reply capture
+- [Asynchronous Operations](docs/async_operations.md) -- futures, callbacks, and ordering
 - [File Operations](docs/file_operations.md) -- upload, download, and delete
 - [Real-Time Streaming](docs/streaming.md) -- STOMP over SockJS event streaming
 - [Monitor Glider](docs/monitor_glider.md) -- real-time dialog and script monitoring

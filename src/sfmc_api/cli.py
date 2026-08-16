@@ -241,6 +241,56 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("send-command", help="Send a command to a glider")
     _add_glider_arg(p)
     p.add_argument("command_str", metavar="COMMAND", help="Command string")
+    p.add_argument(
+        "--wait",
+        action="store_true",
+        help=(
+            "Capture the glider's reply from the dialog stream instead of "
+            "returning as soon as SFMC accepts the command.  A submerged "
+            "glider will not answer; the reply reports why"
+        ),
+    )
+    p.add_argument(
+        "--timeout",
+        type=float,
+        default=45.0,
+        metavar="SECONDS",
+        help="With --wait: give up after this long (default: 45)",
+    )
+    p.add_argument(
+        "--quiet-for",
+        type=float,
+        default=5.0,
+        metavar="SECONDS",
+        help="With --wait: treat this much silence as end of reply (default: 5)",
+    )
+    p.add_argument(
+        "--until",
+        metavar="REGEX",
+        help="With --wait: stop at the first reply line matching this pattern",
+    )
+    p.add_argument(
+        "--echo-anchor",
+        action="store_true",
+        help=(
+            "With --wait: capture only from the line echoing the command. "
+            "Confirm the dockserver echoes with 'probe-command' first"
+        ),
+    )
+
+    p = sub.add_parser(
+        "probe-command",
+        help="Diagnostic: submit a command and dump raw dialog frames",
+    )
+    _add_glider_arg(p)
+    p.add_argument("command_str", metavar="COMMAND", help="Command string")
+    p.add_argument(
+        "--window",
+        type=float,
+        default=30.0,
+        metavar="SECONDS",
+        help="How long to record dialog frames after submitting (default: 30)",
+    )
 
     p = sub.add_parser("upload-glider-files", help="Upload files to a folder")
     _add_glider_arg(p)
@@ -379,6 +429,12 @@ def _run(client: SFMCClient, args: argparse.Namespace) -> int:
     if cmd in _STREAM:
         return _handle_stream(client, args, method_name, compact)
 
+    if cmd == "probe-command":
+        return _handle_probe_command(client, args)
+
+    if cmd == "send-command" and args.wait:
+        return _handle_send_and_wait(client, args, compact)
+
     # Download commands
     if cmd == "download-glider-file":
         path = client.download_glider_file(
@@ -488,6 +544,108 @@ def _handle_stream(
                 sys.stdout.flush()
         except KeyboardInterrupt:
             sys.stderr.write("\nStopped.\n")
+    return 0
+
+
+# ── Command handlers ─────────────────────────────────────────────────
+
+
+def _handle_send_and_wait(
+    client: SFMCClient,
+    args: argparse.Namespace,
+    compact: bool,
+) -> int:
+    """Submit a command and print the glider's reply.
+
+    Exits non-zero when no complete reply arrived, so a script can
+    tell "the glider answered" from "SFMC took the command and the
+    glider said nothing" — which is the normal outcome while it is
+    submerged.
+    """
+    import re
+
+    from .commands import ReplyPolicy
+
+    policy = ReplyPolicy(
+        timeout=args.timeout,
+        quiet=args.quiet_for,
+        until=re.compile(args.until) if args.until else None,
+        echo_anchor=args.echo_anchor,
+    )
+    with client.command_channel(args.glider_name, policy=policy) as chan:
+        reply = chan.send(args.command_str)
+
+    _print_json(
+        {
+            "command": reply.command,
+            "complete": reply.complete,
+            "reason": reply.reason,
+            "correlated": reply.correlated,
+            "dropped_lines": reply.dropped_lines,
+            "glider_connected": reply.glider_connected,
+            "lines": list(reply.lines),
+        },
+        compact,
+    )
+    return 0 if reply.complete else 2
+
+
+def _handle_probe_command(client: SFMCClient, args: argparse.Namespace) -> int:
+    """Dump raw dialog frames around a submitted command.
+
+    A diagnostic, not an API: it answers the one question this library
+    cannot answer on its own — whether the dockserver echoes submitted
+    commands back onto the dialog topic, and how the reply is framed.
+    Frames are printed exactly as received, with arrival offsets and
+    sequence numbers, so nothing this library does to them can hide
+    what the server actually sent.  Use the result to decide whether
+    ``send-command --wait --echo-anchor`` is trustworthy on your
+    server.
+    """
+    import queue
+    import time
+
+    with client.open_stream() as stomp:
+        sub = client.subscribe_glider_output(args.glider_name, stomp)
+        try:
+            sys.stderr.write(
+                f"Recording {args.window:.0f}s of dialog for {args.glider_name}; "
+                f"submitting {args.command_str!r}...\n"
+            )
+            t0 = time.monotonic()
+            response = client.send_command(args.glider_name, args.command_str)
+            submitted = time.monotonic() - t0
+            sys.stderr.write(f"SFMC accepted at +{submitted:.3f}s: {response}\n")
+
+            deadline = time.monotonic() + args.window
+            frames = 0
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    msg = sub.get(timeout=min(0.5, remaining))
+                except queue.Empty:
+                    continue
+                if msg is None:
+                    sys.stderr.write("Stream closed.\n")
+                    break
+                frames += 1
+                offset = time.monotonic() - t0
+                seq = msg.get("sequenceNumber") if isinstance(msg, dict) else None
+                data = msg.get("data") if isinstance(msg, dict) else msg
+                sys.stdout.write(f"+{offset:7.3f}s seq={seq} {data!r}\n")
+                sys.stdout.flush()
+            sys.stderr.write(f"\n{frames} frame(s) in {args.window:.0f}s.\n")
+            if frames == 0:
+                sys.stderr.write(
+                    "No dialog at all — the glider is probably not connected. "
+                    "Re-run during a surfacing before drawing conclusions.\n"
+                )
+        except KeyboardInterrupt:
+            sys.stderr.write("\nStopped.\n")
+        finally:
+            sub.close()
     return 0
 
 

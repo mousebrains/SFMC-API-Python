@@ -437,16 +437,32 @@ def test_build_notifier_active_with_recipients(monkeypatch: pytest.MonkeyPatch) 
             sent.append((msg["Subject"], msg["To"], msg.get_content()))
 
     monkeypatch.setattr("sfmc_api.disconnect_notify.smtplib.SMTP", FakeSMTP)
+
+    # Drive the alert timer by hand rather than waiting on wall-clock.
+    # build_notifier does not expose timer_factory (it wires CLI args,
+    # and no caller should be choosing a clock), so the injection point
+    # is the class it constructs.  Waiting on a real timer here meant
+    # two thread hops — the Timer thread, then the sender thread — had
+    # to finish inside a fixed poll window, which is not something a
+    # loaded CI runner guarantees.
+    registry = _TimerRegistry()
+    real_notifier_cls = DisconnectNotifier
+
+    def with_fake_timer(**kwargs: object) -> DisconnectNotifier:
+        return real_notifier_cls(timer_factory=registry, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("sfmc_api.disconnect_notify.DisconnectNotifier", with_fake_timer)
+
     args = _parse(["--notify-email", "ops@x.org", "--notify-after", "0"])
     notifier = build_notifier(args, program="sfmc-test", glider_name="osu685")
     assert notifier is not None
     try:
-        # threshold 0 -> the real timer fires almost immediately.
         notifier.record_disconnect(reason="down")
-        deadline = time.monotonic() + 2.0
-        while not sent and time.monotonic() < deadline:
-            time.sleep(0.005)
+        assert registry.timers, "record_disconnect should arm the alert timer"
+        registry.latest.fire()  # the alert the timer would have raised
     finally:
+        # close() queues the sentinel behind the alert and joins the
+        # sender, so the message is delivered by the time it returns.
         notifier.close()
     assert sent, "expected an SMTP send"
     subject, to, _ = sent[0]

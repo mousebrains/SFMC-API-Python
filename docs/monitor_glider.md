@@ -131,16 +131,25 @@ walkthrough in its README (service user, virtualenv, credentials in
 
 ```python
 from sfmc_api import SFMCClient
-from sfmc_api.monitor_glider import ordered_dialog
+from sfmc_api.dialog_stream import dialog_lines
 
 with SFMCClient() as client:
     with client.open_stream() as stomp:
         sub = client.subscribe_glider_output("osu685", stomp)
-        for data in ordered_dialog(sub):
-            print(data, end="")
+        for line in dialog_lines(sub):
+            print(line.text)
 ```
 
-This low-level example owns only one connection. Application code using
-`open_stream()` directly must recreate its connection and subscriptions after
-closure; transparent reconnect belongs above the transport because only the
-application knows which subscriptions and state to restore.
+This low-level example owns only one connection, which ends when the
+stream drops. For a stream that reconnects on its own — and that
+several consumers can read at once — use a session instead:
+
+```python
+with client.session("osu685") as session:
+    session.on_line(lambda line: print(line.text))
+    session.stop.wait()      # runs until stopped, reconnecting as needed
+```
+
+See [streaming.md](streaming.md) for the session model, and
+[async_operations.md](async_operations.md) for the request/response
+side.

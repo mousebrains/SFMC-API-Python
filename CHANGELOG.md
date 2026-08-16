@@ -28,6 +28,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Command replies.** `client.command_channel(glider)` submits a
+  command and captures what the glider says back, returning a
+  `CommandReply` instead of only SFMC's acceptance. The reply is
+  explicit about what it can and cannot promise: `complete` and
+  `reason` say whether capture reached a defined stop (terminator,
+  quiet window, line cap) or ran out (timeout, disconnect, missing
+  echo); `correlated` says whether the lines were anchored to an echo
+  of *this* command or are merely what appeared on a shared terminal
+  during the window; `dropped_lines` exposes a lagging capture instead
+  of silently truncating. A missing reply is **not** an exception —
+  silence is normal for a submerged glider — so exceptions are
+  reserved for failures to submit. The dialog listener is attached
+  before the command is submitted (a fast reply cannot be missed),
+  reply-capturing sends are serialized per glider (no interleaved
+  attribution), and a stream drop mid-capture never resubmits the
+  command. Available from the CLI as
+  `sfmc-api send-command GLIDER CMD --wait` (exit `2` when no complete
+  reply arrived), with `--timeout`, `--quiet-for`, `--until`, and
+  `--echo-anchor`. See [docs/script_control.md](docs/script_control.md).
+  A capture that hears nothing at all reports `reason="silent"` and
+  `complete=False`.  Live testing against a glider that was busy
+  transmitting produced exactly this case, and an earlier revision
+  reported it as `complete=True` with an empty `lines` — the false
+  reassurance the type exists to prevent.
+- **`sfmc-api probe-command GLIDER CMD`** — a diagnostic that dumps
+  raw dialog frames with arrival offsets and sequence numbers around a
+  submitted command, uninterpreted. It answers the one question this
+  library cannot answer on its own: whether your dockserver echoes
+  submitted commands, and therefore whether `--echo-anchor` is
+  trustworthy on your server.
+- **Asynchronous execution for every operation.**
+  `client.operations()` returns an `OperationExecutor` that runs any
+  bound client method on a worker thread and hands back a
+  `concurrent.futures.Future` — the same type
+  `CommandChannel.send_async()` returns, and directly awaitable via
+  `asyncio.wrap_future()`. It wraps existing methods generically
+  rather than describing the API a second time, so endpoints added
+  later are asynchronously callable with no new wrapper code.
+  `serialized(key, ...)` and `sequence(key, ...)` hold a per-glider
+  lock for operations that must not interleave (two plan updates, an
+  upload and the deploy that consumes it). See
+  [docs/async_operations.md](docs/async_operations.md).
+- **`client.session(glider, topics=[...])`** — a supervised event
+  session that subscribes once per topic, runs sequence ordering and
+  line reassembly once, and fans the result out to any number of
+  listeners and callbacks, reconnecting on its own. Previously a
+  subscription fed exactly one consumer and died with its connection,
+  so watching a glider's dialog from two places meant two
+  subscriptions and two reordering buffers. Listener queues are
+  bounded and drop oldest-first, counting the loss so a gap is
+  detectable.
+- `sfmc_api.dialog_stream` — the dialog pipeline (`ordered_dialog`,
+  `LineAssembler`, `dialog_lines`) as a first-class module. It was
+  previously split between `sfmc_api.monitor_glider` and a private
+  copy of the line-reassembly logic in `sfmc_api.follow_glider`, with
+  the client's own docstrings pointing library users at an application
+  script. `ordered_dialog` remains importable from `monitor_glider`.
+- Glider IDs are cached per client, so a session that reconnects
+  hourly no longer spends an HTTP round trip per topic per reconnect.
+  `client.clear_glider_id_cache()` forces a fresh lookup.
 - Email alerts on a sustained loss of the SFMC connection for all three
   long-running commands (`sfmc-follow`, `sfmc-monitor-glider`,
   `sfmc-pull-new-downloads`). When the STOMP stream stays down past
@@ -89,6 +149,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- All three long-running commands now share one reconnect supervisor
+  (`sfmc_api.stream_reconnect.StreamSupervisor`) instead of carrying
+  three near-identical copies of the session lifecycle. Behaviour is
+  unchanged for `sfmc-monitor-glider` and `sfmc-follow`.
+- **`sfmc-pull-new-downloads` now fails fast on permanent errors.**
+  It previously caught every exception and retried forever, so a
+  misspelled glider name or bad credentials produced an endless
+  reconnect loop behind a service that looked healthy. It now matches
+  `sfmc-monitor-glider` and `sfmc-follow`: transient failures (5xx,
+  rate limits, transport errors) still retry with backoff; permanent
+  client errors exit, making the misconfiguration visible to the
+  operator and to systemd's restart accounting. Its hand-rolled
+  backoff is replaced by the shared `ReconnectBackoff`, which also
+  adds jitter.
+- The dev-extra mypy floor moves from `>=1.10` to `>=2.3` (also in
+  `.pre-commit-config.yaml`, which the comment there asks to keep in
+  sync).  The source is clean under mypy 2.3.1 in `--strict`; the old
+  floor let a contributor's environment resolve to a 1.x that checks
+  materially less than CI does.
 - `sfmc-api-test` is **read-only by default**.  Pass `--allow-writes`
   to run the state-changing groups (upload/deploy/delete files,
   deployment creation, script-assignment cycling, send-command); the

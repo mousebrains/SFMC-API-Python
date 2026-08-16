@@ -171,6 +171,39 @@ sfmc-api --compact get-glider-details osu685 | jq .data.state
 | `resume-assigned-script` | `GLIDER` | Resume assigned script |
 | `rewind-assigned-script` | `GLIDER` | Rewind assigned script |
 | `send-command` | `GLIDER COMMAND` | Send command to glider |
+| `probe-command` | `GLIDER COMMAND` | Diagnostic: dump raw dialog frames around a command |
+
+#### Capturing a command's reply
+
+`send-command` returns as soon as SFMC *accepts* the command, which is
+not the same as the glider running it.  Add `--wait` to capture what
+the glider says back:
+
+```bash
+sfmc-api send-command osu685 'sensor m_battery' --wait
+sfmc-api send-command osu685 'sensors' --wait --timeout 120 --quiet-for 10
+sfmc-api send-command osu685 'run x.mi' --wait --until '^DONE$'
+```
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--wait` | off | Capture the reply from the dialog stream |
+| `--timeout SECONDS` | 45 | Hard ceiling on the capture |
+| `--quiet-for SECONDS` | 5 | Treat this much silence as end of reply |
+| `--until REGEX` | — | Stop at the first matching reply line |
+| `--echo-anchor` | off | Capture only from the line echoing the command |
+
+Exit status with `--wait` is `0` when a complete reply arrived and `2`
+when it did not — which is the normal outcome while the glider is
+submerged, not necessarily an error.  The JSON output carries
+`reason`, `correlated`, and `dropped_lines` so a script can tell what
+happened.
+
+Run `probe-command` during a surfacing before trusting
+`--echo-anchor`: it prints raw dialog frames with arrival offsets and
+sequence numbers, showing whether your dockserver echoes submitted
+commands at all.  See
+[script_control.md](script_control.md) for the full picture.
 
 ### Deploy Files
 

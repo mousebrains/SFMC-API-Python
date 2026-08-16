@@ -22,193 +22,43 @@ Loads credentials from ``~/.config/sfmc/credentials.json`` by default.
 import argparse
 import logging
 import logging.handlers
-import queue
-import re
 import signal
 import sys
 import threading
-import time
-from collections.abc import Generator
-from dataclasses import dataclass
 from typing import Any
 
 from sfmc_api import SFMCClient
+from sfmc_api.dialog_stream import (
+    MAX_LINE_BUFFER_BYTES,
+    LineAssembler,
+    ordered_dialog,
+)
 from sfmc_api.disconnect_notify import (
     DisconnectNotifier,
     add_notification_cli_args,
     build_notifier,
 )
 from sfmc_api.exceptions import SFMCError
-from sfmc_api.stomp import MAX_SEQUENCE, StompError, StompSubscription
+from sfmc_api.stomp import StompConnection, StompSubscription
 from sfmc_api.stream_reconnect import (
+    STREAM_BOUNDARY_PREFIX,
     ReconnectBackoff,
-    is_transient_error,
+    StreamSession,
+    StreamSupervisor,
+    retry_transient,
     safe_stream_error,
 )
 
 logger = logging.getLogger(__name__)
 
-STREAM_BOUNDARY_PREFIX = "STREAM_BOUNDARY"
-
-# ── Sequence-ordered dialog output ───────────────────────────────────
-
-#: Maximum number of out-of-order messages we buffer before giving up
-#: and yielding what we have.  100 covers typical Iridium reordering
-#: while still bounding memory if a sequence number is permanently
-#: lost.
-_ORDER_BUFFER_MAX = 100
-
-#: Consecutive behind-the-cursor sequence numbers before we conclude
-#: the server restarted and reset its sequence counter (rather than a
-#: stray stale re-delivery) and re-anchor to the new numbering.
-_SEQ_RESET_STREAK = 3
-
-
-def _flush_order(pending: dict[int, str], next_expected: int | None) -> list[int]:
-    """Order buffered sequence numbers for a flush.
-
-    Sorts by modular distance from *next_expected* so a buffer that
-    straddles the ``MAX_SEQUENCE -> 0`` wraparound flushes in stream
-    order (e.g. expected ``MAX_SEQUENCE``, buffered ``{MAX_SEQUENCE,
-    0, 1}`` flushes in that order, not ``0, 1, MAX_SEQUENCE``).
-    """
-    if next_expected is None:
-        return sorted(pending)
-    span = MAX_SEQUENCE + 1
-    return sorted(pending, key=lambda seq: (seq - next_expected) % span)
-
-
-def ordered_dialog(
-    sub: StompSubscription,
-) -> Generator[str, None, None]:
-    """Yield dialog data strings in sequence order.
-
-    The SFMC server sends dialog output with ``sequenceNumber`` fields.
-    Messages may arrive out of order.  This generator buffers
-    out-of-order messages and yields them in correct sequence,
-    matching the Node.js reference implementation's reordering logic.
-
-    Recovery: if the out-of-order buffer grows past
-    ``_ORDER_BUFFER_MAX``, we assume a sequence number is permanently
-    lost (e.g. a dropped Iridium frame) and flush every buffered
-    message in stream order, then resume from whatever arrives next.
-    When the subscription ends, anything still buffered is flushed the
-    same way.  Messages are never silently discarded — they may just
-    be yielded out of natural order across a flush boundary.  A
-    WARNING is logged when this happens so operators can see it.
-
-    Yields:
-        Each dialog data string, in sequence order.
-    """
-    next_expected: int | None = None
-    pending: dict[int, str] = {}
-    span = MAX_SEQUENCE + 1
-    behind_streak = 0
-
-    try:
-        for msg in sub:
-            # Server-data variance (a bare array, a null field) must
-            # cost one skipped message, not the whole service: these
-            # workers run under a supervisor that treats unexpected
-            # exceptions as fatal code bugs.
-            if not isinstance(msg, dict):
-                logger.warning("ordered_dialog: skipping non-object message: %.200r", msg)
-                continue
-            seq = msg.get("sequenceNumber")
-            data = msg.get("data", "")
-            if not isinstance(data, str):
-                logger.warning("ordered_dialog: skipping non-string data: %.200r", msg)
-                continue
-            if not isinstance(seq, int):
-                seq = None
-
-            if seq is None:
-                # No sequence info — yield immediately
-                yield data
-                continue
-
-            if next_expected is None or seq == next_expected:
-                # In order (or first message) — yield and advance
-                behind_streak = 0
-                yield data
-                if next_expected is None:
-                    next_expected = seq
-                next_expected = (next_expected + 1) if next_expected < MAX_SEQUENCE else 0
-
-                # Drain any buffered messages that are now in order
-                while next_expected in pending:
-                    yield pending.pop(next_expected)
-                    next_expected = (next_expected + 1) if next_expected < MAX_SEQUENCE else 0
-            elif (seq - next_expected) % span > span // 2:
-                # Behind the cursor: a stale re-delivery, or the server
-                # restarted and reset its sequence counter.  Never park
-                # these (they can never drain) — yield immediately, and
-                # after a sustained streak re-anchor to the new
-                # numbering instead of stalling every fresh message in
-                # the out-of-order buffer until the overflow flush.
-                behind_streak += 1
-                if behind_streak >= _SEQ_RESET_STREAK:
-                    logger.warning(
-                        "ordered_dialog: %d consecutive sequence numbers behind "
-                        "expected=%s (last=%d); assuming server sequence reset "
-                        "and re-anchoring.",
-                        behind_streak,
-                        next_expected,
-                        seq,
-                    )
-                    for seq_key in _flush_order(pending, next_expected):
-                        yield pending[seq_key]
-                    pending.clear()
-                    next_expected = (seq + 1) if seq < MAX_SEQUENCE else 0
-                    behind_streak = 0
-                yield data
-            else:
-                # Out of order — buffer it
-                behind_streak = 0
-                pending[seq] = data
-
-                # If the gap is too large, the buffer is stale — flush and reset.
-                if len(pending) > _ORDER_BUFFER_MAX:
-                    logger.warning(
-                        "ordered_dialog: sequence gap exceeded buffer (%d msgs, "
-                        "expected=%s, buffered range [%d, %d]). Flushing in "
-                        "stream order and resuming.",
-                        len(pending),
-                        next_expected,
-                        min(pending),
-                        max(pending),
-                    )
-                    for seq_key in _flush_order(pending, next_expected):
-                        yield pending[seq_key]
-                    pending.clear()
-                    next_expected = None
-    except StompError:
-        # A queued STOMP ERROR terminates iteration by raising rather than by
-        # normal EOF. Preserve the same no-loss tail behavior before the
-        # session supervisor replaces the connection.
-        if pending:
-            logger.warning(
-                "ordered_dialog: STOMP error with %d message(s) buffered "
-                "(expected=%s); flushing in stream order.",
-                len(pending),
-                next_expected,
-            )
-            for seq_key in _flush_order(pending, next_expected):
-                yield pending[seq_key]
-            pending.clear()
-        raise
-
-    # End of stream — a gap that never filled must not swallow the
-    # buffered tail (often the last lines of a surfacing).
-    if pending:
-        logger.warning(
-            "ordered_dialog: stream ended with %d message(s) buffered "
-            "(expected=%s); flushing in stream order.",
-            len(pending),
-            next_expected,
-        )
-        for seq_key in _flush_order(pending, next_expected):
-            yield pending[seq_key]
+__all__ = [
+    "MAX_LINE_BUFFER_BYTES",
+    "STREAM_BOUNDARY_PREFIX",
+    "monitor_dialog",
+    "monitor_glider",
+    "monitor_scripts",
+    "ordered_dialog",
+]
 
 
 # ── Logging setup ────────────────────────────────────────────────────
@@ -285,15 +135,6 @@ def setup_logging(
 # ── Monitoring threads ───────────────────────────────────────────────
 
 
-_LINE_SEP = re.compile(r"\r\n|\r|\n")
-
-#: Cap on the line-reassembly buffer.  Dialog lines are short; data
-#: that accumulates this much without a line break is binary chatter,
-#: and buffering it forever is unbounded memory growth on a service
-#: that runs for weeks.
-_MAX_LINE_BUFFER_BYTES = 256 * 1024
-
-
 def _log_with_time(log: logging.Logger, msg: str, created: float) -> None:
     """Emit a log record with an explicit creation timestamp."""
     record = log.makeRecord(
@@ -316,36 +157,28 @@ def monitor_dialog(
     info_log: logging.Logger | None = None,
 ) -> None:
     """Read dialog output and log each reassembled line."""
-    buf = ""
-    line_start: float = 0.0
+    assembler = LineAssembler()
     try:
         for data in ordered_dialog(sub):
             if stop.is_set():
                 break
-            if not buf:
-                line_start = time.time()
-            buf += data
-            parts = _LINE_SEP.split(buf)
-            # Last element is the unterminated fragment — keep buffering it.
-            buf = parts[-1]
-            for line in parts[:-1]:
-                if line:
-                    _log_with_time(log, line, line_start)
-                line_start = time.time()
-            if len(buf) > _MAX_LINE_BUFFER_BYTES:
-                logger.warning(
-                    "discarding %d bytes of line-break-free dialog data (buffer cap)",
-                    len(buf),
-                )
-                buf = ""
+            for line in assembler.feed(data):
+                if line.text:
+                    _log_with_time(log, line.text, line.first_seen)
     finally:
-        if buf.strip():
+        # A shutdown is the one time the unterminated tail is worth
+        # keeping: there is no next session to re-send it.  At a stream
+        # boundary it is dropped, because a half line logged as a whole
+        # one would corrupt the record.
+        pending_bytes = len(assembler.pending.encode("utf-8"))
+        tail = assembler.take_pending()
+        if tail is not None:
             if stop.is_set():
-                _log_with_time(log, buf, line_start)
+                _log_with_time(log, tail.text, tail.first_seen)
             elif info_log is not None:
                 info_log.warning(
                     "stream boundary discarded %d-byte unterminated fragment",
-                    len(buf.encode("utf-8")),
+                    pending_bytes,
                 )
 
 
@@ -375,26 +208,6 @@ def monitor_scripts(
 
 
 # ── Session supervision ─────────────────────────────────────────────
-
-
-@dataclass(frozen=True)
-class _WorkerResult:
-    name: str
-    error: Exception | None
-
-
-def _run_monitor_worker(
-    name: str,
-    target: Any,
-    args: tuple[Any, ...],
-    results: queue.Queue[_WorkerResult],
-) -> None:
-    try:
-        target(*args)
-    except Exception as exc:
-        results.put(_WorkerResult(name, exc))
-    else:
-        results.put(_WorkerResult(name, None))
 
 
 def _initial_status(
@@ -465,185 +278,66 @@ def monitor_glider(
     notifier: DisconnectNotifier | None = None,
 ) -> None:
     """Monitor live streams until stopped, reconnecting after session loss."""
-    if stop is None:
-        stop = threading.Event()
+    stop_event = stop if stop is not None else threading.Event()
 
-    # The startup status check retries like the stream loop below: a
+    # The startup status check retries like the stream loop does: a
     # service started at boot, before DNS/WAN is up, must not exit on
     # a transient failure that the steady-state loop would have ridden
     # out.  A separate backoff keeps startup failures from inflating
     # the stream loop's delays.
-    startup_backoff = ReconnectBackoff(
-        initial_delay=reconnect_initial_delay,
-        max_delay=reconnect_max_delay,
-        stable_after=reconnect_stable_after,
-        jitter=reconnect_jitter,
+    started = retry_transient(
+        lambda: _initial_status(client, glider_name, info_log),
+        stop=stop_event,
+        backoff=ReconnectBackoff(
+            initial_delay=reconnect_initial_delay,
+            max_delay=reconnect_max_delay,
+            stable_after=reconnect_stable_after,
+            jitter=reconnect_jitter,
+        ),
+        what="startup status check",
+        log=info_log,
+        notifier=notifier,
+        reconnect=reconnect,
     )
-    while not stop.is_set():
-        try:
-            _initial_status(client, glider_name, info_log)
-            break
-        except SFMCError as exc:
-            # Permanent client errors (404 misspelled glider, bad
-            # credentials) fail fast; only transient failures retry.
-            if not reconnect or not is_transient_error(exc):
-                raise
-            delay = startup_backoff.next_delay(subscribed_uptime=None)
-            reason = safe_stream_error(exc)
-            info_log.warning(
-                "startup status check failed (%s); retrying in %.1fs",
-                reason,
-                delay.actual,
-            )
-            if notifier is not None:
-                notifier.record_disconnect(reason=reason)
-            if stop.wait(delay.actual):
-                return
+    if not started:
+        info_log.info("Disconnected.")
+        return
 
-    backoff = ReconnectBackoff(
-        initial_delay=reconnect_initial_delay,
-        max_delay=reconnect_max_delay,
-        stable_after=reconnect_stable_after,
-        jitter=reconnect_jitter,
-    )
-    attempt_number = 0
-    session_number = 0
-    offline_since: float | None = None
-
-    while not stop.is_set():
-        attempt_number += 1
-        subscribed_at: float | None = None
-        failure: Exception | None = None
-        reason = "closed"
-        try:
-            if attempt_number > 1:
-                client.refresh_auth()
-            with client.open_stream() as stomp:
-                dialog_sub = client.subscribe_glider_output(glider_name, stomp)
-                script_sub = client.subscribe_script_events(glider_name, stomp)
-                results: queue.Queue[_WorkerResult] = queue.Queue()
-                dialog_thread = threading.Thread(
-                    target=_run_monitor_worker,
-                    args=(
-                        "dialog",
-                        monitor_dialog,
-                        (dialog_sub, dialog_log, stop, info_log),
-                        results,
-                    ),
-                    daemon=True,
-                    name="dialog-monitor",
-                )
-                script_thread = threading.Thread(
-                    target=_run_monitor_worker,
-                    args=(
-                        "script",
-                        monitor_scripts,
-                        (script_sub, script_log, stop),
-                        results,
-                    ),
-                    daemon=True,
-                    name="script-monitor",
-                )
-                dialog_started = False
-                script_started = False
-                first_result: _WorkerResult | None = None
-                try:
-                    dialog_thread.start()
-                    dialog_started = True
-                    script_thread.start()
-                    script_started = True
-                    subscribed_at = time.monotonic()
-                    session_number += 1
-                    info_log.info("stream session %d subscribed", session_number)
-                    if notifier is not None:
-                        notifier.record_connect()
-                    if offline_since is not None:
-                        info_log.info(
-                            "stream session %d reconnected after %.1fs offline",
-                            session_number,
-                            subscribed_at - offline_since,
-                        )
-                        try:
-                            _log_active_script(client, glider_name, info_log, resync=True)
-                        except SFMCError as exc:
-                            info_log.warning("script resync failed: %s", safe_stream_error(exc))
-                        offline_since = None
-
-                    while not stop.is_set():
-                        try:
-                            first_result = results.get(timeout=0.5)
-                            break
-                        except queue.Empty:
-                            continue
-                finally:
-                    dialog_sub.close()
-                    script_sub.close()
-                    if dialog_started:
-                        dialog_thread.join(timeout=worker_join_timeout)
-                    if script_started:
-                        script_thread.join(timeout=worker_join_timeout)
-                    if dialog_thread.is_alive() or script_thread.is_alive():
-                        raise RuntimeError("monitor worker did not stop after subscription close")
-
-                worker_results = [] if first_result is None else [first_result]
-                while True:
-                    try:
-                        worker_results.append(results.get_nowait())
-                    except queue.Empty:
-                        break
-                for result in worker_results:
-                    if result.error is None:
-                        continue
-                    if isinstance(result.error, StompError):
-                        failure = result.error
-                        reason = "stomp-error"
-                    else:
-                        raise RuntimeError(
-                            f"{result.name} monitor failed: {safe_stream_error(result.error)}"
-                        ) from result.error
-        except SFMCError as exc:
-            failure = exc
-            reason = "session-error"
-
-        if stop.is_set():
-            break
-
-        subscribed_uptime = (
-            None if subscribed_at is None else max(0.0, time.monotonic() - subscribed_at)
+    def setup(stomp: StompConnection) -> StreamSession:
+        dialog_sub = client.subscribe_glider_output(glider_name, stomp)
+        script_sub = client.subscribe_script_events(glider_name, stomp)
+        return StreamSession(
+            subscriptions=(dialog_sub, script_sub),
+            workers=(
+                ("dialog", lambda: monitor_dialog(dialog_sub, dialog_log, stop_event, info_log)),
+                ("script", lambda: monitor_scripts(script_sub, script_log, stop_event)),
+            ),
         )
-        if subscribed_at is not None:
-            info_log.warning(
-                "%s session=%d reason=%s",
-                STREAM_BOUNDARY_PREFIX,
-                session_number,
-                reason,
-            )
-        if offline_since is None:
-            offline_since = time.monotonic()
-        detail = "normal subscription close" if failure is None else safe_stream_error(failure)
-        if subscribed_at is None:
-            info_log.warning(
-                "stream setup attempt %d ended: %s: %s",
-                attempt_number,
-                reason,
-                detail,
-            )
-        else:
-            info_log.warning(
-                "stream session %d ended: %s: %s",
-                session_number,
-                reason,
-                detail,
-            )
-        if notifier is not None:
-            notifier.record_disconnect(reason=detail)
-        if not reconnect:
-            raise StompError(f"stream session ended: {reason}: {detail}") from failure
 
-        delay = backoff.next_delay(subscribed_uptime=subscribed_uptime)
-        info_log.info("reconnect attempt %d in %.1fs", delay.attempt, delay.actual)
-        if stop.wait(delay.actual):
-            break
+    def on_subscribed(*, reconnected: bool = False) -> None:
+        if not reconnected:
+            return
+        # State may have moved while we were offline; the log must not
+        # imply the script is still whatever it was before the gap.
+        try:
+            _log_active_script(client, glider_name, info_log, resync=True)
+        except SFMCError as exc:
+            info_log.warning("script resync failed: %s", safe_stream_error(exc))
+
+    StreamSupervisor(
+        client,
+        setup=setup,
+        stop=stop_event,
+        log=info_log,
+        notifier=notifier,
+        on_subscribed=on_subscribed,
+        reconnect=reconnect,
+        reconnect_initial_delay=reconnect_initial_delay,
+        reconnect_max_delay=reconnect_max_delay,
+        reconnect_stable_after=reconnect_stable_after,
+        reconnect_jitter=reconnect_jitter,
+        worker_join_timeout=worker_join_timeout,
+    ).run()
 
     info_log.info("Disconnected.")
 
