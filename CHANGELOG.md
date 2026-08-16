@@ -86,6 +86,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     Keepalive failures are now caught and the run continues.  Validated
     against osusim: `Ctrl-M` at this cadence held the link `connected`
     for 6m47s across six keepalives.
+  - `run_live()` survives reconnects.  It now starts its session with
+    `timeout=None`, handing every retry — including the first
+    connection — to the session's own supervisor, instead of raising
+    `TimeoutError` on a transient auth hiccup.  A five minute test
+    survives that; a run lasting hours across many dives does not, and
+    the stream legitimately drops every time the glider submerges.
+    Connects, reconnects, and drops are reported, so a run that never
+    comes up is visible rather than silent.
+  - The keepalive skips a disconnected glider.  A submerged glider is
+    *supposed* to be silent and its link is legitimately down; sending
+    into that keeps nothing alive, and a command accepted for a
+    disconnected glider may be queued and delivered on the next
+    surfacing, injecting a stray return into the very dialog a script
+    is matching against.
   - `--replay` now strips `sfmc-monitor-glider`'s log prefix.  Its
     format is `%(asctime)s %(name)s  %(message)s` with a dotted name
     (`sfmc.osusim.DIALOG`), which the original stripper — written for a

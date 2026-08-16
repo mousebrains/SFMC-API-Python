@@ -846,7 +846,21 @@ def run_live(
                 print(f"    WOULD SEND: {action.command}", flush=True)
 
     deadline = None if max_runtime is None else time.monotonic() + max_runtime
-    with client.session(glider, topics=("dialog",)) as session:
+    # start=False plus start(timeout=None) hands every retry, including
+    # the first connection, to the session's own supervisor.  Starting
+    # with a 30s deadline instead raises TimeoutError on a transient
+    # auth hiccup and kills the run -- survivable for a five minute
+    # test, fatal for a run meant to last hours across many dives, where
+    # the stream legitimately drops every time the glider submerges.
+    session = client.session(glider, topics=("dialog",), start=False)
+    session.on_connect(
+        lambda reconnected: print(
+            f"    stream {'reconnected' if reconnected else 'connected'}", flush=True
+        )
+    )
+    session.on_disconnect(lambda: print("    stream dropped; supervisor retrying", flush=True))
+    session.start(timeout=None)
+    with session:
         listener = session.raw_dialog_listener()
         dispatch(machine.start())
         while not machine.finished:
@@ -865,6 +879,18 @@ def run_live(
                 dispatch(machine.feed(chunk))
             dispatch(machine.check_timeout())
             if keepalive is not None and send and time.monotonic() - last_activity >= keepalive:
+                # A submerged glider is *supposed* to be silent, and its
+                # link is legitimately down.  Sending into that keeps
+                # nothing alive; worse, a command accepted for a
+                # disconnected glider may be queued and delivered on the
+                # next surfacing, injecting a stray return into the very
+                # dialog the script is matching against.  So the
+                # keepalive is for a connected-but-quiet glider only,
+                # which is the case it was written for: an idle
+                # GliderDos prompt.
+                if not session.glider_is_connected():
+                    last_activity = time.monotonic()
+                    continue
                 # Never fatal.  A keepalive is a convenience; losing the
                 # connection it was meant to hold open is recoverable,
                 # but killing a run that may be mid-way through steering

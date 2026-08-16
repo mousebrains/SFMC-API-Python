@@ -579,6 +579,8 @@ class TestRunLive:
             listener._publish(chunk)
 
         class FakeSession:
+            """Mirrors the GliderSession surface run_live() actually uses."""
+
             def __enter__(self) -> FakeSession:
                 return self
 
@@ -588,8 +590,22 @@ class TestRunLive:
             def raw_dialog_listener(self) -> Listener[str]:
                 return listener
 
+            def on_connect(self, callback: object) -> None:
+                return None
+
+            def on_disconnect(self, callback: object) -> None:
+                return None
+
+            def start(self, timeout: float | None = 30.0) -> FakeSession:
+                return self
+
+            def glider_is_connected(self) -> bool:
+                return True
+
         class FakeClient:
-            def session(self, glider: str, topics: tuple[str, ...]) -> FakeSession:
+            def session(
+                self, glider: str, topics: tuple[str, ...], start: bool = True
+            ) -> FakeSession:
                 return FakeSession()
 
             def send_command(self, glider: str, command: str) -> None:
