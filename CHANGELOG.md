@@ -28,6 +28,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Control engine, phase 2: `BaseControlEngine` and its runner,
+  read-only.**  An engine subclasses `BaseControlEngine`, implements
+  `on_event`, and acts through `request` — which names a client method
+  by string, runs it off-thread, and delivers the outcome back as a
+  `result` or `error` event carrying the request id and the caller's
+  tag.
+  - **One thread for the whole fleet.**  `on_start`, every `on_event`,
+    and `on_stop` run on one thread and never concurrently, so an
+    engine holds cross-glider state in ordinary attributes with no
+    locking.  That is the payoff the whole design exists for, and the
+    acceptance test asserts it directly: two gliders fed from two
+    producer threads, one `on_event` thread, no lock in the engine.
+  - **Read operations only.**  Asking for a state-changing operation
+    raises `WriteRefused` naming the phase that will allow it, rather
+    than quietly doing it.  The read list is explicit rather than
+    inferred, because nothing on the client marks which methods change
+    state and guessing from the verb would file `download_glider_file`
+    — a GET — with `delete_*`.
+  - **`glider=` is a keyword, separate from the positional args**, on
+    purpose: it names the serialisation key, not an argument.
+    Inferring it from `args[0]` is right for most endpoints and quietly
+    wrong for `get_zmodem_transfers(connection_id)`, and "quietly wrong
+    about which glider we locked" is not worth saving a keyword.
+  - **Replay needs no glider, server, or network** — literally: a
+    runner can be constructed with no client at all, and requests then
+    fail with a message saying why rather than at a socket.
+  - **Failure policy.**  One bad `on_event` is logged with a traceback,
+    reported back as an `error` event, and the engine continues; five
+    consecutive failures stop it and notify.  Continuing after one bad
+    event is right for a long mission, continuing forever with a wedged
+    engine is not.
+  - **A slow `on_event` names itself.**  A watchdog thread reports an
+    `on_event` still running after 30 s, naming the glider, source and
+    sequence — because it stalls the entire fleet behind it, and that
+    is the single most common way to break this system.
+  - `examples/control_engine_formation.py` shows both acceptance cases:
+    a monitor-equivalent engine, and a formation engine holding
+    per-glider state with no locks.
+
 - **Control engine, phase 1: the fleet event merge.**  `EventMerge`
   takes N `(glider, source)` streams and presents one ordered queue;
   `FleetStream` wires N `GliderSession` objects into it.  This is the

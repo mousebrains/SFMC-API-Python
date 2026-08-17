@@ -19,6 +19,7 @@ from .config import SFMCConfig
 from .coordinates import dddmm_to_decimal, decimal_to_dddmm, km_to_degrees
 from .dialog_parser import DialogParser, SensorReading, SurfacingEvent
 from .dialog_stream import DialogLine, LineAssembler, dialog_lines, ordered_dialog
+from .engine import BaseControlEngine, EngineRunner, WriteRefused
 from .events import (
     DroppedNotice,
     Event,
@@ -58,6 +59,7 @@ __all__ = [
     "APIError",
     "Action",
     "AuthenticationError",
+    "BaseControlEngine",
     "BaseFollower",
     "CommandChannel",
     "CommandReply",
@@ -65,6 +67,7 @@ __all__ = [
     "DialogLine",
     "DialogParser",
     "DroppedNotice",
+    "EngineRunner",
     "Event",
     "EventMerge",
     "FleetStream",
@@ -89,6 +92,7 @@ __all__ = [
     "StreamNotice",
     "SurfacingEvent",
     "Transition",
+    "WriteRefused",
     "XmlStateMachine",
     "dddmm_to_decimal",
     "decimal_to_dddmm",
