@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from sfmc_api.engine import (
+    OPERATIONS,
     READ_OPERATIONS,
     WRITE_OPERATIONS,
     BaseControlEngine,
@@ -734,3 +735,68 @@ class TestAudit:
         from sfmc_api.engine import _summarise
 
         assert len(_summarise(("x" * 500,))) <= 81
+
+
+class TestClassificationLivesOnTheClient:
+    """The marker is at the definition, so it cannot drift from it."""
+
+    def test_lists_are_derived_not_duplicated(self) -> None:
+        from sfmc_api import SFMCClient
+
+        def marked(flag: bool) -> frozenset[str]:
+            return frozenset(
+                n
+                for n in dir(SFMCClient)
+                if getattr(getattr(SFMCClient, n, None), "sfmc_mutates", None) is flag
+            )
+
+        assert marked(False) == READ_OPERATIONS
+        assert marked(True) == WRITE_OPERATIONS
+        assert READ_OPERATIONS and WRITE_OPERATIONS, "neither list may be empty"
+
+    def test_an_unmarked_method_is_not_requestable(self) -> None:
+        """Fail-safe: unclassified means uncallable, not "allowed"."""
+        from sfmc_api import SFMCClient
+
+        assert hasattr(SFMCClient, "session")
+        assert "session" not in READ_OPERATIONS
+        assert "session" not in WRITE_OPERATIONS
+        assert "session" not in OPERATIONS
+
+    def test_a_new_unmarked_mutating_method_cannot_be_called(self) -> None:
+        class Extended(_FakeClient):
+            def launch_torpedoes(self, glider: str) -> None:  # unmarked
+                raise AssertionError("must be unreachable")
+
+        engine = BaseControlEngine()
+        runner = _runner(engine, Extended())
+        try:
+            with pytest.raises(ValueError, match="not a requestable operation"):
+                engine.request("launch_torpedoes", "osu684", glider="osu684")
+        finally:
+            runner.close()
+
+    def test_every_mutating_verb_is_marked_on_the_client(self) -> None:
+        """The guard that notices a new endpoint added without a marker."""
+        import inspect
+
+        from sfmc_api import SFMCClient
+
+        dangerous = ("send_", "update_", "delete_", "deploy_", "upload_", "set_", "clear_assigned")
+        for name in dir(SFMCClient):
+            attribute = getattr(SFMCClient, name)
+            if not name.startswith(dangerous) or not inspect.isfunction(attribute):
+                continue
+            assert attribute.sfmc_mutates is True, f"{name} is unmarked or misclassified"
+
+    def test_every_getter_is_marked_as_a_read(self) -> None:
+        """Properties are excluded: download_dir is config, not an operation."""
+        import inspect
+
+        from sfmc_api import SFMCClient
+
+        for name in dir(SFMCClient):
+            attribute = getattr(SFMCClient, name)
+            if not name.startswith(("get_", "download_")) or not inspect.isfunction(attribute):
+                continue
+            assert attribute.sfmc_mutates is False, f"{name} is unmarked or misclassified"

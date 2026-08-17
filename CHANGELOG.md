@@ -54,10 +54,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     whether the run was allowed to touch a vehicle at all.  When a
     glider does something surprising, this is the artefact that
     explains why.
-  - The two operation lists are asserted disjoint, checked against the
-    real client, and a test fails if any method whose name begins
-    `send_`/`update_`/`delete_`/`deploy_`/`upload_`/`set_` sits outside
-    the write gate.
+  - **Classification lives on the client**, not in a list beside it.
+    `@reads` and `@mutates` mark each endpoint at its definition, so
+    adding an endpoint and classifying it are the same act; the engine
+    derives both sets at import.  An **unmarked** method is not
+    requestable at all — the fail-safe direction, since a new mutating
+    endpoint nobody classified cannot be called rather than defaulting
+    to allowed.  Guard tests assert every `get_*`/`download_*` is
+    marked a read and every `send_*`/`update_*`/`delete_*`/`deploy_*`/
+    `upload_*`/`set_*` a write, so an endpoint added without a marker
+    fails the suite.
 
 - **Control engine, phase 2: `BaseControlEngine` and its runner,
   read-only.**  An engine subclasses `BaseControlEngine`, implements

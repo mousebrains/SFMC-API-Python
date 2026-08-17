@@ -68,6 +68,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from .client import SFMCClient as _SFMCClient
 from .events import Event, EventMerge, FleetStream
 from .ops import OperationExecutor
 
@@ -88,80 +89,33 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-#: Client methods an engine may call in phase 2.
-#:
-#: Named explicitly rather than inferred.  There is no marker on the
-#: client saying which methods change state, and guessing from the verb
-#: would classify ``download_glider_file`` (a GET) with ``delete_*``.
-#: An explicit list is reviewable, and every name is checked against
-#: :class:`~sfmc_api.client.SFMCClient` at engine start — so a typo
-#: fails at startup rather than at 3 a.m. on a surfacing.
-#:
-#: Downloads are included: they write to local disk but change nothing
-#: on the server or the vehicle, which is the line that matters here.
-READ_OPERATIONS = frozenset(
-    {
-        "get_glider_details",
-        "get_active_deployment_details",
-        "get_newest_mission_status",
-        "get_available_scripts",
-        "get_surface_sensor_samples",
-        "get_folder_file_listing",
-        "get_zmodem_transfers",
-        "get_mission_plan",
-        "get_waypoint_plan",
-        "get_yo_plan",
-        "get_surface_plan",
-        "get_sampling_plan",
-        "get_data_transmission_plan",
-        "get_mission_sensor_plan",
-        "get_abort_plan",
-        "download_glider_file",
-        "download_glider_files",
-    }
-)
 
-#: Client methods that change state on the server or the vehicle.
+#: Operations classified at their definition, on the client itself.
 #:
-#: Listed rather than derived, for the same reason as
-#: :data:`READ_OPERATIONS`: the client carries no marker, and the two
-#: lists together are the thing a reviewer can actually check.  Anything
-#: in neither list is not a requestable operation at all — ``session``,
-#: ``subscribe_*`` and friends are plumbing, and asking for one is a
-#: programming error rather than an operational condition.
-WRITE_OPERATIONS = frozenset(
-    {
-        "clear_assigned_script",
-        "delete_at_utc_time_surface_plan_rules",
-        "delete_every_secs_surface_plan_rules",
-        "delete_glider_file",
-        "delete_hit_waypoint_surface_plan_rule",
-        "delete_sampling_plan_rules",
-        "deploy_goto_file",
-        "deploy_sample_files",
-        "deploy_sbd_list_file",
-        "deploy_surface_files",
-        "deploy_tbd_list_file",
-        "deploy_yo_file",
-        "obtain_or_create_active_deployment",
-        "pause_assigned_script",
-        "register_glider",
-        "resume_assigned_script",
-        "rewind_assigned_script",
-        "send_command",
-        "set_assigned_script",
-        "update_active_deployment_start",
-        "update_flight_data_transmission_plan",
-        "update_sampling_plan",
-        "update_science_data_transmission_plan",
-        "update_surface_plan",
-        "update_waypoint_plan",
-        "update_yo_plan",
-        "upload_cache_files",
-        "upload_glider_file_contents",
-        "upload_glider_files",
-    }
-)
+#: :func:`~sfmc_api.client.reads` and :func:`~sfmc_api.client.mutates`
+#: mark each endpoint where it is written, so adding an endpoint and
+#: classifying it are the same act.  A list kept here instead would
+#: drift the first time somebody added a method in a hurry — and the
+#: drift would be silent, and on the dangerous side.
+#:
+#: An **unmarked** method is not requestable at all.  That is the
+#: fail-safe direction: a new mutating endpoint nobody classified
+#: cannot be called by an engine, rather than defaulting to allowed.
+def _classify(client_cls: type) -> tuple[frozenset[str], frozenset[str]]:
+    reads: set[str] = set()
+    writes: set[str] = set()
+    for name in dir(client_cls):
+        if name.startswith("_"):
+            continue
+        marker = getattr(getattr(client_cls, name, None), "sfmc_mutates", None)
+        if marker is True:
+            writes.add(name)
+        elif marker is False:
+            reads.add(name)
+    return frozenset(reads), frozenset(writes)
+
+
+READ_OPERATIONS, WRITE_OPERATIONS = _classify(_SFMCClient)
 
 #: Everything an engine may name in :meth:`BaseControlEngine.request`.
 OPERATIONS = READ_OPERATIONS | WRITE_OPERATIONS
