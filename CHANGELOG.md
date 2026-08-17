@@ -28,6 +28,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Control engine, phase 4: the `sfmc-control` CLI.**  Runs an engine
+  from a Python file against one or more gliders.  Flags mirror
+  `sfmc-follow` where they mean the same thing, with one deliberate
+  exception: **`--glider` is repeatable**, because an engine exists to
+  decide across a formation.
+  - Three postures, two of which look alike from outside and only one
+    of which can move a glider: no flags is read-only, `--allow-writes
+    --dry-run` runs the full logic with writes simulated, and
+    `--allow-writes` sends.  The posture is written to the audit log at
+    startup, so "was this run allowed to touch the glider?" is
+    answerable from the log alone.
+  - `--replay LOG` runs offline with **no client constructed at all**.
+  - `--tick SECONDS` emits a periodic wake-up per glider.  Added
+    because writing the worked example proved an engine reacting to the
+    *absence* of dialog cannot do it from dialog events: silence
+    delivers nothing to react to.
+  - `--audit-log PATH` routes the request/outcome trail to its own
+    file; `--max-outstanding`, `--max-runtime`, `--config`, `--class`.
+  - Two worked examples, both loadable by the CLI and asserted so:
+    `control_engine_command.py` waits for a quiet link before sending
+    (a command during a Zmodem transfer is accepted by SFMC and simply
+    goes unanswered), and `control_engine_formation.py` holds
+    per-glider state with no locks.
+
 - **Control engine, phase 3: writes, behind five safety rails.**
   `allow_writes` (off by default), `dry_run`, a fleet-wide cap on
   outstanding requests, and an audit log.
