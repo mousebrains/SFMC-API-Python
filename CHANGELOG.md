@@ -28,6 +28,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Control engine, phase 1: the fleet event merge.**  `EventMerge`
+  takes N `(glider, source)` streams and presents one ordered queue;
+  `FleetStream` wires N `GliderSession` objects into it.  This is the
+  substrate from
+  [docs/design/control_engine.md](docs/design/control_engine.md), with
+  no engine on top of it yet.
+  - **Multi-glider from the first commit**, deliberately.  The merge is
+    where that is either easy or impossible, and retrofitting it later
+    would touch everything downstream.  Every `Event` carries the
+    glider it concerns as a required field: a single-glider engine can
+    ignore it, but making it optional would mean every formation engine
+    starts with a `None` check that can only ever be dead code.
+  - **One queue, one thread, all gliders**, so an engine can hold fleet
+    state in ordinary attributes with no locking.
+  - **Bounds are per (glider, source), not global.**  One glider
+    surfacing and dumping a mission's worth of dialog must not evict
+    the connection events of the gliders still in the water.  The
+    default bound of 2048 is set against a measured surfacing: 437
+    dialog lines inside ten milliseconds.
+  - **Drops are counted and reported, never silent.**  Drop-oldest, so
+    the newest data survives; a `dropped` event names the glider and
+    source and carries the count.  One notice per burst rather than one
+    per lost event — and because a pair that never drains would
+    otherwise never report, a further queue's worth of loss forces a
+    notice mid-burst.
+  - `received_at` is named for the clock it uses: the **host's**, not
+    the glider's.  The two differ by 48 minutes on osusim, and glider
+    time appears inside dialog text, so the confusion is otherwise
+    guaranteed.
+  - Gliders join and leave at runtime (`add_glider` / `remove_glider`),
+    because a formation changes.
+
 - **XML script engine.**  `sfmc-xml-engine` parses and executes the
   XML state machine SFMC runs beside the dockserver, so the same
   behaviour can run from Python — to understand a script

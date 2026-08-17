@@ -19,6 +19,13 @@ from .config import SFMCConfig
 from .coordinates import dddmm_to_decimal, decimal_to_dddmm, km_to_degrees
 from .dialog_parser import DialogParser, SensorReading, SurfacingEvent
 from .dialog_stream import DialogLine, LineAssembler, dialog_lines, ordered_dialog
+from .events import (
+    DroppedNotice,
+    Event,
+    EventMerge,
+    FleetStream,
+    StreamNotice,
+)
 from .exceptions import (
     APIError,
     AuthenticationError,
@@ -57,6 +64,10 @@ __all__ = [
     "ConfigError",
     "DialogLine",
     "DialogParser",
+    "DroppedNotice",
+    "Event",
+    "EventMerge",
+    "FleetStream",
     "GliderSession",
     "LineAssembler",
     "Listener",
@@ -75,6 +86,7 @@ __all__ = [
     "StompConnection",
     "StompError",
     "StompSubscription",
+    "StreamNotice",
     "SurfacingEvent",
     "Transition",
     "XmlStateMachine",
