@@ -58,6 +58,7 @@ sfmc-monitor-glider = "sfmc_api.monitor_glider:main"
 sfmc-follow = "sfmc_api.follow_glider:main"
 sfmc-pull-new-downloads = "sfmc_api.pull_new_downloads:main"
 sfmc-xml-engine = "sfmc_api.xml_engine:main"
+sfmc-control = "sfmc_api.control:main"
 
 [project.urls]
 Homepage = "https://github.com/mousebrains/SFMC-API-Python"

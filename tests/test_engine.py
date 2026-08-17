@@ -800,3 +800,42 @@ class TestClassificationLivesOnTheClient:
             if not name.startswith(("get_", "download_")) or not inspect.isfunction(attribute):
                 continue
             assert attribute.sfmc_mutates is False, f"{name} is unmarked or misclassified"
+
+
+class TestTicks:
+    """Silence delivers no events; a tick is what makes it noticeable."""
+
+    def test_ticks_arrive_per_glider(self) -> None:
+        seen: list[tuple[str, str]] = []
+
+        class Counter(BaseControlEngine):
+            def on_event(self, event: Event) -> None:
+                seen.append((event.glider, event.source))
+
+        engine = Counter()
+        client = _FakeClient()
+        fleet = FleetStream(client, sources=("dialog",))
+        fleet.add_glider("osu684", _FakeSession())
+        fleet.add_glider("osu685", _FakeSession())
+        runner = EngineRunner(engine, client, fleet=fleet, watchdog=None, tick=0.05)
+        threading.Timer(0.4, runner.stop).start()
+        runner.run()
+
+        ticks = {g for g, s in seen if s == "tick"}
+        assert ticks == {"osu684", "osu685"}, "one tick per glider"
+
+    def test_no_ticks_unless_asked(self) -> None:
+        seen: list[str] = []
+
+        class Counter(BaseControlEngine):
+            def on_event(self, event: Event) -> None:
+                seen.append(event.source)
+
+        engine = Counter()
+        client = _FakeClient()
+        fleet = FleetStream(client, sources=("dialog",))
+        fleet.add_glider("osu684", _FakeSession())
+        runner = EngineRunner(engine, client, fleet=fleet, watchdog=None)
+        threading.Timer(0.3, runner.stop).start()
+        runner.run()
+        assert "tick" not in seen

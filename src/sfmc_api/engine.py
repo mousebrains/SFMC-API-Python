@@ -327,6 +327,13 @@ class EngineRunner:
             Exceeding it produces an ``error`` event rather than
             queueing silently -- a loop that fires a request per dialog
             line must fail loudly, not melt the server.
+        tick: Seconds between ``tick`` events, or ``None`` for none.
+            An engine that must notice the *absence* of dialog -- "she
+            has been quiet for twenty seconds, so the transfer is over
+            and she is listening" -- cannot do it from dialog events
+            alone, because silence delivers nothing to react to.  One
+            tick is emitted per glider, so per-glider timing needs no
+            bookkeeping in the engine.
     """
 
     def __init__(
@@ -341,6 +348,7 @@ class EngineRunner:
         allow_writes: bool = False,
         dry_run: bool = False,
         max_outstanding: int = DEFAULT_MAX_OUTSTANDING,
+        tick: float | None = None,
         fleet: FleetStream | None = None,
         executor: OperationExecutor | None = None,
     ) -> None:
@@ -364,6 +372,8 @@ class EngineRunner:
             executor if executor is not None else OperationExecutor(max_workers=max_workers)
         )
         self._owns_executor = executor is None
+        self._tick = tick
+        self._tick_thread: threading.Thread | None = None
         self.allow_writes = allow_writes
         self.dry_run = dry_run
         self._max_outstanding = max_outstanding
@@ -578,6 +588,7 @@ class EngineRunner:
     def run(self) -> None:
         """Drive the engine until :meth:`stop`.  Blocks; owns this thread."""
         self._start_watchdog()
+        self._start_ticks()
         try:
             self._engine.on_start()
             for event in self._merge:
@@ -650,6 +661,25 @@ class EngineRunner:
                     self._deliver(queued)
         finally:
             self._engine.on_stop()
+
+    # ── Ticks ────────────────────────────────────────────────────────
+
+    def _start_ticks(self) -> None:
+        """Publish a periodic wake-up per glider.
+
+        Silence delivers no events, so an engine waiting for a link to
+        go quiet has nothing to react to.  A tick is that something.
+        """
+        if not self._tick:
+            return
+
+        def beat() -> None:
+            while not self._stop.wait(self._tick or 1.0):
+                for glider in self.gliders:
+                    self._merge.publish(glider, "tick", None)
+
+        self._tick_thread = threading.Thread(target=beat, daemon=True, name="sfmc-engine-tick")
+        self._tick_thread.start()
 
     # ── Watchdog ─────────────────────────────────────────────────────
 
