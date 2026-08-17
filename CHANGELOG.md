@@ -28,6 +28,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Control engine, phase 3: writes, behind five safety rails.**
+  `allow_writes` (off by default), `dry_run`, a fleet-wide cap on
+  outstanding requests, and an audit log.
+  - **Writes are off by default**, matching `sfmc-api-test`'s posture
+    so the project has one rule rather than two.  A blocked write
+    arrives as an `error` event naming the flag, not an exception — so
+    an engine handles it like any other failed operation instead of
+    wrapping every request in a `try`.  Naming something that is not an
+    operation at all still raises, because that is a bug rather than an
+    operational condition.
+  - **`dry_run` runs the engine's whole logic and withholds only the
+    consequences.**  Reads still happen, so the engine sees real data
+    and makes real decisions; each write is answered with a synthetic
+    `DryRun` result — a distinct type, so an engine mistaking it for
+    server data can notice.
+  - **The rate cap is fleet-wide, not per glider**, because SFMC
+    rate-limits the account; a per-glider cap would multiply by fleet
+    size and produce the 429 storm it exists to prevent.  Exceeding it
+    produces an `error` event rather than queueing silently — a loop
+    firing a request per dialog line must fail loudly, and a surfacing
+    delivers hundreds of lines in milliseconds.
+  - **Audit log** (`sfmc_api.engine.audit`): one line per request and
+    per outcome, carrying the glider, and one line at startup stating
+    whether the run was allowed to touch a vehicle at all.  When a
+    glider does something surprising, this is the artefact that
+    explains why.
+  - **Classification lives on the client**, not in a list beside it.
+    `@reads` and `@mutates` mark each endpoint at its definition, so
+    adding an endpoint and classifying it are the same act; the engine
+    derives both sets at import.  An **unmarked** method is not
+    requestable at all — the fail-safe direction, since a new mutating
+    endpoint nobody classified cannot be called rather than defaulting
+    to allowed.  Guard tests assert every `get_*`/`download_*` is
+    marked a read and every `send_*`/`update_*`/`delete_*`/`deploy_*`/
+    `upload_*`/`set_*` a write, so an endpoint added without a marker
+    fails the suite.
+
 - **Control engine, phase 2: `BaseControlEngine` and its runner,
   read-only.**  An engine subclasses `BaseControlEngine`, implements
   `on_event`, and acts through `request` — which names a client method

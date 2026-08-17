@@ -22,6 +22,7 @@ import io
 import logging
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -43,6 +44,34 @@ if TYPE_CHECKING:  # pragma: no cover - imported lazily to avoid a cycle
 __all__ = ["SFMCClient"]
 
 logger = logging.getLogger(__name__)
+
+
+def reads[M: Callable[..., Any]](fn: M) -> M:
+    """Mark a method as observing state without changing it.
+
+    Read at runtime by the control engine to decide what a read-only
+    run may call.  The marker lives here, at the definition, because
+    that is the only place where adding an endpoint and classifying it
+    are the same act — a list kept elsewhere drifts the first time
+    somebody is in a hurry.
+
+    Downloads count as reads: they write to local disk but change
+    nothing on the server or the vehicle, which is the line that
+    matters.
+    """
+    fn.sfmc_mutates = False  # type: ignore[attr-defined]
+    return fn
+
+
+def mutates[M: Callable[..., Any]](fn: M) -> M:
+    """Mark a method as changing server or vehicle state.
+
+    An engine may only call these with writes explicitly enabled.
+    """
+    fn.sfmc_mutates = True  # type: ignore[attr-defined]
+    return fn
+
+
 _MAX_RETRIES = 3
 
 #: Upper bound on one 429 retry sleep.  The server-provided header is
@@ -381,6 +410,7 @@ class SFMCClient:
 
     # ── Glider Management ────────────────────────────────────────────
 
+    @reads
     def get_glider_details(self, glider_name: str) -> dict[str, Any]:
         """Retrieve details for a registered glider.
 
@@ -412,6 +442,7 @@ class SFMCClient:
         response = self._request("GET", f"/v1/gliders/{glider_name}")
         return self._json_or_empty(response)
 
+    @reads
     def get_active_deployment_details(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the active deployment for a glider.
 
@@ -433,6 +464,7 @@ class SFMCClient:
         response = self._request("GET", f"/v1/active-deployment/{glider_name}")
         return self._json_or_empty(response)
 
+    @reads
     def get_newest_mission_status(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the newest mission status for a glider.
 
@@ -453,6 +485,7 @@ class SFMCClient:
         response = self._request("GET", f"/v1/newest-mission-details/{glider_name}")
         return self._json_or_empty(response)
 
+    @reads
     def get_surface_sensor_samples(
         self,
         glider_name: str,
@@ -490,6 +523,7 @@ class SFMCClient:
         )
         return self._json_or_empty(response)
 
+    @reads
     def get_folder_file_listing(
         self,
         glider_name: str,
@@ -536,6 +570,7 @@ class SFMCClient:
         )
         return self._json_or_empty(response)
 
+    @reads
     def get_available_scripts(self, glider_name: str) -> dict[str, Any]:
         """List available scripts for a glider.
 
@@ -556,6 +591,7 @@ class SFMCClient:
         response = self._request("GET", f"/v1/scripts-for-glider/{glider_name}")
         return self._json_or_empty(response)
 
+    @reads
     def get_zmodem_transfers(self, connection_id: int | str) -> dict[str, Any]:
         """Retrieve Zmodem transfers for a connection.
 
@@ -578,6 +614,7 @@ class SFMCClient:
 
     # ── Plans — Query ────────────────────────────────────────────────
 
+    @reads
     def get_mission_plan(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the assigned mission plan for a glider.
 
@@ -598,6 +635,7 @@ class SFMCClient:
         response = self._request("GET", f"/v1/glider-assigned-mission-plan/{glider_name}")
         return self._json_or_empty(response)
 
+    @reads
     def get_waypoint_plan(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the assigned waypoint plan for a glider.
 
@@ -619,6 +657,7 @@ class SFMCClient:
         response = self._request("GET", f"/v1/glider-assigned-waypoint-plan/{glider_name}")
         return self._json_or_empty(response)
 
+    @reads
     def get_yo_plan(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the assigned yo plan for a glider.
 
@@ -642,6 +681,7 @@ class SFMCClient:
         response = self._request("GET", f"/v1/glider-assigned-yo-plan/{glider_name}")
         return self._json_or_empty(response)
 
+    @reads
     def get_surface_plan(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the assigned surface plan for a glider.
 
@@ -666,6 +706,7 @@ class SFMCClient:
         response = self._request("GET", f"/v1/glider-assigned-surface-plan/{glider_name}")
         return self._json_or_empty(response)
 
+    @reads
     def get_sampling_plan(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the assigned sampling plan for a glider.
 
@@ -690,6 +731,7 @@ class SFMCClient:
         response = self._request("GET", f"/v1/glider-assigned-sampling-plan/{glider_name}")
         return self._json_or_empty(response)
 
+    @reads
     def get_data_transmission_plan(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the assigned data transmission plan for a glider.
 
@@ -716,6 +758,7 @@ class SFMCClient:
         )
         return self._json_or_empty(response)
 
+    @reads
     def get_mission_sensor_plan(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the assigned mission sensor plan for a glider.
 
@@ -740,6 +783,7 @@ class SFMCClient:
         )
         return self._json_or_empty(response)
 
+    @reads
     def get_abort_plan(self, glider_name: str) -> dict[str, Any]:
         """Retrieve the assigned abort plan for a glider.
 
@@ -765,6 +809,7 @@ class SFMCClient:
 
     # ── Plans — Update ───────────────────────────────────────────────
 
+    @mutates
     def update_waypoint_plan(self, glider_name: str, goto_file_path: Path | str) -> dict[str, Any]:
         """Upload and apply a new waypoint plan from a goto file.
 
@@ -789,6 +834,7 @@ class SFMCClient:
             goto_file_path,
         )
 
+    @mutates
     def update_yo_plan(self, glider_name: str, yo_file_path: Path | str) -> dict[str, Any]:
         """Upload and apply a new yo plan file.
 
@@ -813,6 +859,7 @@ class SFMCClient:
             yo_file_path,
         )
 
+    @mutates
     def update_surface_plan(
         self, glider_name: str, surface_file_path: Path | str
     ) -> dict[str, Any]:
@@ -839,6 +886,7 @@ class SFMCClient:
             surface_file_path,
         )
 
+    @mutates
     def update_sampling_plan(
         self, glider_name: str, sampling_file_path: Path | str
     ) -> dict[str, Any]:
@@ -865,6 +913,7 @@ class SFMCClient:
             sampling_file_path,
         )
 
+    @mutates
     def update_flight_data_transmission_plan(
         self, glider_name: str, sbd_list_file_path: Path | str
     ) -> dict[str, Any]:
@@ -891,6 +940,7 @@ class SFMCClient:
             sbd_list_file_path,
         )
 
+    @mutates
     def update_science_data_transmission_plan(
         self, glider_name: str, tbd_list_file_path: Path | str
     ) -> dict[str, Any]:
@@ -938,6 +988,7 @@ class SFMCClient:
 
     # ── Plans — Delete Rules ─────────────────────────────────────────
 
+    @mutates
     def delete_hit_waypoint_surface_plan_rule(self, glider_name: str) -> dict[str, Any]:
         """Delete the hit-waypoint surface plan rule for a glider.
 
@@ -961,6 +1012,7 @@ class SFMCClient:
         )
         return self._json_or_empty(response)
 
+    @mutates
     def delete_every_secs_surface_plan_rules(self, glider_name: str) -> dict[str, Any]:
         """Delete all every-N-seconds surface plan rules for a glider.
 
@@ -984,6 +1036,7 @@ class SFMCClient:
         )
         return self._json_or_empty(response)
 
+    @mutates
     def delete_at_utc_time_surface_plan_rules(self, glider_name: str) -> dict[str, Any]:
         """Delete all at-UTC-time surface plan rules for a glider.
 
@@ -1007,6 +1060,7 @@ class SFMCClient:
         )
         return self._json_or_empty(response)
 
+    @mutates
     def delete_sampling_plan_rules(self, glider_name: str) -> dict[str, Any]:
         """Delete all sampling plan rules for a glider.
 
@@ -1032,6 +1086,7 @@ class SFMCClient:
 
     # ── Glider Registration & Deployment ─────────────────────────────
 
+    @mutates
     def register_glider(self, glider_name: str, group_name: str = "default") -> dict[str, Any]:
         """Register a glider with the SFMC server.
 
@@ -1060,6 +1115,7 @@ class SFMCClient:
         )
         return self._json_or_empty(response)
 
+    @mutates
     def obtain_or_create_active_deployment(self, glider_name: str) -> dict[str, Any]:
         """Get the active deployment for a glider, creating one if needed.
 
@@ -1083,6 +1139,7 @@ class SFMCClient:
         )
         return self._json_or_empty(response)
 
+    @mutates
     def update_active_deployment_start(
         self, glider_name: str, start_datetime: str
     ) -> dict[str, Any]:
@@ -1113,6 +1170,7 @@ class SFMCClient:
 
     # ── Script Control ───────────────────────────────────────────────
 
+    @mutates
     def set_assigned_script(
         self, glider_name: str, script_type: str, script_name: str
     ) -> dict[str, Any]:
@@ -1142,6 +1200,7 @@ class SFMCClient:
         )
         return self._json_or_empty(response)
 
+    @mutates
     def clear_assigned_script(self, glider_name: str) -> dict[str, Any]:
         """Clear the currently assigned script for a glider.
 
@@ -1162,6 +1221,7 @@ class SFMCClient:
         response = self._request("PUT", f"/v1/clear-assigned-script/{glider_name}")
         return self._json_or_empty(response)
 
+    @mutates
     def pause_assigned_script(self, glider_name: str) -> dict[str, Any]:
         """Pause the currently assigned script for a glider.
 
@@ -1182,6 +1242,7 @@ class SFMCClient:
         response = self._request("PUT", f"/v1/pause-assigned-script/{glider_name}")
         return self._json_or_empty(response)
 
+    @mutates
     def resume_assigned_script(self, glider_name: str) -> dict[str, Any]:
         """Resume a paused script for a glider.
 
@@ -1202,6 +1263,7 @@ class SFMCClient:
         response = self._request("PUT", f"/v1/resume-assigned-script/{glider_name}")
         return self._json_or_empty(response)
 
+    @mutates
     def rewind_assigned_script(self, glider_name: str) -> dict[str, Any]:
         """Rewind the assigned script for a glider to the beginning.
 
@@ -1224,6 +1286,7 @@ class SFMCClient:
 
     # ── Commands ─────────────────────────────────────────────────────
 
+    @mutates
     def send_command(self, glider_name: str, command: str) -> dict[str, Any]:
         """Send a command to a glider.
 
@@ -1252,6 +1315,7 @@ class SFMCClient:
 
     # ── Deploy Files ─────────────────────────────────────────────────
 
+    @mutates
     def deploy_goto_file(self, glider_name: str) -> dict[str, Any]:
         """Generate and deploy a goto file for a glider.
 
@@ -1275,6 +1339,7 @@ class SFMCClient:
         response = self._request("PUT", f"/v1/gen-and-deploy-glider-goto-file/{glider_name}")
         return self._json_or_empty(response)
 
+    @mutates
     def deploy_yo_file(self, glider_name: str) -> dict[str, Any]:
         """Generate and deploy a yo file for a glider.
 
@@ -1295,6 +1360,7 @@ class SFMCClient:
         response = self._request("PUT", f"/v1/gen-and-deploy-glider-yo-file/{glider_name}")
         return self._json_or_empty(response)
 
+    @mutates
     def deploy_surface_files(self, glider_name: str) -> dict[str, Any]:
         """Generate and deploy surface files for a glider.
 
@@ -1318,6 +1384,7 @@ class SFMCClient:
         )
         return self._json_or_empty(response)
 
+    @mutates
     def deploy_sample_files(self, glider_name: str) -> dict[str, Any]:
         """Generate and deploy sample files for a glider.
 
@@ -1341,6 +1408,7 @@ class SFMCClient:
         )
         return self._json_or_empty(response)
 
+    @mutates
     def deploy_sbd_list_file(self, glider_name: str) -> dict[str, Any]:
         """Generate and deploy an SBD list file for a glider.
 
@@ -1367,6 +1435,7 @@ class SFMCClient:
         )
         return self._json_or_empty(response)
 
+    @mutates
     def deploy_tbd_list_file(self, glider_name: str) -> dict[str, Any]:
         """Generate and deploy a TBD list file for a glider.
 
@@ -1395,6 +1464,7 @@ class SFMCClient:
 
     # ── File Operations ──────────────────────────────────────────────
 
+    @mutates
     def upload_glider_files(
         self,
         glider_name: str,
@@ -1432,6 +1502,7 @@ class SFMCClient:
             file_paths,
         )
 
+    @mutates
     def upload_glider_file_contents(
         self,
         glider_name: str,
@@ -1484,6 +1555,7 @@ class SFMCClient:
             response = self._request("PUT", path, files=files)
             return self._json_or_empty(response)
 
+    @mutates
     def upload_cache_files(
         self,
         group_name: str,
@@ -1570,6 +1642,7 @@ class SFMCClient:
             return download_path
         raise AssertionError("unreachable")  # pragma: no cover
 
+    @reads
     def download_glider_file(
         self,
         glider_name: str,
@@ -1606,6 +1679,7 @@ class SFMCClient:
             download_path,
         )
 
+    @reads
     def download_glider_files(
         self,
         glider_name: str,
@@ -1656,6 +1730,7 @@ class SFMCClient:
             params=params,
         )
 
+    @mutates
     def delete_glider_file(self, glider_name: str, folder: str, file_name: str) -> dict[str, Any]:
         """Delete a file from a glider folder.
 
