@@ -752,6 +752,88 @@ mutual exclusion and rate limiting sit) all had to be made now anyway.
 Retrofitting the threading model later would be a rewrite, not an
 addition.
 
+## Clock discipline
+
+**Status:** proposed feature, from a measurement taken during the XML
+engine's live validation on 2026-08-17.
+
+### What was measured
+
+`osusim`'s clock ran **+48.4 minutes ahead of UTC**, and the offset was
+constant — five samples spanning 32 minutes all landed on the same
+figure, so this is a fixed offset, not drift:
+
+```
+host 01:59:28  glider 02:47:51  skew +48.4 min
+host 02:00:30  glider 02:48:54  skew +48.4 min
+host 02:28:06  glider 03:16:30  skew +48.4 min
+host 02:29:07  glider 03:17:31  skew +48.4 min
+host 02:31:08  glider 03:19:31  skew +48.4 min
+```
+
+The measurement is free: every surfacing prints
+
+```
+Curr Time: Mon Aug 17 03:19:31 2026 MT:   18142
+```
+
+and a monitor stamps each dialog line with real UTC. Anything already
+reading the dialog can compute the skew without asking the glider
+anything.
+
+### Why it matters
+
+**SFMC stamps files with the glider's clock, not the server's.** A
+`from-glider` file written while the host said 02:38 was listed with
+`dateTimeModified` of `03:17`. That is not cosmetic:
+
+- `sfmc-pull-new-downloads` filters on `lastModifiedAfter` and keeps a
+  high-water mark. A mark computed from host UTC, compared against
+  timestamps from a clock 48 minutes fast, either re-fetches or skips.
+  The tool already bounds high-water advancement against corrupt glider
+  clocks — this rig shows that guard is exercised in practice, not just
+  in theory, and gives a real number to test it against.
+- Science data products carry glider time. A 48-minute error is large
+  enough to misorder a profile against external data (satellite passes,
+  a ship's log, another vehicle in the same formation).
+- Correlating a dialog capture against an engine log, or against a
+  formation partner, needs the offset known rather than assumed zero.
+
+### The feature
+
+Split by consequence, matching the phasing below.
+
+**Measure and report (read-only).** Parse `Curr Time:` at each
+surfacing, compare against the host clock, and emit the skew as an
+event. Cheap, safe, and immediately useful — a fleet view showing each
+glider's clock offset would have surfaced this without anyone looking
+for it. This belongs in phase 2.
+
+**Correct (a write).** Setting a glider's clock is a command like any
+other and gets the same treatment: dry-run by default, explicit
+opt-in, audit log, per-glider serialisation. Phase 3.
+
+### Open questions
+
+1. *What command sets the clock, and is it safe mid-mission?* Not
+   answered here, deliberately — the corpus contains no example and
+   inventing one would be worse than leaving a gap. Needs an operator
+   or the manual.
+2. *Is correction safe while a mission runs?* Surfacing rules keyed on
+   elapsed time (`when_secs`, `BAW_EVERY_SECS`) are relative and would
+   not care. Rules keyed on absolute time — the `at UTC time` surface
+   plan rules the REST API exposes — would jump, possibly by 48
+   minutes, possibly skipping or duplicating a scheduled surfacing.
+   That argues for correcting only at a GliderDos prompt, not during a
+   surfacing mid-mission.
+3. *What threshold, and with what hysteresis?* A correction that fires
+   on every small drift is its own failure mode.
+4. *Which clock is authoritative?* The host may be the wrong one. A
+   laptop with a bad NTP config should not be allowed to reset a
+   vehicle's clock. Comparing against a trusted source, or refusing to
+   act when the host itself looks untrustworthy, is part of the design
+   rather than an afterthought.
+
 ## Phasing
 
 Each phase is independently useful and independently reviewable.
