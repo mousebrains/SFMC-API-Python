@@ -313,6 +313,42 @@ class TestSupervisedReconnect:
         assert seen == ["first", "second"]
         assert epoch >= 2, "a reconnect must advance the epoch"
 
+    def test_raw_listener_survives_a_reconnect(self) -> None:
+        """A raw consumer must keep receiving after the stream rebuilds.
+
+        run_live() attaches one raw listener for the life of a run that
+        may last hours across many dives, during which the stream drops
+        every time the glider submerges.  A listener that went deaf
+        after the first drop would look exactly like a glider that
+        never surfaced.
+        """
+        client = MagicMock()
+        client.get_glider_details.return_value = {"data": {"id": 8, "state": "connected"}}
+        client.subscribe_glider_output.side_effect = [
+            _sub([{"sequenceNumber": 0, "data": "before"}]),  # closes immediately
+            _sub([{"sequenceNumber": 0, "data": "after"}], keep_open=True),
+        ]
+
+        session = GliderSession(
+            client,
+            "osu685",
+            reconnect=True,
+            reconnect_initial_delay=0.01,
+            reconnect_max_delay=0.01,
+            reconnect_jitter=0.0,
+        )
+        raw = session.raw_dialog_listener()
+        session.start(timeout=5.0)
+        seen: list[str] = []
+        deadline = time.monotonic() + 5.0
+        while len(seen) < 2 and time.monotonic() < deadline:
+            chunk = raw.get(timeout=0.1)
+            if chunk is not None:
+                seen.append(chunk)
+        session.close()
+
+        assert seen == ["before", "after"], "the raw listener went deaf across the reconnect"
+
     def test_epoch_advances_before_that_session_delivers_data(self) -> None:
         """No consumer may see data from a session that is not yet counted.
 

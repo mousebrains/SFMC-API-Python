@@ -108,6 +108,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     disconnected glider may be queued and delivered on the next
     surfacing, injecting a stray return into the very dialog a script
     is matching against.
+  - `run_live()` is diagnosable.  Every line it prints is UTC
+    timestamped in `sfmc-monitor-glider`'s format, so a run can be
+    lined up against a dialog capture; a reconnect is reported as
+    losing dialog rather than as a neutral event; and a periodic
+    status line carries state, epoch, chunk and byte counts, quiet
+    time, and dropped chunks (`--status-every`, `0` silences).  Prompted
+    by a live run that sat silent through a surfacing: the engine had
+    matched nothing, and with untimestamped output there was no way to
+    tell a missed delivery from a glider that never surfaced.  SFMC
+    sends a surfacing as a single burst — 437 lines inside 10ms,
+    measured — so a reconnect gap does not degrade the dialog, it
+    loses all of it, and a script then waits forever on a trigger that
+    was published into the gap.
   - `--replay` now strips `sfmc-monitor-glider`'s log prefix.  Its
     format is `%(asctime)s %(name)s  %(message)s` with a dotted name
     (`sfmc.osusim.DIALOG`), which the original stripper — written for a

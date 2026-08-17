@@ -54,6 +54,7 @@ import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -745,6 +746,15 @@ def _emit(trace: str) -> None:
     print(f"    {trace}", flush=True)
 
 
+def _utcnow() -> str:
+    """UTC stamp matching ``sfmc-monitor-glider``'s log format.
+
+    The same shape on purpose: diagnosing a long run means lining this
+    output up against a dialog capture line by line.
+    """
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")
+
+
 def replay(
     script: Script | Sequence[Script],
     dialog: Iterator[str],
@@ -792,6 +802,7 @@ def run_live(
     poll: float = 1.0,
     max_runtime: float | None = None,
     keepalive: float | None = None,
+    status_every: float | None = 300.0,
 ) -> list[Action]:
     """Drive a glider with *script* until it reaches a final state.
 
@@ -825,23 +836,35 @@ def run_live(
             operator decides.  :data:`KEEPALIVE_SECONDS` is a sensible
             value when you do want it.  Only ever sends when *send* is
             True.
+        status_every: Seconds between status lines (state, epoch, chunk
+            and byte counts, quiet time, dropped chunks).  ``None``
+            silences them.  A run can legitimately be quiet for hours,
+            which is also what a broken one looks like; this is what
+            tells them apart.
 
     Returns:
         Every action taken (or that would have been taken), in order.
         Keepalive returns are not actions and are not included.
     """
-    machine = _as_chain(script, match_mode=match_mode, on_trace=_emit)
+
+    # Everything this function prints is timestamped.  A run lasting
+    # hours is diagnosed after the fact by lining its output up against
+    # a dialog capture, and untimestamped output cannot answer the only
+    # question that matters -- was the engine listening when the glider
+    # spoke?  Learned by failing to answer it.
+    def say(message: str) -> None:
+        print(f"{_utcnow()} {message}", flush=True)
+
+    machine = _as_chain(script, match_mode=match_mode, on_trace=say)
     performed: list[Action] = []
     mode = "SENDING" if send else "dry run — nothing will be sent"
     names = " -> ".join(one.name for one in machine.scripts)
-    print(f"running {names} against {glider} [{mode}]", flush=True)
+    say(f"running {names} against {glider} [{mode}]")
 
-    # SFMC drops the connection after roughly five minutes of inactivity.
-    # A mission in progress produces dialog at least every minute, so
-    # this never fires; a glider sitting at a GliderDos prompt says
-    # nothing at all, and that is where the drop happens.  Silence on
-    # the stream is what counts, so anything we send also defers it.
     last_activity = time.monotonic()
+    chunks = 0
+    bytes_in = 0
+    last_report = time.monotonic()
 
     def dispatch(actions: list[Action]) -> None:
         nonlocal last_activity
@@ -850,9 +873,9 @@ def run_live(
             if send:
                 client.send_command(glider, action.command)
                 last_activity = time.monotonic()
-                print(f"    SENT: {action.command}", flush=True)
+                say(f"SENT: {action.command}")
             else:
-                print(f"    WOULD SEND: {action.command}", flush=True)
+                say(f"WOULD SEND: {action.command}")
 
     deadline = None if max_runtime is None else time.monotonic() + max_runtime
     # start=False plus start(timeout=None) hands every retry, including
@@ -862,19 +885,29 @@ def run_live(
     # test, fatal for a run meant to last hours across many dives, where
     # the stream legitimately drops every time the glider submerges.
     session = client.session(glider, topics=("dialog",), start=False)
-    session.on_connect(
-        lambda reconnected: print(
-            f"    stream {'reconnected' if reconnected else 'connected'}", flush=True
-        )
-    )
-    session.on_disconnect(lambda: print("    stream dropped; supervisor retrying", flush=True))
+
+    def on_connect(reconnected: bool) -> None:
+        if not reconnected:
+            say("stream connected")
+            return
+        # A reconnect restores future messages only -- SFMC's live
+        # topics offer no cursor or replay.  And SFMC delivers a
+        # surfacing as one burst (437 lines inside 10ms, observed), so
+        # a gap does not degrade the dialog, it loses all of it.  A
+        # script waiting for a trigger that was published into the gap
+        # then waits forever, looking exactly like a glider that never
+        # surfaced.  Say so rather than let the two be confused.
+        say("stream RECONNECTED -- dialog published during the gap is lost, unrecoverably")
+
+    session.on_connect(on_connect)
+    session.on_disconnect(lambda: say("stream dropped; supervisor retrying"))
     session.start(timeout=None)
     with session:
         listener = session.raw_dialog_listener()
         dispatch(machine.start())
         while not machine.finished:
             if deadline is not None and time.monotonic() > deadline:
-                print("    stopping: max runtime reached", flush=True)
+                say("stopping: max runtime reached")
                 break
             try:
                 chunk = listener.get(timeout=poll)
@@ -882,11 +915,32 @@ def run_live(
                 chunk = None
             if chunk is not None:
                 last_activity = time.monotonic()
+                chunks += 1
+                bytes_in += len(chunk)
                 # Fed exactly as it arrived.  Reassembling into lines
                 # and re-adding a terminator would lose the one thing
                 # buffer mode exists to match: an unterminated prompt.
                 dispatch(machine.feed(chunk))
             dispatch(machine.check_timeout())
+
+            # A quiet engine is normal for hours at a time, and is also
+            # what a broken one looks like.  Report periodically so the
+            # two are distinguishable without attaching a debugger to a
+            # glider run already in progress.
+            if status_every and time.monotonic() - last_report >= status_every:
+                last_report = time.monotonic()
+                quiet = time.monotonic() - last_activity
+                dropped = listener.dropped
+                say(
+                    f"status: state={machine.state} epoch={session.epoch} "
+                    f"chunks={chunks} bytes={bytes_in} quiet={quiet:.0f}s "
+                    f"dropped={dropped} connected={session.connected}"
+                )
+                if dropped:
+                    # Bounded queues drop the OLDEST, so a lagging
+                    # consumer loses the start of a burst -- which is
+                    # where a surfacing's trigger lives.
+                    say(f"WARNING: {dropped} chunk(s) dropped; a trigger may have been missed")
             if keepalive is not None and send and time.monotonic() - last_activity >= keepalive:
                 # A submerged glider is *supposed* to be silent, and its
                 # link is legitimately down.  Sending into that keeps
@@ -964,6 +1018,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--max-runtime", type=float, help="Stop after this many seconds")
     parser.add_argument(
+        "--status-every",
+        type=float,
+        default=300.0,
+        metavar="SECONDS",
+        help="Seconds between status lines (0 silences them)",
+    )
+    parser.add_argument(
         "--keepalive",
         type=float,
         default=0.0,
@@ -1016,6 +1077,7 @@ def main(argv: list[str] | None = None) -> int:
             match_mode=args.match_mode,
             max_runtime=args.max_runtime,
             keepalive=args.keepalive or None,
+            status_every=args.status_every or None,
         )
     print(f"\n{len(actions)} action(s) {'sent' if args.send else 'would have been sent'}")
     return 0
