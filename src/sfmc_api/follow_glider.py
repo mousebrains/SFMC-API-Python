@@ -155,7 +155,7 @@ from sfmc_api.disconnect_notify import (
     build_notifier,
 )
 from sfmc_api.exceptions import SFMCError
-from sfmc_api.follower import BaseFollower, load_follower_class
+from sfmc_api.follower import BaseFollower, UploadBatch, load_follower_class
 from sfmc_api.monitor_glider import _log_with_time
 from sfmc_api.stomp import StompConnection, StompError, StompSubscription
 from sfmc_api.stream_reconnect import (
@@ -512,7 +512,7 @@ _UPLOAD_RETRY_DELAYS = (10.0, 30.0)
 def _upload_files(
     client: SFMCClient,
     glider_name: str,
-    queue_out: Queue[dict[str, dict[str, str | bytes]] | None],
+    queue_out: Queue[UploadBatch | dict[str, dict[str, str | bytes]] | None],
     upload_log: logging.Logger,
     stats: RunStats | None = None,
     abort: threading.Event | None = None,
@@ -541,14 +541,24 @@ def _upload_files(
         if output is None:
             break
 
-        for folder, files in output.items():
+        # A batch may name its own glider (a formation follower
+        # steering a partner); a plain dict is the pre-formation shape
+        # and means "the glider this pipeline is for".
+        if isinstance(output, UploadBatch):
+            folders = output.folders
+            target = output.glider or glider_name
+        else:
+            folders = output
+            target = glider_name
+
+        for folder, files in folders.items():
             if not files:
                 continue
             filenames = ", ".join(files.keys())
             attempts = 1 + len(_UPLOAD_RETRY_DELAYS)
             for attempt in range(1, attempts + 1):
                 try:
-                    client.upload_glider_file_contents(glider_name, folder, files)
+                    client.upload_glider_file_contents(target, folder, files)
                 except Exception as exc:
                     if attempt >= attempts:
                         upload_log.exception(
@@ -590,7 +600,7 @@ def _upload_files(
 
 
 def _print_files(
-    queue_out: Queue[dict[str, dict[str, str | bytes]] | None],
+    queue_out: Queue[UploadBatch | dict[str, dict[str, str | bytes]] | None],
     output_log: logging.Logger,
     stats: RunStats | None = None,
 ) -> None:
@@ -608,7 +618,8 @@ def _print_files(
         if output is None:
             break
 
-        for folder, files in output.items():
+        folders = output.folders if isinstance(output, UploadBatch) else output
+        for folder, files in folders.items():
             if not files:
                 continue
             for filename, content in files.items():
@@ -904,7 +915,7 @@ def _run_replay_dialog(
 def _shutdown_follow_pipeline(
     *,
     follower: BaseFollower,
-    queue_out: Queue[dict[str, dict[str, str | bytes]] | None],
+    queue_out: Queue[UploadBatch | dict[str, dict[str, str | bytes]] | None],
     output_thread: threading.Thread,
     output_results: queue.Queue[_ThreadResult],
     info_log: logging.Logger,
@@ -1101,7 +1112,7 @@ def follow_glider(
     # is surfaced instead as warnings in _deliver_surfacing and
     # BaseFollower.send_files.
     queue_in: Queue[SurfacingEvent | None] = Queue()
-    queue_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
+    queue_out: Queue[UploadBatch | dict[str, dict[str, str | bytes]] | None] = Queue()
 
     follower = follower_class(
         config=follower_config or {},

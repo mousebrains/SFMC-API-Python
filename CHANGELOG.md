@@ -28,6 +28,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Control engine, phase 5: followers fold in as a specialisation.**
+  `FollowerEngine` runs any existing `BaseFollower` on the control
+  engine, so a follower gains formations, the safety rails, and the
+  audit log without being rewritten.
+  - **Existing followers work unchanged.**  `SurfacingEvent` has always
+    carried `vehicle_name`, so `on_surfacing` needs no signature change
+    to handle a formation: one instance sees every glider's surfacings,
+    on one thread, with the same no-locks guarantee.
+  - `send_files` gains `glider=`, defaulting to the glider whose
+    surfacing is being handled.  A single-glider follower written
+    before formations existed is unaffected; a formation follower names
+    the target explicitly.
+  - Uploads now go through `request()`, so a follower inherits every
+    rail: refused without `--allow-writes`, simulated under
+    `--dry-run`, serialised per glider, capped fleet-wide, audited.
+  - One `DialogParser` **per glider** — two gliders surfacing at once
+    would otherwise braid their GPS fixes into a single event.
+  - The follower's thread is deliberately not started; `on_surfacing`
+    is called on the engine thread, so two schedulers never disagree
+    about which is in charge.
+
+### Changed
+
+- `BaseFollower.send_files` queues an `UploadBatch` (folders plus an
+  optional target glider) rather than a bare `{folder: files}` dict.
+  The queue is internal plumbing — the docs have always said a follower
+  never writes to it directly — and consumers still accept the old
+  shape.  Follower code itself is unaffected.
+
 - **Control engine, phase 4: the `sfmc-control` CLI.**  Runs an engine
   from a Python file against one or more gliders.  Flags mirror
   `sfmc-follow` where they mean the same thing, with one deliberate

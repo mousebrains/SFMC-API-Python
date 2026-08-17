@@ -5,6 +5,7 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 from queue import Queue
+from typing import Any
 
 import pytest
 
@@ -37,7 +38,7 @@ class TestBaseFollowerRunLoop:
 
     def test_processes_surfacing_event(self) -> None:
         q_in: Queue[SurfacingEvent | None] = Queue()
-        q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
+        q_out: Queue[Any] = Queue()
 
         follower = EchoFollower(config={}, queue_in=q_in, queue_out=q_out)
         event = SurfacingEvent(vehicle_name="osu685")
@@ -50,12 +51,13 @@ class TestBaseFollowerRunLoop:
 
         output = q_out.get(timeout=1)
         assert output is not None
-        assert "to-glider" in output
-        assert "osu685.txt" in output["to-glider"]
+        assert "to-glider" in output.folders
+        assert "osu685.txt" in output.folders["to-glider"]
+        assert output.glider == "osu685", "the run loop names the surfacing's glider"
 
     def test_shutdown_sentinel_stops_loop(self) -> None:
         q_in: Queue[SurfacingEvent | None] = Queue()
-        q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
+        q_out: Queue[Any] = Queue()
 
         follower = EchoFollower(config={}, queue_in=q_in, queue_out=q_out)
         q_in.put(None)
@@ -68,7 +70,7 @@ class TestBaseFollowerRunLoop:
     def test_error_in_on_surfacing_continues(self) -> None:
         """A crash in on_surfacing should not kill the follower thread."""
         q_in: Queue[SurfacingEvent | None] = Queue()
-        q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
+        q_out: Queue[Any] = Queue()
 
         follower = CrashFollower(config={}, queue_in=q_in, queue_out=q_out)
         q_in.put(SurfacingEvent(vehicle_name="test1"))  # Will crash.
@@ -83,7 +85,7 @@ class TestBaseFollowerRunLoop:
 
     def test_multiple_events(self) -> None:
         q_in: Queue[SurfacingEvent | None] = Queue()
-        q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
+        q_out: Queue[Any] = Queue()
 
         follower = EchoFollower(config={}, queue_in=q_in, queue_out=q_out)
         q_in.put(SurfacingEvent(vehicle_name="g1"))
@@ -107,25 +109,29 @@ class TestSendFiles:
 
     def test_to_glider_only(self) -> None:
         q_in: Queue[SurfacingEvent | None] = Queue()
-        q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
+        q_out: Queue[Any] = Queue()
         follower = EchoFollower(config={}, queue_in=q_in, queue_out=q_out)
 
         follower.send_files(to_glider={"a.ma": "content"})
         output = q_out.get_nowait()
-        assert output == {"to-glider": {"a.ma": "content"}}
+        # The payload carries the target glider now, because a
+        # formation follower steering two vehicles cannot rely on the
+        # upload thread knowing which one it meant.
+        assert output.folders == {"to-glider": {"a.ma": "content"}}
+        assert output.glider is None, "unset means 'this pipeline's glider'"
 
     def test_to_science_only(self) -> None:
         q_in: Queue[SurfacingEvent | None] = Queue()
-        q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
+        q_out: Queue[Any] = Queue()
         follower = EchoFollower(config={}, queue_in=q_in, queue_out=q_out)
 
         follower.send_files(to_science={"data.dat": b"binary"})
         output = q_out.get_nowait()
-        assert output == {"to-science": {"data.dat": b"binary"}}
+        assert output.folders == {"to-science": {"data.dat": b"binary"}}
 
     def test_both_folders(self) -> None:
         q_in: Queue[SurfacingEvent | None] = Queue()
-        q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
+        q_out: Queue[Any] = Queue()
         follower = EchoFollower(config={}, queue_in=q_in, queue_out=q_out)
 
         follower.send_files(
@@ -133,12 +139,12 @@ class TestSendFiles:
             to_science={"log.txt": "data"},
         )
         output = q_out.get_nowait()
-        assert "to-glider" in output
-        assert "to-science" in output
+        assert "to-glider" in output.folders
+        assert "to-science" in output.folders
 
     def test_empty_dicts_not_sent(self) -> None:
         q_in: Queue[SurfacingEvent | None] = Queue()
-        q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
+        q_out: Queue[Any] = Queue()
         follower = EchoFollower(config={}, queue_in=q_in, queue_out=q_out)
 
         follower.send_files()  # No files.
@@ -153,7 +159,7 @@ class TestShutdown:
 
     def test_puts_none_sentinel(self) -> None:
         q_in: Queue[SurfacingEvent | None] = Queue()
-        q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
+        q_out: Queue[Any] = Queue()
         follower = EchoFollower(config={}, queue_in=q_in, queue_out=q_out)
 
         follower.shutdown()
@@ -266,7 +272,7 @@ class TestLoadFollowerClass:
         from queue import Queue
 
         q_in: Queue[SurfacingEvent | None] = Queue()
-        q_out: Queue[dict[str, dict[str, str | bytes]] | None] = Queue()
+        q_out: Queue[Any] = Queue()
         config = {"key": "value"}
         follower = cls(config=config, queue_in=q_in, queue_out=q_out)
         assert follower.config == {"key": "value"}

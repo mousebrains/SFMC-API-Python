@@ -101,7 +101,9 @@ position::
 
     # file: my_follower.py
     from sfmc_api.follower import BaseFollower
-    from sfmc_api.dialog_parser import SurfacingEvent
+    from sfmc_api.dialog_parser import DialogParser, SurfacingEvent
+from sfmc_api.engine import BaseControlEngine
+from sfmc_api.events import Event
     from sfmc_api.ma_writer import generate_goto_ma
 
     class FixedWaypointFollower(BaseFollower):
@@ -146,16 +148,40 @@ import inspect
 import logging
 import threading
 from abc import abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any
 
-from sfmc_api.dialog_parser import SurfacingEvent
+from sfmc_api.dialog_parser import DialogParser, SurfacingEvent
+from sfmc_api.engine import BaseControlEngine
+from sfmc_api.events import Event
 
 if TYPE_CHECKING:
     from sfmc_api.disconnect_notify import DisconnectNotifier
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class UploadBatch:
+    """Files queued for upload, and the glider they are for.
+
+    Before multi-glider followers, a batch needed no glider: there was
+    only one, and the upload thread knew it.  A formation follower
+    steering two vehicles cannot rely on that, and a batch that does
+    not say where it goes is the kind of ambiguity that puts a waypoint
+    file on the wrong glider.
+
+    Attributes:
+        glider: Target name, or ``None`` to mean "whichever glider the
+            pipeline is for" — what a single-glider follower written
+            before any of this still produces.
+        folders: ``{folder: {filename: contents}}``.
+    """
+
+    folders: dict[str, dict[str, str | bytes]]
+    glider: str | None = None
 
 
 class BaseFollower(threading.Thread):
@@ -192,13 +218,16 @@ class BaseFollower(threading.Thread):
         self,
         config: dict[str, Any],
         queue_in: Queue[SurfacingEvent | None],
-        queue_out: Queue[dict[str, dict[str, str | bytes]] | None],
+        queue_out: Queue[UploadBatch | dict[str, dict[str, str | bytes]] | None],
     ) -> None:
         super().__init__(daemon=True, name=type(self).__name__)
         self.config = config
         self.queue_in = queue_in
         self.queue_out = queue_out
         self._notifier: DisconnectNotifier | None = None
+        #: Glider whose surfacing is being handled, for send_files().
+        #: Set by the framework around each on_surfacing call.
+        self.current_glider: str | None = None
 
     def set_notifier(self, notifier: DisconnectNotifier | None) -> None:
         """Attach the operator-email notifier.
@@ -276,6 +305,7 @@ class BaseFollower(threading.Thread):
             if event is None:
                 logger.debug("%s: received shutdown sentinel", self.name)
                 break
+            self.current_glider = event.vehicle_name
             try:
                 self.on_surfacing(event)
             except Exception:
@@ -335,6 +365,7 @@ class BaseFollower(threading.Thread):
         self,
         to_glider: dict[str, str | bytes] | None = None,
         to_science: dict[str, str | bytes] | None = None,
+        glider: str | None = None,
     ) -> None:
         """Queue files for upload to SFMC.
 
@@ -343,6 +374,21 @@ class BaseFollower(threading.Thread):
                 ``to-glider`` folder.
             to_science: Dict of ``{filename: content}`` for the
                 ``to-science`` folder.
+            glider: Which glider to send to.  Defaults to the glider
+                whose surfacing is being handled right now, so a
+                single-glider follower written before formations
+                existed keeps working untouched::
+
+                    def on_surfacing(self, event):
+                        self.send_files(to_glider={"goto_l10.ma": ma})
+
+                A formation follower names the target explicitly::
+
+                        self.send_files(to_glider={...}, glider="osu686")
+
+                ``event.vehicle_name`` has always carried the glider
+                identity, which is why :meth:`on_surfacing` needs no
+                signature change for any of this.
         """
         output: dict[str, dict[str, str | bytes]] = {}
         if to_glider:
@@ -350,7 +396,7 @@ class BaseFollower(threading.Thread):
         if to_science:
             output["to-science"] = to_science
         if output:
-            self.queue_out.put(output)
+            self.queue_out.put(UploadBatch(folders=output, glider=glider or self.current_glider))
             depth = self.queue_out.qsize()
             if depth > 8:
                 logger.warning(
@@ -365,6 +411,127 @@ class BaseFollower(threading.Thread):
         :meth:`run` loop.
         """
         self.queue_in.put(None)
+
+
+class FollowerEngine(BaseControlEngine):
+    """Runs a :class:`BaseFollower` on the control engine.
+
+    A follower is a control engine with a narrower question: instead of
+    "what happened?", it asks "what happened *at a surfacing*?".  So it
+    folds in as a specialisation rather than staying a parallel
+    mechanism, and gets multi-glider support for free::
+
+        sfmc-control --glider osu684 --glider osu685 \
+                     --engine my_follower.py --allow-writes
+
+    **Existing followers work unchanged.**  ``SurfacingEvent`` has
+    always carried ``vehicle_name``, so :meth:`BaseFollower.on_surfacing`
+    needs no signature change to see a formation — one instance handles
+    every glider's surfacings, on one thread, with the same no-locks
+    guarantee the engine gives everything else.
+
+    The follower's thread is deliberately **not** started.  Its
+    :meth:`~BaseFollower.on_surfacing` is called directly on the engine
+    thread, so a follower keeps its one-at-a-time contract and gains the
+    engine's ordering guarantees rather than having two schedulers
+    disagree about which is in charge.
+
+    Args:
+        follower_class: A :class:`BaseFollower` subclass.
+        config: Passed to the follower, as ``--config`` does today.
+    """
+
+    sources = ("dialog",)
+
+    def __init__(
+        self,
+        follower_class: type[BaseFollower],
+        config: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(config)
+        self._queue_in: Queue[SurfacingEvent | None] = Queue()
+        self._queue_out: Queue[UploadBatch | dict[str, dict[str, str | bytes]] | None] = Queue()
+        self.follower = follower_class(self.config, self._queue_in, self._queue_out)
+        # One parser per glider: a parser accumulates the lines of one
+        # surfacing, and two gliders surfacing at once would otherwise
+        # braid their GPS fixes into a single event.
+        self._parsers: dict[str, DialogParser] = {}
+
+    def on_start(self) -> None:
+        self.log("following %s", ", ".join(self.gliders) or "no gliders yet")
+
+    def on_stop(self) -> None:
+        # Whatever a partial surfacing has accumulated is worth one last
+        # look before shutdown.
+        for glider in list(self._parsers):
+            self._flush(glider)
+
+    def on_event(self, event: Event) -> None:
+        match event.source:
+            case "dialog":
+                parser = self._parsers.setdefault(event.glider, DialogParser())
+                surfacing = parser.feed_line(event.body)
+                if surfacing is not None:
+                    self._deliver(surfacing, event.glider)
+            case "stream" if event.body.state == "disconnected":
+                # She dove: the surfacing is over, so anything the
+                # parser is still holding is complete.
+                self._flush(event.glider)
+            case "error" if event.tag == "upload":
+                self.log("%s: upload failed: %s", event.glider, event.body)
+
+    def _flush(self, glider: str) -> None:
+        parser = self._parsers.get(glider)
+        if parser is None:
+            return
+        surfacing = parser.flush()
+        if surfacing is not None:
+            self._deliver(surfacing, glider)
+        parser.reset()
+
+    def _deliver(self, surfacing: SurfacingEvent, glider: str) -> None:
+        """Hand one surfacing to the follower, then send what it queued."""
+        self.follower.current_glider = glider
+        try:
+            self.follower.on_surfacing(surfacing)
+        except Exception:
+            # Same policy the follower's own loop has always had: one
+            # bad surfacing must not end a deployment.
+            logger.exception("%s: error processing surfacing for %s", type(self).__name__, glider)
+        finally:
+            self.follower.current_glider = None
+        self._drain_uploads(glider)
+
+    def _drain_uploads(self, default_glider: str) -> None:
+        """Turn queued files into upload requests.
+
+        Uploads go through :meth:`~BaseControlEngine.request`, so they
+        inherit every rail the engine already has: refused without
+        ``allow_writes``, simulated under ``dry_run``, serialised per
+        glider, capped fleet-wide, and audited.
+        """
+        while True:
+            try:
+                batch = self._queue_out.get_nowait()
+            except Empty:
+                return
+            if batch is None:
+                return
+            if isinstance(batch, UploadBatch):
+                folders, target = batch.folders, batch.glider or default_glider
+            else:
+                folders, target = batch, default_glider
+            for folder, files in folders.items():
+                if not files:
+                    continue
+                self.request(
+                    "upload_glider_file_contents",
+                    target,
+                    folder,
+                    files,
+                    glider=target,
+                    tag="upload",
+                )
 
 
 # ── Dynamic class loader ───────────────────────────────────────────
