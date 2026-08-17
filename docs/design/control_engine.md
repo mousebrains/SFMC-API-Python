@@ -815,10 +815,13 @@ opt-in, audit log, per-glider serialisation. Phase 3.
 
 ### Open questions
 
-1. *What command sets the clock, and is it safe mid-mission?* Not
-   answered here, deliberately — the corpus contains no example and
-   inventing one would be worse than leaving a gap. Needs an operator
-   or the manual.
+1. *What command sets the clock?* Likely `date` at the GliderDos
+   prompt — the operator's recollection, **not yet tested on a
+   glider**, and recorded here as a lead rather than a fact. The
+   corpus contains no example. Verify before anything is built on it,
+   and note that verifying is cheap and safe: `date` with no argument
+   should report the clock without setting it, which also gives a
+   second reading to cross-check against `Curr Time:`.
 2. *Is correction safe while a mission runs?* Surfacing rules keyed on
    elapsed time (`when_secs`, `BAW_EVERY_SECS`) are relative and would
    not care. Rules keyed on absolute time — the `at UTC time` surface
