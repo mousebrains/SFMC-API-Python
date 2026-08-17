@@ -10,8 +10,11 @@ import pytest
 
 from sfmc_api.engine import (
     READ_OPERATIONS,
+    WRITE_OPERATIONS,
     BaseControlEngine,
+    DryRun,
     EngineRunner,
+    RateLimited,
     WriteRefused,
 )
 from sfmc_api.events import Event, FleetStream
@@ -54,12 +57,18 @@ class _FakeSession:
 
 
 class _FakeClient:
-    """Only the read operations, plus one write to prove it is refused."""
+    """Records every call; never does anything.
+
+    Implements both operation lists, so "a blocked write never reached
+    the client" is asserted by inspecting ``calls`` rather than by an
+    exploding stub — which would also fire on the legitimate
+    ``allow_writes`` path.
+    """
 
     def __init__(self, **returns: Any) -> None:
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
         self._returns = returns
-        for op in READ_OPERATIONS:
+        for op in READ_OPERATIONS | WRITE_OPERATIONS:
             setattr(self, op, self._make(op))
 
     def _make(self, op: str) -> Any:
@@ -71,9 +80,6 @@ class _FakeClient:
             return value
 
         return call
-
-    def send_command(self, glider: str, command: str) -> dict[str, Any]:
-        raise AssertionError("a read-only engine must never reach a write")
 
 
 def _runner(engine: BaseControlEngine, client: Any = None, **kwargs: Any) -> EngineRunner:
@@ -106,20 +112,32 @@ class TestEngineSurface:
 
 
 class TestReadOnly:
-    def test_a_write_is_refused_by_name(self) -> None:
+    def test_a_write_is_refused_as_an_event_not_an_exception(self) -> None:
+        """Rail 2: a blocked write yields an error event naming the flag.
+
+        An event rather than a raise so an engine handles a blocked
+        write exactly like any other failed operation, instead of
+        wrapping every request in a try block.
+        """
         engine = BaseControlEngine()
         runner = _runner(engine)
         try:
-            with pytest.raises(WriteRefused, match="state-changing"):
-                engine.request("send_command", "osu684", "s", glider="osu684")
+            request_id = engine.request("send_command", "osu684", "s", glider="osu684")
+            event = runner._merge.get(timeout=1)
+            assert event is not None
+            assert event.source == "error"
+            assert isinstance(event.body, WriteRefused)
+            assert "allow_writes" in str(event.body)
+            assert event.request_id == request_id
         finally:
             runner.close()
 
-    def test_an_unknown_operation_is_refused(self) -> None:
+    def test_an_unknown_operation_raises_because_it_is_a_bug(self) -> None:
+        """Not an operational condition -- a typo in the engine's code."""
         engine = BaseControlEngine()
         runner = _runner(engine)
         try:
-            with pytest.raises(WriteRefused, match="not a client operation"):
+            with pytest.raises(ValueError, match="not a requestable operation"):
                 engine.request("summon_kraken", glider="osu684")
         finally:
             runner.close()
@@ -500,3 +518,219 @@ class TestReplayNeedsNothing:
                 engine.add_glider("osusim")
         finally:
             runner.close()
+
+
+class TestWriteGating:
+    """Rail 2: writes off by default, matching sfmc-api-test's posture."""
+
+    def test_writes_are_off_by_default(self) -> None:
+        runner = _runner(BaseControlEngine())
+        try:
+            assert runner.allow_writes is False
+            assert runner.dry_run is False
+        finally:
+            runner.close()
+
+    def test_an_allowed_write_actually_runs(self) -> None:
+        engine = BaseControlEngine()
+        client = _FakeClient()
+        runner = _runner(engine, client, allow_writes=True)
+        try:
+            engine.request("send_command", "osu684", "Ctrl-M", glider="osu684", tag="c")
+            event = runner._merge.get(timeout=2)
+            assert event is not None and event.source == "result"
+            assert ("send_command", ("osu684", "Ctrl-M")) in client.calls
+        finally:
+            runner.stop()
+            runner.close()
+
+    def test_a_blocked_write_never_reaches_the_client(self) -> None:
+        engine = BaseControlEngine()
+        client = _FakeClient()
+        runner = _runner(engine, client)
+        try:
+            engine.request("send_command", "osu684", "Ctrl-C", glider="osu684")
+            time.sleep(0.2)
+            assert client.calls == [], "a blocked write must not touch the glider"
+        finally:
+            runner.close()
+
+    def test_reads_still_work_when_writes_are_blocked(self) -> None:
+        engine = BaseControlEngine()
+        client = _FakeClient()
+        runner = _runner(engine, client)
+        try:
+            engine.request("get_glider_details", "osu684", glider="osu684")
+            event = runner._merge.get(timeout=2)
+            assert event is not None and event.source == "result"
+        finally:
+            runner.stop()
+            runner.close()
+
+    def test_the_two_operation_lists_do_not_overlap(self) -> None:
+        assert frozenset() == READ_OPERATIONS & WRITE_OPERATIONS
+
+    def test_every_write_operation_exists_on_the_real_client(self) -> None:
+        from sfmc_api import SFMCClient
+
+        assert [op for op in WRITE_OPERATIONS if not hasattr(SFMCClient, op)] == []
+
+    def test_every_dangerous_verb_is_classified_as_a_write(self) -> None:
+        """Nothing that mutates may sit outside the gate."""
+        from sfmc_api import SFMCClient
+
+        dangerous = ("send_", "update_", "delete_", "deploy_", "upload_", "set_", "clear_assigned")
+        for name in dir(SFMCClient):
+            if name.startswith(dangerous):
+                assert name in WRITE_OPERATIONS, f"{name} is ungated"
+
+
+class TestDryRun:
+    """Rail 1: full logic, synthetic results, nothing sent."""
+
+    def test_a_dry_run_write_is_answered_but_not_sent(self) -> None:
+        engine = BaseControlEngine()
+        client = _FakeClient()
+        runner = _runner(engine, client, allow_writes=True, dry_run=True)
+        try:
+            request_id = engine.request(
+                "send_command", "osu684", "Ctrl-C", glider="osu684", tag="c"
+            )
+            event = runner._merge.get(timeout=2)
+            assert event is not None
+            assert event.source == "result", "the engine's logic still gets an answer"
+            assert isinstance(event.body, DryRun)
+            assert event.body.op == "send_command"
+            assert event.body.args == ("osu684", "Ctrl-C")
+            assert event.request_id == request_id
+            assert event.tag == "c"
+            assert client.calls == [], "nothing was sent"
+        finally:
+            runner.close()
+
+    def test_a_dry_run_still_performs_reads(self) -> None:
+        """Only the consequences are withheld, not the observations."""
+        engine = BaseControlEngine()
+        client = _FakeClient()
+        runner = _runner(engine, client, allow_writes=True, dry_run=True)
+        try:
+            engine.request("get_glider_details", "osu684", glider="osu684")
+            event = runner._merge.get(timeout=2)
+            assert event is not None and event.source == "result"
+            assert not isinstance(event.body, DryRun)
+            assert ("get_glider_details", ("osu684",)) in client.calls
+        finally:
+            runner.stop()
+            runner.close()
+
+    def test_dry_run_result_is_a_distinct_type(self) -> None:
+        """An engine treating it as server data should be able to notice."""
+        assert not isinstance(DryRun(op="x", args=(), kwargs={}), dict)
+
+
+class TestRateLimit:
+    """Rail 4: exceeding the cap errors rather than queueing silently."""
+
+    def test_exceeding_the_cap_produces_an_error_not_a_queue(self) -> None:
+        engine = BaseControlEngine()
+        blocker = threading.Event()
+
+        class SlowClient(_FakeClient):
+            def _make(self, op: str) -> Any:
+                def call(*args: Any, **kwargs: Any) -> Any:
+                    self.calls.append((op, args))
+                    blocker.wait(timeout=5)
+                    return {}
+
+                return call
+
+        client = SlowClient()
+        runner = _runner(engine, client, max_outstanding=2)
+        try:
+            ids = [engine.request("get_glider_details", f"g{i}", glider=f"g{i}") for i in range(5)]
+            assert len(ids) == 5, "every request gets an id, even a refused one"
+            errors = []
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and len(errors) < 3:
+                event = runner._merge.get(timeout=0.2)
+                if event is not None and event.source == "error":
+                    errors.append(event)
+            assert len(errors) == 3, "3 of 5 exceeded a cap of 2"
+            assert all(isinstance(e.body, RateLimited) for e in errors)
+            assert "not submitted" in str(errors[0].body)
+        finally:
+            blocker.set()
+            runner.stop()
+            runner.close()
+
+    def test_outstanding_returns_to_zero(self) -> None:
+        engine = BaseControlEngine()
+        runner = _runner(engine, _FakeClient())
+        try:
+            engine.request("get_glider_details", "osu684", glider="osu684")
+            deadline = time.monotonic() + 2
+            while runner.outstanding and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert runner.outstanding == 0
+        finally:
+            runner.stop()
+            runner.close()
+
+    def test_a_refused_request_does_not_consume_a_slot(self) -> None:
+        engine = BaseControlEngine()
+        runner = _runner(engine, _FakeClient(), max_outstanding=1)
+        try:
+            for _ in range(5):
+                engine.request("send_command", "osu684", "x", glider="osu684")
+            time.sleep(0.1)
+            assert runner.outstanding == 0
+        finally:
+            runner.stop()
+            runner.close()
+
+
+class TestAudit:
+    """Rail 5: the artefact that explains a surprising glider."""
+
+    def test_every_request_and_outcome_is_logged_with_its_glider(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        engine = BaseControlEngine()
+        with caplog.at_level("INFO", logger="sfmc_api.engine.audit"):
+            runner = _runner(engine, _FakeClient())
+            try:
+                engine.request("get_glider_details", "osu684", glider="osu684", tag="d")
+                deadline = time.monotonic() + 2
+                while runner.outstanding and time.monotonic() < deadline:
+                    time.sleep(0.02)
+            finally:
+                runner.stop()
+                runner.close()
+
+        lines = [r.getMessage() for r in caplog.records]
+        assert any("requested" in line and "osu684" in line for line in lines)
+        assert any("ok" in line and "get_glider_details" in line for line in lines)
+        assert any("tag=d" in line for line in lines)
+
+    def test_the_run_posture_is_stated_at_startup(self, caplog: pytest.LogCaptureFixture) -> None:
+        """ "Was this run allowed to touch the glider?" from the log alone."""
+        with caplog.at_level("INFO", logger="sfmc_api.engine.audit"):
+            runner = _runner(BaseControlEngine(), _FakeClient(), allow_writes=True)
+            runner.close()
+        assert any("writes=ALLOWED" in r.getMessage() for r in caplog.records)
+
+    def test_a_refusal_is_audited(self, caplog: pytest.LogCaptureFixture) -> None:
+        engine = BaseControlEngine()
+        with caplog.at_level("INFO", logger="sfmc_api.engine.audit"):
+            runner = _runner(engine, _FakeClient())
+            try:
+                engine.request("send_command", "osu684", "x", glider="osu684")
+            finally:
+                runner.close()
+        assert any("refused: WriteRefused" in r.getMessage() for r in caplog.records)
+
+    def test_long_arguments_are_truncated(self) -> None:
+        """An upload's arguments can be a whole file."""
+        from sfmc_api.engine import _summarise
+
+        assert len(_summarise(("x" * 500,))) <= 81

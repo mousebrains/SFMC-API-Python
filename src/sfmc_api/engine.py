@@ -1,8 +1,18 @@
 """Control engines: react to a fleet's events on one thread.
 
-Phase 2 of ``docs/design/control_engine.md`` — the engine and its
-runner, **read operations only**.  Writes are phase 3, and asking for
-one here is refused rather than quietly allowed.
+Phases 2 and 3 of ``docs/design/control_engine.md`` — the engine, its
+runner, and the safety rails around anything that can move a glider.
+
+**Writes are off by default.**  A state-changing operation is refused
+unless ``allow_writes=True``, and the refusal arrives as an ``error``
+event naming the flag, so an engine handles it like any other failed
+operation.  ``dry_run=True`` runs the engine's whole logic and answers
+each write with a synthetic :class:`DryRun` result instead of sending
+it — reads still happen, so the engine sees real data and makes real
+decisions, and only the consequences are withheld.  Every request and
+outcome is written to the ``sfmc_api.engine.audit`` logger: when a
+glider does something surprising, that is the artefact that explains
+why.
 
 An engine subclasses :class:`BaseControlEngine`, implements
 :meth:`~BaseControlEngine.on_event`, and acts through
@@ -55,6 +65,7 @@ import time
 import traceback
 from collections.abc import Callable, Iterable
 from concurrent.futures import Future
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .events import Event, EventMerge, FleetStream
@@ -64,9 +75,14 @@ if TYPE_CHECKING:  # pragma: no cover
     from .client import SFMCClient
 
 __all__ = [
+    "DEFAULT_MAX_OUTSTANDING",
+    "OPERATIONS",
     "READ_OPERATIONS",
+    "WRITE_OPERATIONS",
     "BaseControlEngine",
+    "DryRun",
     "EngineRunner",
+    "RateLimited",
     "WriteRefused",
 ]
 
@@ -105,6 +121,65 @@ READ_OPERATIONS = frozenset(
     }
 )
 
+#: Client methods that change state on the server or the vehicle.
+#:
+#: Listed rather than derived, for the same reason as
+#: :data:`READ_OPERATIONS`: the client carries no marker, and the two
+#: lists together are the thing a reviewer can actually check.  Anything
+#: in neither list is not a requestable operation at all — ``session``,
+#: ``subscribe_*`` and friends are plumbing, and asking for one is a
+#: programming error rather than an operational condition.
+WRITE_OPERATIONS = frozenset(
+    {
+        "clear_assigned_script",
+        "delete_at_utc_time_surface_plan_rules",
+        "delete_every_secs_surface_plan_rules",
+        "delete_glider_file",
+        "delete_hit_waypoint_surface_plan_rule",
+        "delete_sampling_plan_rules",
+        "deploy_goto_file",
+        "deploy_sample_files",
+        "deploy_sbd_list_file",
+        "deploy_surface_files",
+        "deploy_tbd_list_file",
+        "deploy_yo_file",
+        "obtain_or_create_active_deployment",
+        "pause_assigned_script",
+        "register_glider",
+        "resume_assigned_script",
+        "rewind_assigned_script",
+        "send_command",
+        "set_assigned_script",
+        "update_active_deployment_start",
+        "update_flight_data_transmission_plan",
+        "update_sampling_plan",
+        "update_science_data_transmission_plan",
+        "update_surface_plan",
+        "update_waypoint_plan",
+        "update_yo_plan",
+        "upload_cache_files",
+        "upload_glider_file_contents",
+        "upload_glider_files",
+    }
+)
+
+#: Everything an engine may name in :meth:`BaseControlEngine.request`.
+OPERATIONS = READ_OPERATIONS | WRITE_OPERATIONS
+
+#: Outstanding requests allowed at once, fleet-wide.
+#:
+#: Fleet-wide rather than per glider: SFMC rate-limits the *account*, so
+#: a per-glider cap would multiply by fleet size and produce exactly the
+#: 429 storm the cap exists to prevent.  Its job is to stop an engine
+#: that fires a request per dialog line -- and a surfacing delivers
+#: hundreds of lines in milliseconds -- from melting the server.
+DEFAULT_MAX_OUTSTANDING = 32
+
+#: One line per request and per outcome.  When a glider does something
+#: surprising, this is the artefact that explains why, so it is a
+#: separate logger that a deployment can route to its own file.
+audit_log = logging.getLogger("sfmc_api.engine.audit")
+
 #: Seconds an ``on_event`` may run before the watchdog complains.
 DEFAULT_WATCHDOG_SECONDS = 30.0
 
@@ -112,8 +187,40 @@ DEFAULT_WATCHDOG_SECONDS = 30.0
 DEFAULT_MAX_FAILURES = 5
 
 
+def _summarise(args: tuple[Any, ...], limit: int = 80) -> str:
+    """Short, single-line rendering of call arguments for the audit log.
+
+    Bounded because an upload's arguments can be a whole file, and an
+    audit line that wraps for a page is one nobody reads.
+    """
+    text = ", ".join(repr(a) for a in args)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 class WriteRefused(Exception):
-    """A state-changing operation was requested from a read-only engine."""
+    """A state-changing operation was attempted without ``allow_writes``.
+
+    Delivered as the body of an ``error`` event rather than raised, so
+    an engine handles a blocked write the same way it handles any other
+    failed operation.
+    """
+
+
+class RateLimited(Exception):
+    """Too many requests outstanding; this one was not submitted."""
+
+
+@dataclass(frozen=True)
+class DryRun:
+    """Body of the synthetic ``result`` a dry run answers a write with.
+
+    A distinct type on purpose: an engine that treats it as real server
+    data is making a mistake, and should be able to notice.
+    """
+
+    op: str
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
 
 
 class BaseControlEngine:
@@ -252,6 +359,20 @@ class EngineRunner:
         max_failures: Consecutive ``on_event`` failures before stopping.
             Continuing after one bad event is right for a long mission;
             continuing forever with a wedged engine is not.
+        allow_writes: Permit state-changing operations.  **Off by
+            default**, matching ``sfmc-api-test``'s posture so the
+            project has one rule rather than two.  A blocked write
+            produces an ``error`` event naming this flag, not an
+            exception -- an engine then handles it like any other failed
+            operation.
+        dry_run: Run the engine's full logic, but answer every write
+            with a synthetic :class:`DryRun` result instead of sending
+            it.  Reads still happen, so the engine sees real data and
+            makes real decisions; only the consequences are withheld.
+        max_outstanding: Cap on requests in flight, fleet-wide.
+            Exceeding it produces an ``error`` event rather than
+            queueing silently -- a loop that fires a request per dialog
+            line must fail loudly, not melt the server.
     """
 
     def __init__(
@@ -263,6 +384,9 @@ class EngineRunner:
         max_workers: int = 4,
         watchdog: float | None = DEFAULT_WATCHDOG_SECONDS,
         max_failures: int = DEFAULT_MAX_FAILURES,
+        allow_writes: bool = False,
+        dry_run: bool = False,
+        max_outstanding: int = DEFAULT_MAX_OUTSTANDING,
         fleet: FleetStream | None = None,
         executor: OperationExecutor | None = None,
     ) -> None:
@@ -286,6 +410,10 @@ class EngineRunner:
             executor if executor is not None else OperationExecutor(max_workers=max_workers)
         )
         self._owns_executor = executor is None
+        self.allow_writes = allow_writes
+        self.dry_run = dry_run
+        self._max_outstanding = max_outstanding
+        self._outstanding = 0
         self._request_seq = 0
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -293,6 +421,15 @@ class EngineRunner:
         self._watchdog_thread: threading.Thread | None = None
         self.failures = 0
         engine._runner = self
+        # Stated once at startup: "was this run allowed to touch the
+        # glider?" must be answerable from the log alone.
+        audit_log.info(
+            "engine=%s writes=%s dry_run=%s max_outstanding=%d",
+            type(engine).__name__,
+            "ALLOWED" if allow_writes else "blocked",
+            dry_run,
+            max_outstanding,
+        )
         for name in gliders:
             self.add_glider(name)
 
@@ -340,43 +477,147 @@ class EngineRunner:
         glider: str,
         tag: str | None,
     ) -> int:
+        # Naming something that is not an operation at all is a
+        # programming error, so it raises here.  Everything below this
+        # line is an *operational* condition -- blocked, rate limited,
+        # dry run -- and those are reported as events, so an engine
+        # handles them the same way it handles any other failure rather
+        # than wrapping every request in a try block.
+        if op not in OPERATIONS:
+            raise ValueError(
+                f"{op!r} is not a requestable operation.  "
+                f"Reads: {sorted(READ_OPERATIONS)}.  Writes: {sorted(WRITE_OPERATIONS)}"
+            )
         if self._client is None:
             raise RuntimeError(f"cannot {op!r}: this runner has no client; it is replay-only")
-        if op not in READ_OPERATIONS:
-            kind = (
-                "a state-changing operation"
-                if hasattr(self._client, op)
-                else "not a client operation"
-            )
-            raise WriteRefused(
-                f"{op!r} is {kind}; this engine is read-only "
-                f"(writes are phase 3).  Read operations: {sorted(READ_OPERATIONS)}"
-            )
-        method = getattr(self._client, op)
+
         with self._lock:
             self._request_seq += 1
             request_id = self._request_seq
+        is_write = op in WRITE_OPERATIONS
+        self._audit(request_id, glider, op, args, tag, "requested")
+
+        if is_write and not self.allow_writes:
+            return self._refuse(
+                request_id,
+                glider,
+                op,
+                args,
+                tag,
+                WriteRefused(
+                    f"{op!r} changes state and writes are not enabled; "
+                    "pass allow_writes=True (--allow-writes) to permit it"
+                ),
+            )
+
+        with self._lock:
+            outstanding = self._outstanding
+            if outstanding >= self._max_outstanding:
+                over_cap = True
+            else:
+                over_cap = False
+                self._outstanding += 1
+        if over_cap:
+            return self._refuse(
+                request_id,
+                glider,
+                op,
+                args,
+                tag,
+                RateLimited(
+                    f"{outstanding} requests already outstanding "
+                    f"(cap {self._max_outstanding}); {op!r} was not submitted"
+                ),
+            )
+
+        if is_write and self.dry_run:
+            with self._lock:
+                self._outstanding -= 1
+            self._audit(request_id, glider, op, args, tag, "dry-run")
+            self._merge.publish(
+                glider,
+                "result",
+                DryRun(op=op, args=args, kwargs=dict(kwargs)),
+                request_id=request_id,
+                tag=tag,
+            )
+            return request_id
+
+        method = getattr(self._client, op)
         # Serialized per glider: two operations on one glider must not
         # interleave, while the same two on different gliders may run
         # concurrently.
         future = self._ops.serialized(glider, method, *args, **kwargs)
         future.add_done_callback(
-            self._make_completion(request_id=request_id, glider=glider, tag=tag)
+            self._make_completion(request_id=request_id, glider=glider, op=op, args=args, tag=tag)
         )
         return request_id
 
+    def _refuse(
+        self,
+        request_id: int,
+        glider: str,
+        op: str,
+        args: tuple[Any, ...],
+        tag: str | None,
+        error: Exception,
+    ) -> int:
+        """Report a request that was never submitted, as an error event."""
+        self._audit(request_id, glider, op, args, tag, f"refused: {type(error).__name__}")
+        self._merge.publish(glider, "error", error, request_id=request_id, tag=tag)
+        return request_id
+
+    def _audit(
+        self,
+        request_id: int,
+        glider: str,
+        op: str,
+        args: tuple[Any, ...],
+        tag: str | None,
+        outcome: str,
+        elapsed: float | None = None,
+    ) -> None:
+        audit_log.info(
+            "req=%d glider=%s op=%s args=%s tag=%s %s%s",
+            request_id,
+            glider,
+            op,
+            _summarise(args),
+            tag,
+            outcome,
+            "" if elapsed is None else f" in {elapsed:.2f}s",
+        )
+
     def _make_completion(
-        self, *, request_id: int, glider: str, tag: str | None
+        self,
+        *,
+        request_id: int,
+        glider: str,
+        op: str,
+        args: tuple[Any, ...],
+        tag: str | None,
     ) -> Callable[[Future[Any]], None]:
+        started = time.monotonic()
+
         def completed(future: Future[Any]) -> None:
             try:
                 value: Any = future.result()
-                source = "result"
+                source, outcome = "result", "ok"
             except Exception as exc:
                 value, source = exc, "error"
+                outcome = f"failed: {exc!r}"
+            with self._lock:
+                self._outstanding -= 1
+            self._audit(request_id, glider, op, args, tag, outcome, time.monotonic() - started)
             self._merge.publish(glider, source, value, request_id=request_id, tag=tag)
 
         return completed
+
+    @property
+    def outstanding(self) -> int:
+        """Requests submitted and not yet answered."""
+        with self._lock:
+            return self._outstanding
 
     # ── Running ──────────────────────────────────────────────────────
 
