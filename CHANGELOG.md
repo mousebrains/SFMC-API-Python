@@ -28,6 +28,122 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **XML script engine.**  `sfmc-xml-engine` parses and executes the
+  XML state machine SFMC runs beside the dockserver, so the same
+  behaviour can run from Python — to understand a script
+  (`--describe`), to replay one offline against a recorded dialog log
+  (`--replay`), or to drive a glider (`--glider`).  Split in two on
+  purpose: `XmlStateMachine` is pure — no I/O, no clock of its own,
+  driven by `feed()` and `check_timeout()`, returning the actions a
+  caller may then perform — and `run_live()` wires it to a glider and
+  is the only part that can transmit.  Validated against the real
+  corpus rather than invented examples: all 20 reference scripts parse,
+  and replaying `riot.xml` against dialog captured from osusim
+  reproduces the seven-action sequence documented in that script's own
+  header, matching what the live SFMC engine did.  **Nothing is sent
+  without `--send`** — the default reports what it would do, because
+  the other default is a program that steers a glider the first time
+  somebody runs it to see what it does.  Unknown action types, dangling
+  `toState`, invalid regexes, malformed XML, and immediate-transition
+  cycles are all refused rather than assumed benign.  See
+  [docs/xml_engine.md](docs/xml_engine.md).
+  - **Script chaining.**  `sfmc-xml-engine a.xml b.xml` runs scripts
+    back to back: reaching a final state starts the next.  SFMC's
+    language has no chaining — a `<finalState>` just ends the run, and
+    the corpus has no attribute naming a successor — so this composes
+    at the runner level rather than inventing an attribute, keeping
+    every script in a chain something SFMC itself could run.  It exists
+    for the step SFMC does out of band: `riot.xml` begins by waiting
+    for a surfacing and so cannot start the mission it then shepherds.
+    Each script starts with a fresh match buffer, so a permissive first
+    pattern cannot fire on text that arrived before its script existed.
+  - The XML `timeout` attribute is **minutes**, not seconds.  Every
+    author in the corpus documents it that way — all 22 of `riot.xml`'s
+    timers carry "If nothing within 10 minutes", and
+    `vacuum_test_send_data_2hrs.xml` pairs `timeout="120"` with "a 120
+    minute (2 hours) timeout" — and the SFMC operator confirmed it.
+    Reading it as seconds is a 60x error in the dangerous direction: a
+    script meant to wait ten minutes for a glider to answer would give
+    up after ten seconds and act on the silence.  `Transition` names
+    the unit (`timeout_seconds`, `timeout_minutes`) so the file's
+    number cannot be mistaken for the running one, and a test pins it.
+  - Control characters are sent as literal text (`Ctrl-C`, `Ctrl-R`,
+    `Ctrl-W`), confirmed live against osusim: the dockserver echoes
+    `^C` inline at the head of a glider output line, which also means a
+    control character's reply is not correlated by echo anchoring.
+  - `run_live()` sends `Ctrl-M` after four minutes of dialog silence
+    (`--keepalive`, `0` disables), because SFMC drops the connection
+    after roughly five minutes of inactivity.  A mission in progress
+    produces dialog at least every minute so this never fires; a glider
+    sitting at a GliderDos prompt says nothing at all, and that is
+    where the drop happens.  It only ever sends with `--send`, so a dry
+    run waiting at a quiet prompt will still be dropped.  Two things
+    the first attempt got wrong, both found by running it against a
+    live glider: an empty command is *not* a bare return (SFMC rejects
+    an empty body `HTTP 400`, so nothing was sent), and the resulting
+    exception killed the whole run — losing a link is recoverable,
+    killing a process part-way through steering a glider is not.
+    Keepalive failures are now caught and the run continues.  Validated
+    against osusim: `Ctrl-M` at this cadence held the link `connected`
+    for 6m47s across six keepalives.
+  - `run_live()` survives reconnects.  It now starts its session with
+    `timeout=None`, handing every retry — including the first
+    connection — to the session's own supervisor, instead of raising
+    `TimeoutError` on a transient auth hiccup.  A five minute test
+    survives that; a run lasting hours across many dives does not, and
+    the stream legitimately drops every time the glider submerges.
+    Connects, reconnects, and drops are reported, so a run that never
+    comes up is visible rather than silent.
+  - Keepalives are **off by default**.  They suit a glider parked at a
+    GliderDos prompt; during a mission they inject traffic no script
+    asked for into a vehicle that should be left alone.  The engine
+    cannot reliably tell those apart — `connected` reports the
+    dockserver link, which stays up while the glider is submerged — so
+    gating on connectivity is not enough and the operator decides.
+    Caught by the SFMC operator watching a live run do exactly the
+    wrong thing.
+  - The keepalive also skips a disconnected glider.  A submerged glider is
+    *supposed* to be silent and its link is legitimately down; sending
+    into that keeps nothing alive, and a command accepted for a
+    disconnected glider may be queued and delivered on the next
+    surfacing, injecting a stray return into the very dialog a script
+    is matching against.
+  - `run_live()` is diagnosable.  Every line it prints is UTC
+    timestamped in `sfmc-monitor-glider`'s format, so a run can be
+    lined up against a dialog capture; a reconnect is reported as
+    losing dialog rather than as a neutral event; and a periodic
+    status line carries state, epoch, chunk and byte counts, quiet
+    time, and dropped chunks (`--status-every`, `0` silences).  Prompted
+    by a live run that sat silent through a surfacing: the engine had
+    matched nothing, and with untimestamped output there was no way to
+    tell a missed delivery from a glider that never surfaced.  SFMC
+    sends a surfacing as a single burst — 437 lines inside 10ms,
+    measured — so a reconnect gap does not degrade the dialog, it
+    loses all of it, and a script then waits forever on a trigger that
+    was published into the gap.
+  - `--replay` now strips `sfmc-monitor-glider`'s log prefix.  Its
+    format is `%(asctime)s %(name)s  %(message)s` with a dotted name
+    (`sfmc.osusim.DIALOG`), which the original stripper — written for a
+    bare-uppercase capture format — did not match.  A stripper that
+    fails to match does not skip the line: it falls through to the
+    raw-capture path, feeding the timestamp, the logger name, and the
+    tool's own `INFO` bookkeeping straight to the matcher.
+  - `run_live()` drives the machine from the raw dialog stream, so
+    `--match-mode` means the same thing live as in replay.  It first
+    used reassembled lines, which publish only newline-terminated text
+    and discard the unterminated tail at a session boundary — so an
+    idle GliderDos prompt reached no consumer at all, and the nine of
+    twenty reference scripts that trigger on that prompt would have
+    hung forever at a quiet glider.  Seen three times against osusim as
+    `stream boundary discarded 16-byte unterminated fragment`, which is
+    exactly the length of `GliderDos N -1 >`.
+- **`GliderSession.raw_dialog_listener()` and `on_raw_dialog()`** —
+  the sequence-ordered dialog chunks before line assembly, for
+  consumers that match against the stream rather than against lines.
+  `dialog_listener()` is unchanged and remains right for anything that
+  works in lines; the raw stream exists because a terminal prompt
+  carries no trailing newline, so it never becomes a complete line and
+  a line consumer never sees an idle one.
 - **Command replies.** `client.command_channel(glider)` submits a
   command and captures what the glider says back, returning a
   `CommandReply` instead of only SFMC's acceptance. The reply is

@@ -259,6 +259,11 @@ class GliderSession:
         self._stop = stop if stop is not None else threading.Event()
 
         self._dialog: _Broadcaster[DialogLine] = _Broadcaster()
+        # Raw, pre-assembly dialog text.  Kept as a separate fan-out
+        # because a consumer that matches against the stream needs the
+        # unterminated tail the line assembler is still buffering — see
+        # raw_dialog_listener().
+        self._raw_dialog: _Broadcaster[str] = _Broadcaster()
         self._events: dict[str, _Broadcaster[Any]] = {
             topic: _Broadcaster() for topic in requested if topic != "dialog"
         }
@@ -362,6 +367,7 @@ class GliderSession:
             self._thread.join(timeout=10.0)
             self._thread = None
         self._dialog.close()
+        self._raw_dialog.close()
         for broadcaster in self._events.values():
             broadcaster.close()
         self._ready.clear()
@@ -385,6 +391,36 @@ class GliderSession:
         """Attach a listener to the reassembled dialog line stream."""
         self._require_topic("dialog")
         return self._dialog.attach(maxsize=maxsize)
+
+    def raw_dialog_listener(self, maxsize: int = DEFAULT_LISTENER_MAXSIZE) -> Listener[str]:
+        """Attach a listener to the raw, pre-assembly dialog text.
+
+        Yields each sequence-ordered chunk exactly as it arrived, with
+        no line reassembly: chunks may hold half a line, or three lines
+        and a bit.
+
+        Use this instead of :meth:`dialog_listener` when you match
+        against the stream rather than against lines.  A GliderDos
+        prompt carries no trailing newline, so it never becomes a
+        complete line — it sits in the assembler's buffer and is
+        discarded at the session boundary, meaning a line consumer
+        never sees an idle prompt at all.  Nine of the twenty known
+        SFMC scripts trigger on that prompt, so for them the difference
+        is between working and hanging forever.
+
+        Costs the caller its own reassembly if it also wants lines.
+        """
+        self._require_topic("dialog")
+        return self._raw_dialog.attach(maxsize=maxsize)
+
+    def on_raw_dialog(self, callback: Callable[[str], None]) -> None:
+        """Call *callback* for every raw dialog chunk.
+
+        Same thread rules as :meth:`on_line` — the callback runs on the
+        pump thread, so slow work there delays every other consumer.
+        """
+        self._require_topic("dialog")
+        self._raw_dialog.subscribe(callback)
 
     def listen(
         self, topic: Topic, maxsize: int = DEFAULT_LISTENER_MAXSIZE
@@ -444,6 +480,7 @@ class GliderSession:
         finally:
             self._ready.clear()
             self._dialog.close()
+            self._raw_dialog.close()
             for broadcaster in self._events.values():
                 broadcaster.close()
 
@@ -482,6 +519,10 @@ class GliderSession:
             for data in ordered_dialog(sub):
                 if self._stop.is_set():
                     break
+                # Raw first: a stream matcher must see a prompt at the
+                # moment it arrives, not once something later terminates
+                # the line it sits on.
+                self._raw_dialog.publish(data)
                 for line in assembler.feed(data):
                     self._dialog.publish(line)
             # An unterminated tail at a session boundary is dropped:

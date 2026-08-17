@@ -20,7 +20,7 @@ venv/
 .DS_Store
 *.log
 
-# SFMC server-side XML state-engine scripts, kept locally for reference
-# while designing the control engine.  Not ours to redistribute, and
-# they carry site-specific configuration.
+# SFMC server-side XML state-engine scripts, kept locally as reference
+# input for the XML engine and for the control engine design.  Not ours
+# to redistribute, and they carry site-specific configuration.
 SFMC-XML/

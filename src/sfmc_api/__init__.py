@@ -32,11 +32,24 @@ from .ma_writer import MAX_WAYPOINTS, generate_goto_ma
 from .ops import OperationExecutor, OperationResult
 from .session import GliderSession, Listener
 from .stomp import MAX_SEQUENCE, StompConnection, StompError, StompSubscription
+from .xml_engine import (
+    Action,
+    Script,
+    ScriptError,
+    State,
+    Transition,
+    XmlStateMachine,
+    describe,
+    parse_script,
+    replay,
+    run_live,
+)
 
 __all__ = [
     "MAX_SEQUENCE",
     "MAX_WAYPOINTS",
     "APIError",
+    "Action",
     "AuthenticationError",
     "BaseFollower",
     "CommandChannel",
@@ -55,19 +68,28 @@ __all__ = [
     "SFMCClient",
     "SFMCConfig",
     "SFMCError",
+    "Script",
+    "ScriptError",
     "SensorReading",
+    "State",
     "StompConnection",
     "StompError",
     "StompSubscription",
     "SurfacingEvent",
+    "Transition",
+    "XmlStateMachine",
     "dddmm_to_decimal",
     "decimal_to_dddmm",
+    "describe",
     "dialog_lines",
     "follow_glider",
     "generate_goto_ma",
     "km_to_degrees",
     "load_follower_class",
     "ordered_dialog",
+    "parse_script",
+    "replay",
+    "run_live",
 ]
 
 __version__ = "0.2.0"
