@@ -35,7 +35,7 @@ from .exceptions import (
     SFMCError,
 )
 from .follow_glider import RunStats, follow_glider
-from .follower import BaseFollower, load_follower_class
+from .follower import BaseFollower, FollowerEngine, UploadBatch, load_follower_class
 from .ma_writer import MAX_WAYPOINTS, generate_goto_ma
 from .ops import OperationExecutor, OperationResult
 from .session import GliderSession, Listener
@@ -71,6 +71,7 @@ __all__ = [
     "Event",
     "EventMerge",
     "FleetStream",
+    "FollowerEngine",
     "GliderSession",
     "LineAssembler",
     "Listener",
@@ -92,6 +93,7 @@ __all__ = [
     "StreamNotice",
     "SurfacingEvent",
     "Transition",
+    "UploadBatch",
     "WriteRefused",
     "XmlStateMachine",
     "dddmm_to_decimal",
