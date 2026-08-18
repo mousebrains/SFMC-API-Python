@@ -408,3 +408,130 @@ class TestEventShape:
     def test_default_bound_exceeds_a_real_surfacing_burst(self) -> None:
         """437 lines in ~10ms, measured on osusim 2026-08-17."""
         assert DEFAULT_PAIR_MAXSIZE > 437
+
+
+class TestRaceRegressions:
+    """Guards for races the concurrency review reproduced."""
+
+    def test_concurrent_add_glider_delivers_each_event_once(self) -> None:
+        """Check-then-act let both callers through, and every event
+        arrived twice -- a duplicated command to a vehicle.
+        """
+        import threading as th
+
+        class Slow:
+            """A session whose construction takes time, as a real one does."""
+
+            def __init__(self) -> None:
+                self.epoch = 1
+                self.closed = False
+                self._lines: list[Any] = []
+                time.sleep(0.05)
+
+            def on_line(self, cb: Any) -> None:
+                self._lines.append(cb)
+
+            def on_raw_dialog(self, cb: Any) -> None:
+                pass
+
+            def on_event(self, topic: str, cb: Any) -> None:
+                pass
+
+            def on_connect(self, cb: Any) -> None:
+                pass
+
+            def on_disconnect(self, cb: Any) -> None:
+                pass
+
+            def start(self, timeout: float | None = 30.0) -> Any:
+                return self
+
+            def close(self) -> None:
+                self.closed = True
+
+            def emit(self, text: str) -> None:
+                for cb in self._lines:
+                    cb(type("L", (), {"text": text})())
+
+        fleet = FleetStream(object())  # type: ignore[arg-type]
+        built: list[Slow] = []
+        errors: list[Exception] = []
+
+        def add() -> None:
+            try:
+                session = Slow()
+                built.append(session)
+                fleet.add_glider("osu684", session)  # type: ignore[arg-type]
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [th.Thread(target=add) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        assert len(errors) == 1, "exactly one add must be refused"
+        assert isinstance(errors[0], ValueError)
+        assert fleet.gliders == ("osu684",)
+        # The loser's session must not still be wired into the merge.
+        for session in built:
+            session.emit("one line")
+        delivered = [e for e in iter(lambda: fleet.get(timeout=0.1), None)]
+        assert len(delivered) == 1, f"delivered {len(delivered)} copies of one line"
+
+    def test_adding_after_close_is_refused(self) -> None:
+        """Otherwise a live session outlives the runner, unreachable."""
+        fleet = FleetStream(object())  # type: ignore[arg-type]
+        fleet.close()
+        with pytest.raises(RuntimeError, match="closed"):
+            fleet.add_glider("osu684", object())  # type: ignore[arg-type]
+
+    def test_close_closes_every_session_even_if_one_raises(self) -> None:
+        class Bad:
+            epoch = 1
+
+            def on_line(self, cb: Any) -> None:
+                pass
+
+            def on_raw_dialog(self, cb: Any) -> None:
+                pass
+
+            def on_event(self, topic: str, cb: Any) -> None:
+                pass
+
+            def on_connect(self, cb: Any) -> None:
+                pass
+
+            def on_disconnect(self, cb: Any) -> None:
+                pass
+
+            def start(self, timeout: float | None = 30.0) -> Any:
+                return self
+
+            def close(self) -> None:
+                raise RuntimeError("nope")
+
+        class Good(Bad):
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        fleet = FleetStream(object())  # type: ignore[arg-type]
+        good = Good()
+        fleet.add_glider("bad", Bad())  # type: ignore[arg-type]
+        fleet.add_glider("good", good)  # type: ignore[arg-type]
+        fleet.close()
+
+        assert good.closed, "one failure must not abort the rest"
+        assert fleet.get(timeout=0.1) is None, "and the merge must still close"
+
+    def test_forget_reports_what_it_destroyed(self, caplog: pytest.LogCaptureFixture) -> None:
+        merge = EventMerge(maxsize=2)
+        for i in range(5):
+            merge.publish("osu684", "dialog", i)
+        with caplog.at_level("WARNING"):
+            merge.forget("osu684")
+        assert any("discarded" in r.getMessage() for r in caplog.records)

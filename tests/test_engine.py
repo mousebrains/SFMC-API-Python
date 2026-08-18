@@ -1007,3 +1007,123 @@ class TestEscapeHatchIsGated:
         threading.Timer(0.2, runner.stop).start()
         runner.run()
         assert sent == [], "no flags means no path to the wire"
+
+
+class TestConcurrencyReviewRegressions:
+    """Guards for what the concurrency review found."""
+
+    def test_the_failure_cap_trips_at_a_realistic_arrival_pace(self) -> None:
+        """The bug that passed the obvious test and failed in production.
+
+        The framework publishes an `error` event when on_event raises.
+        Handling that notice used to count as a success and reset the
+        strike counter, so an engine failing on every dialog line
+        oscillated 1 -> 0 forever: totally dead, never stopped, nobody
+        told.  It tripped only when events were pre-queued in a burst,
+        which is how a test naturally gets written.
+        """
+        notified: list[str] = []
+
+        class AlwaysFails(BaseControlEngine):
+            def on_event(self, event: Event) -> None:
+                if event.source == "dialog":
+                    raise ValueError("boom")
+
+            def notify(self, key: str, summary: str, detail: str) -> None:
+                notified.append(key)
+
+        engine = AlwaysFails()
+        runner = _runner(engine, _FakeClient(), max_failures=3)
+
+        def feed() -> None:
+            # One line at a time, as a glider on the link actually sends
+            # them -- never a pre-queued burst.
+            for i in range(40):
+                if runner._stop.is_set():
+                    return
+                runner._merge.publish("osu684", "dialog", i)
+                time.sleep(0.01)
+
+        threading.Thread(target=feed, daemon=True).start()
+        threading.Timer(3.0, runner.stop).start()
+        runner.run()
+
+        assert runner.failures >= 3, "the cap must trip on paced arrival"
+        assert notified == ["engine-failed"], "and the operator must be told"
+
+    def test_an_event_already_dequeued_is_not_discarded_by_stop(self) -> None:
+        seen: list[Any] = []
+
+        class Stopper(BaseControlEngine):
+            def on_event(self, event: Event) -> None:
+                seen.append(event.body)
+                if event.body == "second":
+                    runner.stop()
+
+        engine = Stopper()
+        runner = _runner(engine, _FakeClient())
+        for body in ("first", "second", "third"):
+            runner._merge.publish("osu684", "dialog", body)
+        runner.run()
+        assert "second" in seen, "the event that triggered the stop was still handled"
+
+    def test_run_is_once_only(self) -> None:
+        engine = BaseControlEngine()
+        runner = _runner(engine, _FakeClient())
+        runner.stop()
+        runner.run()
+        with pytest.raises(RuntimeError, match="already run"):
+            runner.run()
+
+    def test_close_shuts_the_pool_even_if_the_fleet_raises(self) -> None:
+        """A skipped merge.close() leaves run() blocked forever."""
+        engine = BaseControlEngine()
+        client = _FakeClient()
+        fleet = FleetStream(client, sources=("dialog",))
+
+        def explode() -> None:
+            raise RuntimeError("close failed")
+
+        runner = EngineRunner(engine, client, fleet=fleet, watchdog=None)
+        runner._owns_fleet = True
+        fleet.close = explode  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="close failed"):
+            runner.close()
+        assert runner._merge.get(timeout=0.1) is None, "the merge was still closed"
+
+    def test_replay_delivers_results(self) -> None:
+        """Replay answered nothing, so the acting half was untestable."""
+        seen: list[str] = []
+
+        class Asker(BaseControlEngine):
+            def on_event(self, event: Event) -> None:
+                seen.append(event.source)
+                if event.source == "dialog":
+                    self.request("get_glider_details", "osusim", glider="osusim", tag="d")
+
+        engine = Asker()
+        runner = _runner(engine, _FakeClient())
+        try:
+            runner.replay(["Vehicle Name: osusim"], glider="osusim", settle=3.0)
+        finally:
+            runner.close()
+        assert "result" in seen, "a replayed engine must see its own answers"
+
+    def test_constructing_a_runner_does_not_touch_the_filesystem(self) -> None:
+        """download_dir is a property whose getter mkdir()s.
+
+        Classifying with getattr invoked it, so building a runner made a
+        directory -- and raised if the path was unwritable, for an
+        engine that never downloads anything.
+        """
+        touched: list[str] = []
+
+        class Nosy(_FakeClient):
+            @property
+            def download_dir(self) -> str:
+                touched.append("evaluated")
+                raise PermissionError("read-only filesystem")
+
+        runner = _runner(BaseControlEngine(), Nosy())
+        runner.close()
+        assert touched == [], "classification must not evaluate properties"
