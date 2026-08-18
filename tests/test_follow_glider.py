@@ -1143,9 +1143,9 @@ class TestWeakDuplicateIdentity:
     missing/garbled — replayed surfacings reproduce identical blocks."""
 
     def test_identical_raw_block_is_duplicate(self) -> None:
-        from sfmc_api.follow_glider import _RecentSurfacingIds
+        from sfmc_api.dialog_parser import SurfacingDeduplicator
 
-        cache = _RecentSurfacingIds()
+        cache = SurfacingDeduplicator()
         lines = ["Carrier Detect found", "GPS Location: ...", "sensor: ..."]
         first = SurfacingEvent(vehicle_name="g", raw_lines=list(lines))
         replayed = SurfacingEvent(vehicle_name="g", raw_lines=list(lines))
@@ -1154,9 +1154,9 @@ class TestWeakDuplicateIdentity:
         assert cache.duplicate_identity(replayed) is not None
 
     def test_distinct_raw_blocks_are_not_duplicates(self) -> None:
-        from sfmc_api.follow_glider import _RecentSurfacingIds
+        from sfmc_api.dialog_parser import SurfacingDeduplicator
 
-        cache = _RecentSurfacingIds()
+        cache = SurfacingDeduplicator()
         first = SurfacingEvent(vehicle_name="g", raw_lines=["block one"])
         second = SurfacingEvent(vehicle_name="g", raw_lines=["block two"])
 
@@ -1166,9 +1166,9 @@ class TestWeakDuplicateIdentity:
     def test_strong_identity_still_used_when_available(self) -> None:
         from datetime import UTC, datetime
 
-        from sfmc_api.follow_glider import _RecentSurfacingIds
+        from sfmc_api.dialog_parser import SurfacingDeduplicator
 
-        cache = _RecentSurfacingIds()
+        cache = SurfacingDeduplicator()
         ts = datetime(2026, 3, 28, 20, 40, 38, tzinfo=UTC)
         first = SurfacingEvent(vehicle_name="g", timestamp=ts, mission_time=1.0)
         # Same time identity, different raw lines (fragmentation varies).
@@ -1300,3 +1300,63 @@ class TestQueueBacklogWarnings:
             follower.send_files(to_glider={"g.ma": "y"})
 
         assert any("upload backlog" in r.message for r in caplog.records)
+
+
+class TestUploadsRequireAllowWrites:
+    """sfmc-follow used to upload by default; now it must be asked.
+
+    One convention across every tool that can move a vehicle: an
+    operator who learns --allow-writes on sfmc-control should not
+    discover that sfmc-follow uploads with no flag at all.
+
+    This is a deliberate breaking change to a deployed tool.  Existing
+    systemd units must add --allow-writes or they will print instead of
+    upload -- loudly, in the log, rather than silently.
+    """
+
+    def test_uploading_is_off_by_default(self) -> None:
+        from sfmc_api.follow_glider import build_parser
+
+        args = build_parser().parse_args(["--glider", "osu685", "--follower", "f.py"])
+        assert args.allow_writes is False
+
+    def test_replay_alone_does_not_upload(self) -> None:
+        """--replay sat in a group called 'simulation modes' and uploaded."""
+        from sfmc_api.follow_glider import build_parser
+
+        args = build_parser().parse_args(
+            ["--glider", "osu685", "--follower", "f.py", "--replay", "d.log"]
+        )
+        assert args.allow_writes is False, "replay must not imply uploading"
+
+
+class TestUploadTargetStaysInsidePipeline:
+    """A single-glider pipeline may not upload to another vehicle.
+
+    send_files(glider=...) exists for formations on sfmc-control.  Used
+    under sfmc-follow, which takes exactly one --glider, it named a
+    vehicle the operator never asked for -- and the upload went through.
+    """
+
+    def test_a_batch_naming_another_glider_is_refused(self) -> None:
+        from queue import Queue
+
+        from sfmc_api.follow_glider import _upload_files
+        from sfmc_api.follower import UploadBatch
+
+        sent: list[tuple[str, str]] = []
+
+        class StubClient:
+            def upload_glider_file_contents(
+                self, glider: str, folder: str, files: dict[str, Any]
+            ) -> dict[str, Any]:
+                sent.append((glider, folder))
+                return {}
+
+        queue_out: Queue[Any] = Queue()
+        queue_out.put(UploadBatch(folders={"to-glider": {"a.ma": "x"}}, glider="osu999"))
+        queue_out.put(UploadBatch(folders={"to-glider": {"b.ma": "y"}}, glider="osu685"))
+        queue_out.put(None)
+        _upload_files(StubClient(), "osu685", queue_out, MagicMock())  # type: ignore[arg-type]
+
+        assert sent == [("osu685", "to-glider")], "only the pipeline's glider"

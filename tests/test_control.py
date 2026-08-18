@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import textwrap
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -206,3 +207,68 @@ class TestExamplesLoad:
             pytest.skip(f"{filename} not present")
         loaded = load_engine_class(path, class_name)
         assert loaded.__name__ == class_name
+
+
+class TestDiveDeadline:
+    """The budget every surfacing decision is spending."""
+
+    def test_it_is_parsed_from_real_dialog(self) -> None:
+        from sfmc_api.dialog_parser import parse_seconds_to_dive
+
+        assert parse_seconds_to_dive("Time until diving is: 295 secs") == 295.0
+        assert parse_seconds_to_dive("Vehicle Name: osusim") is None
+
+    def test_the_stream_tracks_the_countdown(self) -> None:
+        from sfmc_api.dialog_parser import SurfacingStream
+
+        stream = SurfacingStream()
+        assert stream.time_left() is None, "unknown until she says"
+        stream.feed("Time until diving is: 295 secs")
+        assert stream.seconds_to_dive == 295.0
+        stream.feed("Time until diving is: 232 secs")
+        assert stream.seconds_to_dive == 232.0, "the newest value wins"
+        assert 200 < (stream.time_left() or 0) <= 232
+
+    def test_it_is_not_a_field_on_the_event(self) -> None:
+        """It arrives after the event completes, so a field would lie.
+
+        The glider prints it below the sensor block that finishes the
+        surfacing, so an event field would be None almost always.
+        """
+        from sfmc_api.dialog_parser import SurfacingEvent
+
+        assert not hasattr(SurfacingEvent(), "seconds_to_dive")
+
+
+class TestJointDecisionExample:
+    """The example must load, and must degrade when a glider is absent."""
+
+    def _engine(self) -> Any:
+        path = Path(__file__).resolve().parent.parent / "examples"
+        if not (path / "control_engine_joint_decision.py").is_file():  # pragma: no cover
+            pytest.skip("example not present")
+        return load_engine_class(path / "control_engine_joint_decision.py", "JointDecision")
+
+    def test_it_loads_through_the_cli_loader(self) -> None:
+        assert self._engine().__name__ == "JointDecision"
+
+    def test_a_missing_glider_does_not_block_the_decision(self) -> None:
+        """A call-in can be missed; the barrier must still close.
+
+        Waiting for a glider that is not coming spends the whole
+        surfacing window and leaves the glider that *did* surface with
+        nothing -- while looking like a decision was made.
+        """
+        import time as _time
+
+        engine = self._engine()({"max_wait": 0.0})
+        engine._runner = None
+        # Pretend two gliders are configured and only one arrived.
+        type(engine).gliders = property(lambda self: ("osu684", "osu685"))
+        engine.arrived["osu684"] = object()
+        engine.streams["osu684"] = __import__(
+            "sfmc_api.dialog_parser", fromlist=["SurfacingStream"]
+        ).SurfacingStream()
+        engine.round_opened = _time.time() - 1
+        engine._maybe_decide()
+        assert engine.rounds == 1, "it decided rather than waiting forever"

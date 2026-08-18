@@ -1,6 +1,8 @@
 # Design: pluggable control engines
 
-**Status:** proposal, not implemented.
+**Status:** implemented, phases 1-5.  `sfmc-control` ships as a
+console script.  Sections below that describe an intended design
+are marked where the shipped behaviour differs.
 **Depends on:** the session / command / executor layers in PR #12.
 
 ## Context
@@ -109,7 +111,7 @@ appears *inside* dialog text (`Curr Time: ...`) and is what
 | `deployment` | `dict` | low-frequency deployment updates |
 | `result` | return value of the operation | carries `request_id`, `tag` |
 | `error` | the exception | carries `request_id`, `tag` |
-| `dropped` | `DroppedNotice(source, count)` | the engine fell behind |
+| `dropped` | `DroppedNotice(source, count, reason)` | the engine fell behind |
 | `stream` | `StreamNotice(state, epoch)` | connected / disconnected / reconnected |
 | `tick` | `None` | optional periodic wake-up |
 
@@ -231,7 +233,7 @@ The whole surface an engine author must learn:
 
 ```python
 class BaseControlEngine:
-    sources: list[str] = ["dialog"]      # what to subscribe, per glider
+    sources: tuple[str, ...] = ("dialog",)   # what to subscribe, per glider
 
     # ── you implement ────────────────────────────────────────────
     def on_start(self) -> None: ...
@@ -240,8 +242,6 @@ class BaseControlEngine:
 
     # ── you call ─────────────────────────────────────────────────
     def request(self, op: str, *args, glider: str, tag: str | None = None, **kwargs) -> int
-    def subscribe(self, source: str, glider: str | None = None) -> None
-    def unsubscribe(self, source: str, glider: str | None = None) -> None
     def add_glider(self, name: str) -> None
     def remove_glider(self, name: str) -> None
     def log(self, msg: str, *args) -> None
@@ -286,10 +286,16 @@ type checking on the call — mitigated by validating the name against
 `SFMCClient` at engine start, so a typo fails at startup rather than at
 3 a.m. on a surfacing.
 
-`client` remains available as a documented escape hatch for the
-genuinely synchronous case, with a docstring that says plainly: this
-blocks the event loop, nothing else is processed while it runs, and
-none of the safety rails apply.
+`client` remains available as an escape hatch for the genuinely
+synchronous case, with a docstring that says plainly: this blocks the
+event loop, nothing else is processed while it runs, and none of the
+safety rails apply.
+
+**Shipped behaviour is stricter than this paragraph.**  Because nothing
+downstream can tell a read from a write once the client is in hand,
+taking it requires `allow_writes`, is refused under `dry_run`, and is
+logged at `WARNING` to the audit trail — it is the point where that
+trail stops being a complete account of the run.
 
 **Outbound is REST only.**  Worth stating because "initiate output to
 STOMP" is a natural way to describe the goal, and it is not what the
@@ -367,6 +373,72 @@ lie that bites later:
   another is current.  A formation engine must treat its fleet state as
   a set of last-known values with per-glider timestamps, not a
   snapshot.
+
+## Coordinated surfacings, and joint decisions
+
+**Status:** implemented as `examples/control_engine_joint_decision.py`;
+this section records what building it taught.
+
+Two formation cases look similar and are not.
+
+**Independent decisions with shared information** — the usual case.
+Gliders surface at different times, and each decision uses whatever the
+others last reported: position, currents, CTD.  This needs nothing
+beyond what the engine already is.  One thread, fleet state in ordinary
+attributes, values banked as they arrive.
+
+**A joint decision across a coordinated surfacing** — gliders forced up
+together so one decision can modify both behaviours.  This is a
+*barrier*: wait for the formation, then decide once.  It works on the
+existing design, but three things make it harder than it looks.
+
+### A call-in can be missed, and that is normal
+
+A glider may not surface, may surface late, or may surface into a gap
+in our own stream.  The last is not hypothetical: a run of this
+software sat through a real surfacing because SFMC delivers one as a
+single burst and a reconnect had eaten it.
+
+So a barrier must **degrade to deciding with whoever arrived**, never
+block.  Waiting for a glider that is not coming spends the entire
+surfacing window and leaves the glider that *did* surface with nothing
+— while looking, from outside, exactly like a decision was made.
+
+A partial decision is a different decision from the joint one, and an
+engine should know which it made.
+
+### The wait has a deadline the vehicle sets
+
+She announces `Time until diving is: N secs` and then stops listening.
+Any wait is spending that budget, and without it the wait is a guess
+that fails silently.
+
+`SurfacingStream` tracks it live (`seconds_to_dive`, `time_left()`),
+and `parse_seconds_to_dive` is public so nothing reimplements the
+regex.
+
+It is deliberately **not** a field on `SurfacingEvent`: the glider
+prints it *after* the sensor block that completes the event, so the
+field would be `None` almost always — worse than no field.
+
+That ordering has a consequence for the barrier itself, which is easy
+to get wrong: deciding the instant the last glider arrives means
+deciding **before that glider's deadline is known**.  The example waits
+for the next `tick` instead.  Costing one tick to learn how much time
+you have is the right trade inside a window of minutes.
+
+### The one time a snapshot is honest
+
+Elsewhere this document insists a formation engine must treat fleet
+state as last-known values with per-glider timestamps, never a
+snapshot.  That is right when gliders surface independently — one may
+be hours stale while another is current.
+
+A *coordinated* surfacing is the exception, and the reason to force one:
+inside the barrier the states are genuinely contemporaneous, and
+comparing them directly is exactly what the operator arranged.  The
+rule is not "never snapshot" but "never snapshot **unless you made one
+happen**, and then only within the window you created."
 
 ## Backpressure
 

@@ -18,7 +18,7 @@ An engine subclasses :class:`BaseControlEngine`, implements
 :meth:`~BaseControlEngine.on_event`, and acts through
 :meth:`~BaseControlEngine.request`::
 
-    class WatchBattery(ControlEngine):
+    class WatchBattery(BaseControlEngine):
         sources = ("dialog",)
 
         def on_event(self, event):
@@ -59,6 +59,7 @@ would bite later:
 
 from __future__ import annotations
 
+import inspect
 import logging
 import threading
 import time
@@ -77,6 +78,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 __all__ = [
     "DEFAULT_MAX_OUTSTANDING",
+    "ENGINE_FAILURE_TAG",
     "OPERATIONS",
     "READ_OPERATIONS",
     "WRITE_OPERATIONS",
@@ -101,13 +103,22 @@ logger = logging.getLogger(__name__)
 #: An **unmarked** method is not requestable at all.  That is the
 #: fail-safe direction: a new mutating endpoint nobody classified
 #: cannot be called by an engine, rather than defaulting to allowed.
-def _classify(client_cls: type) -> tuple[frozenset[str], frozenset[str]]:
+def _classify(client: object) -> tuple[frozenset[str], frozenset[str]]:
     reads: set[str] = set()
     writes: set[str] = set()
-    for name in dir(client_cls):
+    for name in dir(client):
         if name.startswith("_"):
             continue
-        marker = getattr(getattr(client_cls, name, None), "sfmc_mutates", None)
+        # getattr_static, because plain getattr *invokes* descriptors:
+        # SFMCClient.download_dir is a property whose getter mkdir()s,
+        # so classifying with getattr made merely constructing a runner
+        # create a directory -- and fail outright when the download path
+        # was unwritable, for an engine that never downloads anything.
+        try:
+            attribute = inspect.getattr_static(client, name)
+        except AttributeError:  # pragma: no cover - dir() lied
+            continue
+        marker = getattr(attribute, "sfmc_mutates", None)
         if marker is True:
             writes.add(name)
         elif marker is False:
@@ -120,6 +131,16 @@ READ_OPERATIONS, WRITE_OPERATIONS = _classify(_SFMCClient)
 #: Everything an engine may name in :meth:`BaseControlEngine.request`.
 OPERATIONS = READ_OPERATIONS | WRITE_OPERATIONS
 
+#: Operation pool size, shared by the whole fleet.
+#:
+#: Sized against the server, not the fleet.  SFMC's concurrency limit is
+#: soft, around 20, and depends on the server's own resources -- so this
+#: sits well under it.  It also bounds the starvation
+#: :meth:`~sfmc_api.ops.OperationExecutor.serialized` can cause: that
+#: waits for its per-glider lock *inside* a worker, so a burst aimed at
+#: one surfacing glider occupies workers the rest of the fleet needs.
+DEFAULT_MAX_WORKERS = 8
+
 #: Outstanding requests allowed at once, fleet-wide.
 #:
 #: Fleet-wide rather than per glider: SFMC rate-limits the *account*, so
@@ -127,7 +148,7 @@ OPERATIONS = READ_OPERATIONS | WRITE_OPERATIONS
 #: 429 storm the cap exists to prevent.  Its job is to stop an engine
 #: that fires a request per dialog line -- and a surfacing delivers
 #: hundreds of lines in milliseconds -- from melting the server.
-DEFAULT_MAX_OUTSTANDING = 32
+DEFAULT_MAX_OUTSTANDING = 12
 
 #: One line per request and per outcome.  When a glider does something
 #: surprising, this is the artefact that explains why, so it is a
@@ -136,6 +157,18 @@ audit_log = logging.getLogger("sfmc_api.engine.audit")
 
 #: Seconds an ``on_event`` may run before the watchdog complains.
 DEFAULT_WATCHDOG_SECONDS = 30.0
+
+#: Tag on the ``error`` event the framework publishes when ``on_event``
+#: itself raises.
+#:
+#: Distinguishable on purpose.  Handling that notice used to count as a
+#: success and reset the strike counter, so an engine failing on *every*
+#: dialog line oscillated 1 -> 0 forever and the cap never tripped: the
+#: engine was totally dead on its primary source and nobody was told.
+#: It tripped only when events were already queued in a burst -- which
+#: is how a test gets written, so it passed the test and failed in
+#: production.
+ENGINE_FAILURE_TAG = "engine-failure"
 
 #: Consecutive ``on_event`` failures before the runner gives up.
 DEFAULT_MAX_FAILURES = 5
@@ -244,8 +277,14 @@ class BaseControlEngine:
                 tagged with.
             tag: Your label, echoed back on the result.
 
-        Raises:
-            WriteRefused: If *op* changes state.  Phase 2 is read-only.
+        Returns:
+            A request id.  **This does not raise for a blocked write** —
+            a refusal (writes not enabled, rate cap reached) arrives as
+            an ``error`` event carrying :class:`WriteRefused` or
+            :class:`RateLimited`, so an engine handles it exactly like
+            any other failed operation.  It *does* raise ``ValueError``
+            if *op* is not a requestable operation at all, because that
+            is a bug in the engine rather than an operational condition.
         """
         return self._require_runner()._request(op, args, kwargs, glider=glider, tag=tag)
 
@@ -264,9 +303,9 @@ class BaseControlEngine:
     def notify(self, key: str, summary: str, detail: str) -> None:
         """Raise an operator-visible notification.
 
-        Phase 2 logs it.  Wiring this to the existing disconnect
-        notifier is deliberately left for the phase that also has to
-        decide de-duplication policy.
+        Logged here.  :class:`~sfmc_api.follower.FollowerEngine` passes a
+        notifier through to a wrapped follower; ``sfmc-control`` does not
+        yet construct one, so under that CLI this is log-only.
         """
         logger.warning("%s [%s] %s: %s", type(self).__name__, key, summary, detail)
 
@@ -283,6 +322,16 @@ class BaseControlEngine:
         it runs — no other glider's dialog, no results — and none of the
         framework's safety rails apply to what you do with it.  Prefer
         :meth:`request`.
+
+        Because nothing downstream can tell a read from a write once the
+        client is in hand, taking it requires ``allow_writes`` and is
+        refused under a dry run.  Every access is logged at ``WARNING``
+        to the audit trail, since it is the point where that trail stops
+        being a complete account of what the run did.
+
+        Raises:
+            WriteRefused: If writes are not enabled, or this is a dry
+                run.
         """
         return self._require_runner().client
 
@@ -313,6 +362,10 @@ class EngineRunner:
         max_failures: Consecutive ``on_event`` failures before stopping.
             Continuing after one bad event is right for a long mission;
             continuing forever with a wedged engine is not.
+        final_drain: Seconds to let work queued during shutdown finish.
+            ``sfmc-follow`` waits 45 s for the same reason: a steering
+            file queued just before a disconnect must still be uploaded,
+            or the glider flies stale waypoints for the whole next dive.
         allow_writes: Permit state-changing operations.  **Off by
             default**, matching ``sfmc-api-test``'s posture so the
             project has one rule rather than two.  A blocked write
@@ -342,9 +395,10 @@ class EngineRunner:
         client: SFMCClient | None = None,
         *,
         gliders: Iterable[str] = (),
-        max_workers: int = 4,
+        max_workers: int = DEFAULT_MAX_WORKERS,
         watchdog: float | None = DEFAULT_WATCHDOG_SECONDS,
         max_failures: int = DEFAULT_MAX_FAILURES,
+        final_drain: float = 45.0,
         allow_writes: bool = False,
         dry_run: bool = False,
         max_outstanding: int = DEFAULT_MAX_OUTSTANDING,
@@ -354,8 +408,13 @@ class EngineRunner:
     ) -> None:
         self._engine = engine
         self._client = client
+        # Default to the base class's classification; _validate narrows
+        # these to the actual client instance when there is one.
+        self.reads: frozenset[str] = READ_OPERATIONS
+        self.writes: frozenset[str] = WRITE_OPERATIONS
         self._watchdog = watchdog
         self._max_failures = max_failures
+        self._final_drain = final_drain
         self._validate(engine, client)
         if fleet is not None:
             self._fleet: FleetStream | None = fleet
@@ -371,6 +430,7 @@ class EngineRunner:
         self._ops = (
             executor if executor is not None else OperationExecutor(max_workers=max_workers)
         )
+        self._owns_fleet = fleet is None
         self._owns_executor = executor is None
         self._tick = tick
         self._tick_thread: threading.Thread | None = None
@@ -384,6 +444,7 @@ class EngineRunner:
         self._in_flight: tuple[Event, float] | None = None
         self._watchdog_thread: threading.Thread | None = None
         self.failures = 0
+        self._ran = False
         engine._runner = self
         # Stated once at startup: "was this run allowed to touch the
         # glider?" must be answerable from the log alone.
@@ -394,8 +455,14 @@ class EngineRunner:
             dry_run,
             max_outstanding,
         )
-        for name in gliders:
-            self.add_glider(name)
+        try:
+            for name in gliders:
+                self.add_glider(name)
+        except Exception:
+            # The caller never receives this object, so nothing else can
+            # ever close what we already started.
+            self.close()
+            raise
 
     def _validate(self, engine: BaseControlEngine, client: SFMCClient | None) -> None:
         """Fail at construction, not at 3 a.m. on a surfacing."""
@@ -403,9 +470,28 @@ class EngineRunner:
             raise ValueError("engine.sources is empty; nothing would ever arrive")
         if client is None:
             return
-        missing = sorted(op for op in READ_OPERATIONS if not hasattr(client, op))
+        missing = sorted(op for op in OPERATIONS if not hasattr(client, op))
         if missing:
             raise ValueError(f"client has no such operation(s): {missing}")
+        # Classification follows the *client we were given*, not
+        # SFMCClient.  A subclass that overrides a read to issue a PUT
+        # loses the marker with the method it replaced, so it becomes
+        # unmarked -- and unmarked means not requestable, which is the
+        # fail-safe direction.  Classifying the base class instead would
+        # have kept calling it a read and let the PUT through.
+        self.reads, self.writes = _classify(client)
+        if not self.reads and not self.writes:
+            raise ValueError(
+                f"{type(client).__name__} exposes no @reads/@mutates operations. "
+                "A client whose attributes resolve dynamically (Mock, autospec, a "
+                "delegating proxy) classifies as nothing, and every request would "
+                "then fail one at a time instead of here."
+            )
+
+    @property
+    def operations(self) -> frozenset[str]:
+        """Everything this runner's client may be asked to do."""
+        return self.reads | self.writes
 
     # ── Fleet ────────────────────────────────────────────────────────
 
@@ -415,14 +501,46 @@ class EngineRunner:
 
     @property
     def client(self) -> SFMCClient:
+        """The raw client, gated and audited.  See the engine docstring.
+
+        Refused unless writes are enabled, because nothing downstream of
+        here can tell a read from a write: handing out the client hands
+        out every endpoint on it.  Refused under a dry run for the same
+        reason -- that mode promises nothing reaches the glider, and a
+        raw client cannot honour a promise it does not know about.
+        """
         if self._client is None:
             raise RuntimeError("this runner has no client; it is replay-only")
+        if not self.allow_writes:
+            raise WriteRefused(
+                "the raw client bypasses the write gate, the rate cap and the "
+                "audit log, so it is refused unless writes are enabled; "
+                "pass allow_writes=True (--allow-writes), or use request()"
+            )
+        if self.dry_run:
+            raise WriteRefused(
+                "a dry run promises nothing reaches the glider, and the raw "
+                "client cannot honour that; use request(), which is simulated"
+            )
+        # Audited at WARNING, and loudly, because from here on the trail
+        # goes cold: the banner at startup says what the run was allowed
+        # to do, and this is the moment that stops being the whole story.
+        audit_log.warning(
+            "engine=%s took the raw client ESCAPE HATCH: "
+            "operations from here are unaudited and ungated",
+            type(self._engine).__name__,
+        )
         return self._client
 
     def add_glider(self, name: str) -> None:
+        # Audited: an engine adding a glider widens what this run
+        # touches, and that moment was previously invisible -- only the
+        # writes that followed were recorded.
+        audit_log.info("fleet: adding %s", name)
         self._require_fleet().add_glider(name)
 
     def remove_glider(self, name: str) -> None:
+        audit_log.info("fleet: removing %s", name)
         self._require_fleet().remove_glider(name)
 
     def _require_fleet(self) -> FleetStream:
@@ -447,20 +565,40 @@ class EngineRunner:
         # dry run -- and those are reported as events, so an engine
         # handles them the same way it handles any other failure rather
         # than wrapping every request in a try block.
-        if op not in OPERATIONS:
+        if op not in self.operations:
             raise ValueError(
-                f"{op!r} is not a requestable operation.  "
-                f"Reads: {sorted(READ_OPERATIONS)}.  Writes: {sorted(WRITE_OPERATIONS)}"
+                f"{op!r} is not a requestable operation on "
+                f"{type(self._client).__name__}.  "
+                f"Reads: {sorted(self.reads)}.  Writes: {sorted(self.writes)}"
             )
-        if self._client is None:
+        is_write_op = op in self.writes
+        if self._client is None and not (is_write_op and self.dry_run):
             raise RuntimeError(f"cannot {op!r}: this runner has no client; it is replay-only")
 
         with self._lock:
             self._request_seq += 1
             request_id = self._request_seq
-        is_write = op in WRITE_OPERATIONS
-        self._audit(request_id, glider, op, args, tag, "requested")
+        is_write = op in self.writes
+        self._audit(request_id, glider, op, args, tag, "requested", kwargs=kwargs)
 
+        if is_write and self._fleet is not None and glider not in self.gliders:
+            # Warned, not refused, and deliberately so.  `glider` is the
+            # serialisation *key*, which this module documents as not
+            # necessarily a glider at all -- register_glider names a new
+            # one, upload_cache_files names a group.  Refusing on it
+            # blocked those outright while stopping nothing: the actual
+            # target is an argument, so relabelling the request walked
+            # straight through.  A rail that can be stepped over is worse
+            # than none, because it is believed.  Enforcing a real scope
+            # needs a per-operation map of which argument names the
+            # vehicle; until that exists this is a signal, not a gate.
+            audit_log.warning(
+                "req=%d key=%s is outside this run's fleet (%s); "
+                "--glider is what is streamed, not a capability boundary",
+                request_id,
+                glider,
+                ", ".join(self.gliders) or "none",
+            )
         if is_write and not self.allow_writes:
             return self._refuse(
                 request_id,
@@ -497,7 +635,7 @@ class EngineRunner:
         if is_write and self.dry_run:
             with self._lock:
                 self._outstanding -= 1
-            self._audit(request_id, glider, op, args, tag, "dry-run")
+            self._audit(request_id, glider, op, args, tag, "dry-run", kwargs=kwargs)
             self._merge.publish(
                 glider,
                 "result",
@@ -507,11 +645,22 @@ class EngineRunner:
             )
             return request_id
 
-        method = getattr(self._client, op)
-        # Serialized per glider: two operations on one glider must not
-        # interleave, while the same two on different gliders may run
-        # concurrently.
-        future = self._ops.serialized(glider, method, *args, **kwargs)
+        try:
+            method = getattr(self._client, op)
+            # Serialized per glider: two operations on one glider must
+            # not interleave, while the same two on different gliders
+            # may run concurrently.
+            future = self._ops.serialized(glider, method, *args, **kwargs)
+        except Exception as exc:
+            # The slot must come back.  Without this, a client missing a
+            # method, or a pool shut down under us, leaks one slot per
+            # attempt until the cap is full -- and then every request,
+            # including reads, is refused forever.  A watching engine
+            # goes silently blind, which is the worst failure this
+            # system has.
+            with self._lock:
+                self._outstanding -= 1
+            return self._refuse(request_id, glider, op, args, tag, exc)
         future.add_done_callback(
             self._make_completion(request_id=request_id, glider=glider, op=op, args=args, tag=tag)
         )
@@ -540,13 +689,18 @@ class EngineRunner:
         tag: str | None,
         outcome: str,
         elapsed: float | None = None,
+        kwargs: dict[str, Any] | None = None,
     ) -> None:
+        # kwargs are logged because the calling convention puts real
+        # payloads there: request("send_command", command="abort") used
+        # to audit as args= -- empty -- while an abort went to a glider.
         audit_log.info(
-            "req=%d glider=%s op=%s args=%s tag=%s %s%s",
+            "req=%d glider=%s op=%s args=%s%s tag=%s %s%s",
             request_id,
             glider,
             op,
             _summarise(args),
+            "" if not kwargs else " " + _summarise(tuple(f"{k}={v!r}" for k, v in kwargs.items())),
             tag,
             outcome,
             "" if elapsed is None else f" in {elapsed:.2f}s",
@@ -586,21 +740,45 @@ class EngineRunner:
     # ── Running ──────────────────────────────────────────────────────
 
     def run(self) -> None:
-        """Drive the engine until :meth:`stop`.  Blocks; owns this thread."""
+        """Drive the engine until :meth:`stop`.  Blocks; owns this thread.
+
+        Once only.  Guarantee 1 says ``on_start`` and ``on_stop`` are
+        called once, and a second ``run()`` would call both again and
+        start a second watchdog and tick thread.
+        """
+        if self._ran:
+            raise RuntimeError("this runner has already run; construct another")
+        self._ran = True
         self._start_watchdog()
         self._start_ticks()
         try:
             self._engine.on_start()
             for event in self._merge:
+                # Delivered before the stop check: this event is already
+                # off the queue, and dropping it here loses it with no
+                # accounting -- the one thing backpressure exists to
+                # prevent.
+                self._deliver(event)
                 if self._stop.is_set():
                     break
-                self._deliver(event)
         finally:
             self._stop.set()
+            abandoned = self._merge.pending()
+            if abandoned:
+                logger.warning(
+                    "stopping with %d event(s) undelivered; they are discarded", abandoned
+                )
             try:
                 self._engine.on_stop()
             except Exception:
                 logger.exception("%s.on_stop failed", type(self._engine).__name__)
+            # on_stop may queue work -- a follower flushes a part-built
+            # surfacing and its files land here.  Closing immediately
+            # submitted those and then cancelled them, which reverses
+            # what the deployed pipeline promises out loud: files queued
+            # just before a disconnect must still be uploaded, or the
+            # glider flies stale waypoints for the whole next dive.
+            self._drain_final(self._final_drain)
             self.close()
 
     def _deliver(self, event: Event) -> None:
@@ -631,14 +809,46 @@ class EngineRunner:
             # Tell the engine about its own failure, once, rather than
             # silently swallowing it.  A handler that also raises just
             # advances the strike counter, which is bounded.
-            self._merge.publish(event.glider, "error", exc)
+            self._merge.publish(event.glider, "error", exc, tag=ENGINE_FAILURE_TAG)
         else:
-            self.failures = 0
+            # Surviving the framework's own crash notice is not evidence
+            # the engine has recovered -- it is the one event such an
+            # engine is most likely to handle.  Counting it as success
+            # is what pinned the counter below the cap forever.
+            if not (event.source == "error" and event.tag == ENGINE_FAILURE_TAG):
+                self.failures = 0
         finally:
             with self._lock:
                 self._in_flight = None
 
-    def replay(self, dialog: Iterable[str], glider: str) -> None:
+    def _settle(self, timeout: float) -> None:
+        """Deliver whatever outstanding requests still owe us.
+
+        Without this a replay answered nothing: the drain uses a zero
+        timeout, so it always ran before any operation could finish, and
+        an engine's whole request/response half looked like it simply
+        never replied.  Replay is meant to be the path of least
+        resistance for developing a control algorithm, so it has to
+        exercise the half that acts.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            event = self._merge.get(timeout=0.02)
+            if event is not None:
+                self._deliver(event)
+                continue
+            if not self.outstanding:
+                return
+            if self._merge._closed:
+                time.sleep(0.05)
+        if self.outstanding:
+            logger.warning(
+                "replay finished with %d request(s) still outstanding after %.0fs",
+                self.outstanding,
+                timeout,
+            )
+
+    def replay(self, dialog: Iterable[str], glider: str, *, settle: float = 5.0) -> None:
         """Drive the engine from recorded dialog, with no network.
 
         A scientist should be able to test a control algorithm without
@@ -647,8 +857,8 @@ class EngineRunner:
         the client can serve them, so pass a stub client for a fully
         offline run.
         """
-        self._engine.on_start()
         try:
+            self._engine.on_start()
             for line in dialog:
                 if self._stop.is_set():
                     break
@@ -659,6 +869,7 @@ class EngineRunner:
                 # order rather than piling up behind the next one.
                 while (queued := self._merge.get(timeout=0)) is not None:
                     self._deliver(queued)
+            self._settle(settle)
         finally:
             self._engine.on_stop()
 
@@ -680,6 +891,20 @@ class EngineRunner:
 
         self._tick_thread = threading.Thread(target=beat, daemon=True, name="sfmc-engine-tick")
         self._tick_thread.start()
+
+    def _drain_final(self, timeout: float) -> None:
+        """Let work queued during shutdown finish before the pool closes."""
+        if timeout <= 0 or not self.outstanding:
+            return
+        deadline = time.monotonic() + timeout
+        while self.outstanding and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if self.outstanding:
+            logger.warning(
+                "shutting down with %d request(s) unfinished after %.0fs; they are cancelled",
+                self.outstanding,
+                timeout,
+            )
 
     # ── Watchdog ─────────────────────────────────────────────────────
 
@@ -719,11 +944,26 @@ class EngineRunner:
         self._merge.close()
 
     def close(self) -> None:
-        """Release the fleet and the pool."""
-        if self._fleet is not None:
-            self._fleet.close()
-        if self._owns_executor:
-            self._ops.shutdown(wait=False, cancel_pending=True)
+        """Release the fleet and the pool.  Every step, even after a failure.
+
+        Sequenced with ``finally`` rather than in a row: a raising
+        ``fleet.close()`` used to skip the pool shutdown, leaving
+        in-flight operations -- including writes to a glider -- running
+        after the runner had ostensibly closed.
+        """
+        try:
+            if self._fleet is not None and self._owns_fleet:
+                self._fleet.close()
+        finally:
+            try:
+                if self._owns_fleet:
+                    # An injected fleet's merge belongs to its owner;
+                    # closing it left their sessions live and permanently
+                    # blinded the next runner built on that fleet.
+                    self._merge.close()
+            finally:
+                if self._owns_executor:
+                    self._ops.shutdown(wait=False, cancel_pending=True)
 
     def __enter__(self) -> EngineRunner:
         return self

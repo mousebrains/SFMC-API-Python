@@ -28,6 +28,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **[docs/control_engine.md](docs/control_engine.md)** — `sfmc-control`
+  had shipped with no user-facing documentation at all, described only
+  in a design document that still called itself "not implemented".  It
+  is the entry point that can command a glider.
+
+### Changed
+
+- **BREAKING: `sfmc-follow` requires `--allow-writes` to upload.**
+  Without it, generated files are printed instead of sent.  Every tool
+  that can move a vehicle now uses the same opt-in, because an operator
+  who learns `--allow-writes` on `sfmc-control` should not discover that
+  `sfmc-follow` uploaded with no flag at all.  **Existing systemd units
+  and scripts must add the flag** or they will print rather than upload.
+- **BREAKING: `sfmc-follow --replay` no longer uploads by default.**  It
+  sat in an argparse group titled "simulation modes" while PUTting
+  steering files — computed from stale recorded positions — onto a live
+  glider, and `--replay` means genuinely offline in every other tool.
+  `--replay --allow-writes` still does it, warns loudly, and no longer
+  skips the glider-existence check on that path.
+- A batch naming a glider other than the pipeline's is refused by
+  `sfmc-follow`, which takes a single `--glider`; formations belong on
+  `sfmc-control`.
+- `--glider` on `sfmc-control` is documented as what is streamed, not a
+  capability boundary.  The rail that refused out-of-fleet writes tested
+  the serialisation key, so it blocked `register_glider` while stopping
+  nothing — relabelling a request walked through it.  Now an audited
+  warning.
+
+### Fixed
+
+- The keepalive validation claim was arithmetically impossible: six
+  keepalives four minutes apart cannot span 6m47s.  The measured run
+  used ~68s spacing, so what it shows is that `Ctrl-M` works, not that
+  the 240s default is short enough — that figure follows a reported
+  ~5 minute idle drop and remains untested.  Corrected in the constant,
+  the CLI help and the docs, all three of which repeated it.
+- `SurfacingStream` now filters blank lines, which `sfmc-follow` always
+  did and `FollowerEngine` did not — one blank line inside the sensor
+  block truncated a surfacing and dropped every sensor after it, so the
+  same dialog produced different events on the two paths.
+- `SurfacingStream.reset()` clears the dive deadline, which belonged to
+  the surfacing that just ended; keeping it made a waiting controller
+  stop waiting immediately.
+- A dry run no longer needs a client, so the documented offline
+  development loop works instead of crashing.
+- `EngineRunner.close()` no longer closes a fleet it does not own.
+- A client whose attributes resolve dynamically (Mock, autospec, a
+  proxy) is rejected at construction rather than failing one request at
+  a time with a self-contradicting message.
+- `sfmc-control` installs SIGINT/SIGTERM handlers and its
+  `--max-runtime` timer is a daemon, so it stops cleanly under systemd
+  and does not outlive Ctrl-C.
+
+- **The dive deadline is available to engines.**
+  `parse_seconds_to_dive` and `SurfacingStream.time_left()` expose
+  `Time until diving is: N secs` — the budget every surfacing decision
+  is spending.  A controller that waits (for a second glider, for a
+  Zmodem transfer to end) was previously guessing, and a wait that
+  outlives the surfacing fails silently: she dives, and the thing that
+  was waiting simply never acted.  Deliberately *not* a field on
+  `SurfacingEvent`, because the glider prints it after the sensor block
+  that completes the event, so the field would be `None` almost always.
+- **`examples/control_engine_joint_decision.py`** — two gliders forced
+  to surface together, one joint decision.  The barrier degrades to
+  deciding with whoever arrived rather than blocking, because a
+  call-in can be missed and waiting for a glider that is not coming
+  leaves the one that *did* surface with nothing while looking like a
+  decision was made.
+- **`sfmc-control --follower FILE`** runs an existing `BaseFollower` on
+  the engine, which is what the `FollowerEngine` docstring had been
+  advertising: the CLI constructed engines as `engine_class(config)`,
+  so that path did not exist.
+
 - **Control engine, phase 5: followers fold in as a specialisation.**
   `FollowerEngine` runs any existing `BaseFollower` on the control
   engine, so a follower gains formations, the safety rails, and the

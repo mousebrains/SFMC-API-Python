@@ -40,9 +40,11 @@ flags                                what reaches the glider
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
 import inspect
 import logging
+import signal
 import sys
 import threading
 from pathlib import Path
@@ -165,8 +167,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Registered glider name.  Repeat for a formation.",
     )
     parser.add_argument(
+        "--follower",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Run an existing BaseFollower on the engine instead of a control "
+            "engine.  It gains formations and the safety rails unchanged."
+        ),
+    )
+    parser.add_argument(
         "--engine",
-        required=True,
         metavar="FILE",
         help="Path to a Python file containing the engine class",
     )
@@ -256,6 +266,8 @@ def main(argv: list[str] | None = None) -> int:
     """Entry point for ``sfmc-control``."""
     parser = build_parser()
     args = parser.parse_args(argv)
+    if bool(args.engine) == bool(args.follower):
+        parser.error("give exactly one of --engine or --follower")
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -272,13 +284,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.replay and len(args.gliders) > 1:
         parser.error("--replay drives a single glider; give exactly one --glider")
 
+    config = _load_config(args.config)
     try:
-        engine_class = load_engine_class(args.engine, args.class_name)
+        if args.follower:
+            from .follower import FollowerEngine, load_follower_class
+
+            engine: BaseControlEngine = FollowerEngine(
+                load_follower_class(args.follower, args.class_name), config
+            )
+        else:
+            engine = load_engine_class(args.engine, args.class_name)(config)
     except (FileNotFoundError, ValueError, ImportError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-
-    engine = engine_class(_load_config(args.config))
     extra: dict[str, Any] = {}
     if args.max_outstanding is not None:
         extra["max_outstanding"] = args.max_outstanding
@@ -314,7 +332,25 @@ def main(argv: list[str] | None = None) -> int:
             **extra,
         )
         if args.max_runtime:
-            threading.Timer(args.max_runtime, runner.stop).start()
+            # daemon=True: a non-daemon Timer kept the process alive for
+            # the full --max-runtime after Ctrl-C, so a day-long run took
+            # a day to exit.
+            timer = threading.Timer(args.max_runtime, runner.stop)
+            timer.daemon = True
+            timer.start()
+
+        # Every other long-running command handles these; this one did
+        # not, so `systemctl stop` killed it outright -- no on_stop, no
+        # parser flush, no upload drain -- on the only entry point that
+        # can command a glider.
+        def request_stop(signum: int, frame: object) -> None:
+            del signum, frame
+            logger.info("stop requested; draining")
+            runner.stop()
+
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with contextlib.suppress(ValueError):
+                signal.signal(sig, request_stop)
         try:
             runner.run()
         except KeyboardInterrupt:

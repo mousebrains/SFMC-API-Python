@@ -139,7 +139,6 @@ import signal
 import sys
 import threading
 import time
-from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -147,7 +146,11 @@ from queue import Queue
 from typing import Any
 
 from sfmc_api.client import SFMCClient
-from sfmc_api.dialog_parser import DialogParser, SurfacingEvent
+from sfmc_api.dialog_parser import (
+    DialogParser,
+    SurfacingDeduplicator,
+    SurfacingEvent,
+)
 from sfmc_api.dialog_stream import LineAssembler, ordered_dialog
 from sfmc_api.disconnect_notify import (
     DisconnectNotifier,
@@ -318,38 +321,6 @@ def _open_replay(
 # ── Dialog reader thread (shared by live and replay) ────────────────
 
 
-class _RecentSurfacingIds:
-    """Bounded de-duplication cache for strong surfacing identities."""
-
-    def __init__(self, maxsize: int = 128) -> None:
-        self._maxsize = maxsize
-        self._ordered: deque[tuple[Any, ...]] = deque()
-        self._known: set[tuple[Any, ...]] = set()
-
-    def duplicate_identity(self, event: SurfacingEvent) -> tuple[Any, ...] | None:
-        if event.timestamp is not None and event.mission_time is not None:
-            identity: tuple[Any, ...] = (
-                event.vehicle_name,
-                event.timestamp,
-                event.mission_time,
-            )
-        else:
-            # Weak fallback: a surfacing whose Curr Time line was
-            # dropped or garbled still reproduces the identical raw
-            # dialog block when SFMC's resubscribe replay re-delivers
-            # it, so its content identifies it.  Treating "no identity"
-            # as "not a duplicate" delivered the same surfacing to the
-            # follower twice across a reconnect.
-            identity = (event.vehicle_name, "raw-lines", hash(tuple(event.raw_lines)))
-        if identity in self._known:
-            return identity
-        if len(self._ordered) >= self._maxsize:
-            self._known.remove(self._ordered.popleft())
-        self._ordered.append(identity)
-        self._known.add(identity)
-        return None
-
-
 #: Queue depth beyond which a backlog warning is logged.  Surfacings
 #: arrive hours apart, so more than this many waiting means the
 #: follower has been stuck or too slow for days.
@@ -360,7 +331,7 @@ def _deliver_surfacing(
     event: SurfacingEvent | None,
     queue_in: Queue[SurfacingEvent | None],
     stats: RunStats | None,
-    recent_ids: _RecentSurfacingIds | None,
+    recent_ids: SurfacingDeduplicator | None,
     info_log: logging.Logger | None,
 ) -> bool:
     if event is None:
@@ -391,7 +362,7 @@ def _finish_dialog_session(
     dialog_log: logging.Logger | None,
     flush_unterminated: bool,
     stats: RunStats | None,
-    recent_ids: _RecentSurfacingIds | None,
+    recent_ids: SurfacingDeduplicator | None,
     info_log: logging.Logger | None,
 ) -> None:
     pending_bytes = len(assembler.pending.encode("utf-8"))
@@ -424,7 +395,7 @@ def _read_dialog(
     stop: threading.Event,
     event_interval: float = 0.0,
     stats: RunStats | None = None,
-    recent_ids: _RecentSurfacingIds | None = None,
+    recent_ids: SurfacingDeduplicator | None = None,
     info_log: logging.Logger | None = None,
     flush_unterminated: bool = True,
 ) -> None:
@@ -551,6 +522,22 @@ def _upload_files(
             folders = output
             target = glider_name
 
+        if target != glider_name:
+            # sfmc-follow takes exactly one --glider, so a batch naming
+            # another vehicle is by construction outside what the
+            # operator asked for.  Formations belong on sfmc-control,
+            # where the fleet is declared.
+            upload_log.error(
+                "refusing upload to %s: this pipeline was started for %s. "
+                "send_files(glider=...) naming another vehicle needs sfmc-control "
+                "with that glider in --glider",
+                target,
+                glider_name,
+            )
+            if stats is not None:
+                stats.incr_upload_errors()
+            continue
+
         for folder, files in folders.items():
             if not files:
                 continue
@@ -586,8 +573,12 @@ def _upload_files(
                     else:
                         time.sleep(delay)
                 else:
+                    # Naming the glider matters: without it neither
+                    # this log nor --dry-run can reveal a mistargeted
+                    # upload.
                     upload_log.info(
-                        "Uploaded to %s: %s",
+                        "Uploaded to %s %s: %s",
+                        target,
                         folder,
                         filenames,
                     )
@@ -603,6 +594,7 @@ def _print_files(
     queue_out: Queue[UploadBatch | dict[str, dict[str, str | bytes]] | None],
     output_log: logging.Logger,
     stats: RunStats | None = None,
+    glider_name: str = "?",
 ) -> None:
     """Print generated files instead of uploading them.
 
@@ -618,7 +610,10 @@ def _print_files(
         if output is None:
             break
 
-        folders = output.folders if isinstance(output, UploadBatch) else output
+        if isinstance(output, UploadBatch):
+            folders, target = output.folders, output.glider or glider_name
+        else:
+            folders, target = output, glider_name
         for folder, files in folders.items():
             if not files:
                 continue
@@ -629,8 +624,12 @@ def _print_files(
                 else:
                     byte_count = len(content.encode("utf-8"))
                     display = content
+                # The target is named so a dry run can reveal a
+                # mistargeted upload, which is most of what a dry run
+                # is for.
                 output_log.info(
-                    "[dry-run] %s/%s (%d bytes):\n%s",
+                    "[dry-run] -> %s %s/%s (%d bytes):\n%s",
+                    target,
                     folder,
                     filename,
                     byte_count,
@@ -789,7 +788,7 @@ def _run_live_dialog_sessions(
     info_log: logging.Logger,
     stop: threading.Event,
     stats: RunStats,
-    recent_ids: _RecentSurfacingIds,
+    recent_ids: SurfacingDeduplicator,
     follower: BaseFollower,
     output_thread: threading.Thread,
     output_results: queue.Queue[_ThreadResult],
@@ -861,7 +860,7 @@ def _run_replay_dialog(
     info_log: logging.Logger,
     stop: threading.Event,
     stats: RunStats,
-    recent_ids: _RecentSurfacingIds,
+    recent_ids: SurfacingDeduplicator,
     follower: BaseFollower,
     output_thread: threading.Thread,
     output_results: queue.Queue[_ThreadResult],
@@ -1052,8 +1051,12 @@ def follow_glider(
     if replay and not dry_run and client is None:
         raise ValueError("client is required for replay + upload mode")
 
-    # ── Verify glider exists (skip in offline replay) ───────────
-    if client is not None and not replay:
+    # ── Verify glider exists ────────────────────────────────────
+    # No longer skipped in replay.  A client exists only when we are
+    # actually uploading, and that is precisely when the target must be
+    # real -- replay + upload was the path that could PUT steering files
+    # onto a live vehicle with nothing having checked the name.
+    if client is not None:
         # Retried like the session loop: a service started at boot,
         # before DNS/WAN is up, must not exit on a transient failure
         # the steady-state supervisor would have ridden out.
@@ -1123,14 +1126,24 @@ def follow_glider(
     # (conditions only its own logic can see, e.g. an external feed
     # going quiet).  No-op when email alerting is off.
     follower.set_notifier(notifier)
+    # The operator's --glider is the upload target, full stop.  It was
+    # validated against SFMC at startup; a name parsed out of dialog was
+    # not, and letting firmware text choose the target is how steering
+    # files reach the wrong vehicle.
+    follower.current_glider = glider_name
     info_log.info("Follower: %s", type(follower).__name__)
-    recent_ids = _RecentSurfacingIds()
+    recent_ids = SurfacingDeduplicator()
     output_results: queue.Queue[_ThreadResult] = queue.Queue()
     upload_abort = threading.Event()
     if dry_run:
         output_thread = threading.Thread(
             target=_run_thread_target,
-            args=("output", _print_files, (queue_out, upload_log, stats), output_results),
+            args=(
+                "output",
+                _print_files,
+                (queue_out, upload_log, stats, glider_name),
+                output_results,
+            ),
             daemon=True,
             name="dry-run-printer",
         )
@@ -1312,10 +1325,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Seconds between surfacing events during replay (default: 10)",
     )
     sim.add_argument(
+        "--allow-writes",
+        action="store_true",
+        default=False,
+        help=(
+            "Permit uploads to the glider.  Without this, generated files are "
+            "printed instead of sent -- the same rule sfmc-control, "
+            "sfmc-xml-engine and sfmc-api-test use, so one convention covers "
+            "every tool that can move a vehicle."
+        ),
+    )
+    sim.add_argument(
         "--dry-run",
         action="store_true",
         default=False,
-        help="Print generated files instead of uploading to SFMC",
+        help="Print generated files instead of uploading (the default without --allow-writes)",
     )
     sim.add_argument(
         "--strict",
@@ -1380,8 +1404,25 @@ def main() -> None:
     if args.config:
         follower_config = _load_yaml(args.config)
 
-    # Decide whether we need an SFMC client.
-    need_client = not (args.replay and args.dry_run)
+    # Uploading now requires --allow-writes, like every other tool that
+    # can move a vehicle.  --dry-run remains as an explicit way to say
+    # "print what you would send", which is also what happens by default.
+    uploading = args.allow_writes and not args.dry_run
+    if args.replay and uploading:
+        # --replay used to upload to the live glider while sitting in an
+        # argparse group titled "simulation modes", and the same word
+        # means genuinely offline in every other tool.  Replayed dialog
+        # carries stale positions, so the follower computes waypoints for
+        # where the glider *was* and PUTs them onto where it *is*.
+        # Still available -- it is a real integration test -- but it must
+        # now be asked for twice.
+        logger.warning(
+            "--replay with --allow-writes UPLOADS TO THE LIVE GLIDER %s "
+            "from recorded, stale dialog",
+            args.glider,
+        )
+    # A client is needed for uploads, and for the startup glider check.
+    need_client = uploading
 
     stats: RunStats | None = None
     stop = threading.Event()
@@ -1429,7 +1470,7 @@ def main() -> None:
                         log_backup_count=args.log_backup_count,
                         replay=args.replay,
                         replay_interval=args.replay_interval,
-                        dry_run=args.dry_run,
+                        dry_run=not uploading,
                         stop=stop,
                         reconnect=not args.no_reconnect,
                         notifier=notifier,
@@ -1447,7 +1488,7 @@ def main() -> None:
                     log_backup_count=args.log_backup_count,
                     replay=args.replay,
                     replay_interval=args.replay_interval,
-                    dry_run=args.dry_run,
+                    dry_run=not uploading,
                     stop=stop,
                     reconnect=not args.no_reconnect,
                 )

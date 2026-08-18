@@ -68,7 +68,11 @@ class _FakeClient:
     def __init__(self) -> None:
         self.uploads: list[tuple[str, str, dict[str, Any]]] = []
         for op in READ_OPERATIONS | WRITE_OPERATIONS:
-            setattr(self, op, self._make(op))
+            call = self._make(op)
+            # A double must be classified like the real thing: unmarked
+            # means not requestable, which is the fail-safe rule.
+            call.sfmc_mutates = op in WRITE_OPERATIONS  # type: ignore[attr-defined]
+            setattr(self, op, call)
 
     def _make(self, op: str) -> Any:
         def call(*args: Any, **kwargs: Any) -> Any:
@@ -120,16 +124,40 @@ class TestSendFilesCompatibility:
         follower.send_files(to_glider={"a.ma": "x"}, glider="osu686")
         assert follower.queue_out.get_nowait().glider == "osu686"
 
-    def test_the_run_loop_sets_the_current_glider(self) -> None:
-        """So an unmodified follower's send_files targets correctly."""
+    def test_the_run_loop_does_not_trust_the_parsed_name(self) -> None:
+        """The legacy loop must not stamp a glider read from dialog.
+
+        ``vehicle_name`` comes from an unanchored regex over glider
+        output.  Using it as an upload target let untrusted firmware
+        text choose which vehicle received steering files; the operator
+        supplies the target instead, once, at startup.
+        """
         from queue import Queue
 
         queue_in: Queue[Any] = Queue()
         follower = LegacyFollower({}, queue_in, Queue())
-        queue_in.put(SurfacingEvent(vehicle_name="osu685"))
+        queue_in.put(SurfacingEvent(vehicle_name="osu685-FROM-DIALOG"))
         queue_in.put(None)
         follower.run()
-        assert follower.queue_out.get_nowait().glider == "osu685"
+        assert follower.queue_out.get_nowait().glider is None
+
+    def test_the_engine_stamps_the_trusted_glider(self) -> None:
+        """FollowerEngine may, because its identity is the fleet tag.
+
+        ``event.glider`` is the name the operator gave FleetStream, not
+        anything parsed out of the dialog, so it is safe as a target --
+        and it is what the follower sees, whatever the dialog claims.
+        """
+        seen: list[str | None] = []
+
+        class Observer(BaseFollower):
+            def on_surfacing(self, event: SurfacingEvent) -> None:
+                seen.append(self.current_glider)
+
+        engine = FollowerEngine(Observer)
+        engine._deliver(SurfacingEvent(vehicle_name="LIES-FROM-DIALOG"), "osu685")
+        assert seen == ["osu685"]
+        assert engine.follower.current_glider is None, "cleared after delivery"
 
 
 class TestFollowerEngine:
@@ -280,3 +308,78 @@ class TestUploadBatch:
         finally:
             runner.stop()
             runner.close()
+
+
+class TestDeduplicationIsShared:
+    """The drift that already happened, now closed.
+
+    sfmc-follow has always suppressed a surfacing re-delivered after a
+    reconnect -- SFMC replays dialog when a subscription is replaced.
+    FollowerEngine re-implemented the parser feeding and omitted it, so
+    a follower on the engine acted on the same surfacing twice: it
+    re-ran its decision and re-sent its files.  Both now use
+    SurfacingStream.
+    """
+
+    def test_a_replayed_surfacing_reaches_the_follower_once(self) -> None:
+        engine = FollowerEngine(LegacyFollower)
+        # SFMC's resubscribe replay: the identical block, twice.
+        for _ in range(2):
+            for line in SURFACING:
+                surfacing = engine._stream("osu684").feed(line)
+                if surfacing is not None:
+                    engine.follower.on_surfacing(surfacing)
+        assert engine.follower.seen == ["osu684"], "the replay must be suppressed"
+
+    def test_the_parser_resets_but_the_dedup_cache_does_not(self) -> None:
+        """Their lifetimes differ, and that difference is the point.
+
+        Resetting the cache at a stream boundary would defeat it
+        entirely: a boundary is exactly when the replay arrives.
+        """
+        from sfmc_api.dialog_parser import SurfacingStream
+
+        stream = SurfacingStream()
+        for line in SURFACING:
+            stream.feed(line)
+        stream.reset()
+        again = [stream.feed(line) for line in SURFACING]
+        assert all(event is None for event in again)
+
+    def test_both_consumers_use_the_same_implementation(self) -> None:
+        # import_module, because sfmc_api.follow_glider the *function*
+        # is exported from the package and shadows the module name.
+        import importlib
+
+        from sfmc_api.dialog_parser import SurfacingDeduplicator
+
+        legacy = importlib.import_module("sfmc_api.follow_glider")
+        assert legacy.SurfacingDeduplicator is SurfacingDeduplicator
+
+
+class TestShutdownDrains:
+    """Files queued during shutdown must still be uploaded.
+
+    sfmc-follow says so explicitly: "files queued just before a
+    disconnect or Ctrl-C must still be uploaded... the glider would fly
+    stale waypoints for the whole next dive."  On the engine path
+    on_stop's flush queued uploads and close() then cancelled them.
+    """
+
+    def test_files_flushed_in_on_stop_are_uploaded(self) -> None:
+        engine = FollowerEngine(LegacyFollower)
+        client = _FakeClient()
+        fleet = FleetStream(client, sources=("dialog",))
+        session = _FakeSession()
+        fleet.add_glider("osu684", session)
+        runner = EngineRunner(engine, client, fleet=fleet, watchdog=None, allow_writes=True)
+        # A surfacing the parser is still holding when we stop: no
+        # disconnect arrives, so only on_stop's flush will emit it.
+        for line in SURFACING[:-1]:
+            session.emit_line(line)
+        session.emit_line(SURFACING[-1])
+        threading.Timer(0.4, runner.stop).start()
+        runner.run()
+
+        assert client.uploads, "the shutdown flush reached the client"
+        assert client.uploads[0][0] == "osu684"

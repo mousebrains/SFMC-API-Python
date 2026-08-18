@@ -101,9 +101,7 @@ position::
 
     # file: my_follower.py
     from sfmc_api.follower import BaseFollower
-    from sfmc_api.dialog_parser import DialogParser, SurfacingEvent
-from sfmc_api.engine import BaseControlEngine
-from sfmc_api.events import Event
+    from sfmc_api.dialog_parser import SurfacingEvent
     from sfmc_api.ma_writer import generate_goto_ma
 
     class FixedWaypointFollower(BaseFollower):
@@ -153,7 +151,7 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any
 
-from sfmc_api.dialog_parser import DialogParser, SurfacingEvent
+from sfmc_api.dialog_parser import SurfacingEvent, SurfacingStream
 from sfmc_api.engine import BaseControlEngine
 from sfmc_api.events import Event
 
@@ -214,6 +212,14 @@ class BaseFollower(threading.Thread):
             You never need to write to it yourself.
     """
 
+    #: Glider these files are for, set by the framework to the identity
+    #: the *operator* supplied -- never to a name parsed out of dialog.
+    #: A class-level default so a subclass that does not chain
+    #: ``super().__init__`` cannot raise inside ``send_files``: that
+    #: exception is caught by the run loop, so the pipeline would look
+    #: healthy while never uploading another file.
+    current_glider: str | None = None
+
     def __init__(
         self,
         config: dict[str, Any],
@@ -225,9 +231,7 @@ class BaseFollower(threading.Thread):
         self.queue_in = queue_in
         self.queue_out = queue_out
         self._notifier: DisconnectNotifier | None = None
-        #: Glider whose surfacing is being handled, for send_files().
-        #: Set by the framework around each on_surfacing call.
-        self.current_glider: str | None = None
+        self.current_glider = None
 
     def set_notifier(self, notifier: DisconnectNotifier | None) -> None:
         """Attach the operator-email notifier.
@@ -305,7 +309,11 @@ class BaseFollower(threading.Thread):
             if event is None:
                 logger.debug("%s: received shutdown sentinel", self.name)
                 break
-            self.current_glider = event.vehicle_name
+            # NOT event.vehicle_name.  That is scraped from glider
+            # output by an unanchored regex, and using it as an upload
+            # target means untrusted firmware text decides which vehicle
+            # receives steering files.  current_glider is set once, by
+            # the framework, to the identity the operator gave.
             try:
                 self.on_surfacing(event)
             except Exception:
@@ -452,10 +460,24 @@ class FollowerEngine(BaseControlEngine):
         self._queue_in: Queue[SurfacingEvent | None] = Queue()
         self._queue_out: Queue[UploadBatch | dict[str, dict[str, str | bytes]] | None] = Queue()
         self.follower = follower_class(self.config, self._queue_in, self._queue_out)
-        # One parser per glider: a parser accumulates the lines of one
+        # One stream per glider: a parser accumulates the lines of one
         # surfacing, and two gliders surfacing at once would otherwise
-        # braid their GPS fixes into a single event.
-        self._parsers: dict[str, DialogParser] = {}
+        # braid their GPS fixes into a single event.  SurfacingStream
+        # also carries the de-duplication sfmc-follow has always had --
+        # an earlier version of this class re-implemented the parser
+        # feeding and simply omitted it, so a surfacing replayed after a
+        # reconnect reached the follower twice.
+        self._streams: dict[str, SurfacingStream] = {}
+
+    def set_notifier(self, notifier: DisconnectNotifier | None) -> None:
+        """Pass the operator-email notifier through to the follower.
+
+        sfmc-follow has always wired this; without it every
+        :meth:`BaseFollower.notify` is a silent no-op, and a follower
+        that alerts an operator when its external feed goes quiet simply
+        stops alerting anyone.
+        """
+        self.follower.set_notifier(notifier)
 
     def on_start(self) -> None:
         self.log("following %s", ", ".join(self.gliders) or "no gliders yet")
@@ -463,14 +485,27 @@ class FollowerEngine(BaseControlEngine):
     def on_stop(self) -> None:
         # Whatever a partial surfacing has accumulated is worth one last
         # look before shutdown.
-        for glider in list(self._parsers):
+        for glider in list(self._streams):
             self._flush(glider)
+        # ...and whatever the follower queued from its own thread, which
+        # nothing else will drain.  sfmc-follow drains through a
+        # sentinel for the same reason: a steering file queued just
+        # before shutdown must still go, or the glider flies stale
+        # waypoints for the whole next dive.
+        remaining = list(self.gliders)
+        if remaining:
+            self._drain_uploads(remaining[0])
+        elif not self._queue_out.empty():
+            logger.warning(
+                "%s: %d queued upload batch(es) discarded; no glider to send them to",
+                type(self).__name__,
+                self._queue_out.qsize(),
+            )
 
     def on_event(self, event: Event) -> None:
         match event.source:
             case "dialog":
-                parser = self._parsers.setdefault(event.glider, DialogParser())
-                surfacing = parser.feed_line(event.body)
+                surfacing = self._stream(event.glider).feed(event.body)
                 if surfacing is not None:
                     self._deliver(surfacing, event.glider)
             case "stream" if event.body.state == "disconnected":
@@ -480,14 +515,25 @@ class FollowerEngine(BaseControlEngine):
             case "error" if event.tag == "upload":
                 self.log("%s: upload failed: %s", event.glider, event.body)
 
+    def _stream(self, glider: str) -> SurfacingStream:
+        stream = self._streams.get(glider)
+        if stream is None:
+            stream = SurfacingStream(
+                on_duplicate=lambda identity, g=glider: self.log(  # type: ignore[misc]
+                    "%s: duplicate surfacing suppressed: %s", g, identity
+                )
+            )
+            self._streams[glider] = stream
+        return stream
+
     def _flush(self, glider: str) -> None:
-        parser = self._parsers.get(glider)
-        if parser is None:
+        stream = self._streams.get(glider)
+        if stream is None:
             return
-        surfacing = parser.flush()
+        surfacing = stream.flush()
         if surfacing is not None:
             self._deliver(surfacing, glider)
-        parser.reset()
+        stream.reset()
 
     def _deliver(self, surfacing: SurfacingEvent, glider: str) -> None:
         """Hand one surfacing to the follower, then send what it queued."""
@@ -518,9 +564,25 @@ class FollowerEngine(BaseControlEngine):
             if batch is None:
                 return
             if isinstance(batch, UploadBatch):
-                folders, target = batch.folders, batch.glider or default_glider
+                folders, named = batch.folders, batch.glider
             else:
-                folders, target = batch, default_glider
+                folders, named = batch, None
+            target = named or default_glider
+            if named is None and len(self.gliders) > 1:
+                # An unnamed batch in a formation is a guess, and the
+                # guess is "whichever glider happens to drain it" -- so a
+                # follower that computes off-thread and queues files
+                # after on_surfacing returns would have its work
+                # uploaded to the *next* glider to surface.  Refuse
+                # rather than steer the wrong vehicle.
+                logger.error(
+                    "%s: refusing an upload with no target glider while following %s; "
+                    "call send_files(..., glider=...) -- outside on_surfacing there is "
+                    "no 'current' glider to default to",
+                    type(self).__name__,
+                    ", ".join(self.gliders),
+                )
+                continue
             for folder, files in folders.items():
                 if not files:
                     continue

@@ -70,7 +70,11 @@ class _FakeClient:
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
         self._returns = returns
         for op in READ_OPERATIONS | WRITE_OPERATIONS:
-            setattr(self, op, self._make(op))
+            call = self._make(op)
+            # A double must be classified like the real thing: unmarked
+            # means not requestable, which is the fail-safe rule.
+            call.sfmc_mutates = op in WRITE_OPERATIONS  # type: ignore[attr-defined]
+            setattr(self, op, call)
 
     def _make(self, op: str) -> Any:
         def call(*args: Any, **kwargs: Any) -> Any:
@@ -83,9 +87,21 @@ class _FakeClient:
         return call
 
 
-def _runner(engine: BaseControlEngine, client: Any = None, **kwargs: Any) -> EngineRunner:
+def _runner(
+    engine: BaseControlEngine,
+    client: Any = None,
+    gliders: tuple[str, ...] = ("osu684", "osu685"),
+    **kwargs: Any,
+) -> EngineRunner:
+    """A runner with a fleet, because --glider is a write scope.
+
+    Writes to a glider outside the run's fleet are refused, so a test
+    that requests one has to have added it -- same as an operator.
+    """
     client = client if client is not None else _FakeClient()
     fleet = FleetStream(client, sources=tuple(engine.sources))
+    for name in gliders:
+        fleet.add_glider(name, _FakeSession())
     return EngineRunner(engine, client, fleet=fleet, watchdog=None, **kwargs)
 
 
@@ -839,3 +855,351 @@ class TestTicks:
         threading.Timer(0.3, runner.stop).start()
         runner.run()
         assert "tick" not in seen
+
+
+class TestReviewRegressions:
+    """Guards for defects an adversarial review found."""
+
+    def test_a_failed_submission_returns_its_slot(self) -> None:
+        """Otherwise the engine wedges and refuses everything, silently.
+
+        Three failed calls against a cap of three used to leave the
+        counter permanently full, after which every request -- including
+        reads -- was refused as RateLimited.  A watching engine goes
+        blind and says nothing.
+        """
+        engine = BaseControlEngine()
+
+        class Broken(_FakeClient):
+            def _make(self, op: str) -> Any:
+                call = super()._make(op)
+                call.sfmc_mutates = op in WRITE_OPERATIONS  # type: ignore[attr-defined]
+                return call
+
+        client = Broken()
+        runner = _runner(engine, client, max_outstanding=2)
+        try:
+            # Make submission itself fail, after the slot is taken.
+            runner._ops.shutdown(wait=False)
+            for _ in range(5):
+                engine.request("get_glider_details", "osu684", glider="osu684")
+            assert runner.outstanding == 0, "every failed submission gave its slot back"
+        finally:
+            runner.stop()
+            runner.close()
+
+    def test_a_failed_submission_is_reported_as_an_error_event(self) -> None:
+        engine = BaseControlEngine()
+        runner = _runner(engine, _FakeClient())
+        try:
+            runner._ops.shutdown(wait=False)
+            engine.request("get_glider_details", "osu684", glider="osu684")
+            event = runner._merge.get(timeout=1)
+            assert event is not None and event.source == "error"
+        finally:
+            runner.stop()
+            runner.close()
+
+    def test_keyword_arguments_reach_the_audit_log(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A command passed by keyword used to audit as an empty args=."""
+        engine = BaseControlEngine()
+        with caplog.at_level("INFO", logger="sfmc_api.engine.audit"):
+            runner = _runner(engine, _FakeClient(), allow_writes=True)
+            try:
+                engine.request(
+                    "send_command", glider="osu685", glider_name="osu685", command="abort"
+                )
+                time.sleep(0.2)
+            finally:
+                runner.stop()
+                runner.close()
+        assert any("abort" in r.getMessage() for r in caplog.records), (
+            "the command text must appear in the audit trail"
+        )
+
+    def test_an_unmarked_client_method_is_not_requestable(self) -> None:
+        """A subclass overriding a read loses the marker with the method.
+
+        That is the fail-safe direction: it becomes unmarked, and
+        unmarked means uncallable.  Classifying SFMCClient instead would
+        have kept calling it a read and let the override through.
+        """
+        engine = BaseControlEngine()
+
+        class Sneaky(_FakeClient):
+            def __init__(self) -> None:
+                super().__init__()
+                # Override a read with something unmarked.
+                self.get_glider_details = lambda *a, **k: None  # type: ignore[assignment]
+
+        runner = _runner(engine, Sneaky())
+        try:
+            with pytest.raises(ValueError, match="not a requestable operation"):
+                engine.request("get_glider_details", "osu684", glider="osu684")
+        finally:
+            runner.close()
+
+    def test_validation_covers_writes_too(self) -> None:
+        """_validate checked only reads, so a missing write surfaced late."""
+        engine = BaseControlEngine()
+
+        class Partial:
+            def __init__(self) -> None:
+                for op in READ_OPERATIONS:
+                    call = lambda *a, **k: {}  # noqa: E731
+                    call.sfmc_mutates = False  # type: ignore[attr-defined]
+                    setattr(self, op, call)
+
+        with pytest.raises(ValueError, match="has no such operation"):
+            EngineRunner(engine, Partial(), watchdog=None)  # type: ignore[arg-type]
+
+
+class TestEscapeHatchIsGated:
+    """The raw client used to bypass every rail with no trace.
+
+    An engine could do ``self.client.send_command(...)`` in a run
+    started with no flags at all: a real PUT reached the server, and the
+    audit log contained nothing about it while its banner still said
+    ``writes=blocked``.  That is worse than a gap -- it is a false
+    exculpatory record.
+    """
+
+    def test_refused_without_allow_writes(self) -> None:
+        engine = BaseControlEngine()
+        runner = _runner(engine, _FakeClient())
+        try:
+            with pytest.raises(WriteRefused, match="bypasses the write gate"):
+                _ = engine.client
+        finally:
+            runner.close()
+
+    def test_refused_under_a_dry_run(self) -> None:
+        """Otherwise dry run's promise is unenforceable."""
+        engine = BaseControlEngine()
+        runner = _runner(engine, _FakeClient(), allow_writes=True, dry_run=True)
+        try:
+            with pytest.raises(WriteRefused, match="dry run promises"):
+                _ = engine.client
+        finally:
+            runner.close()
+
+    def test_allowed_when_writes_are_enabled(self) -> None:
+        engine = BaseControlEngine()
+        client = _FakeClient()
+        runner = _runner(engine, client, allow_writes=True)
+        try:
+            assert engine.client is client
+        finally:
+            runner.close()
+
+    def test_taking_it_is_audited_loudly(self, caplog: pytest.LogCaptureFixture) -> None:
+        engine = BaseControlEngine()
+        with caplog.at_level("WARNING", logger="sfmc_api.engine.audit"):
+            runner = _runner(engine, _FakeClient(), allow_writes=True)
+            try:
+                _ = engine.client
+            finally:
+                runner.close()
+        assert any("ESCAPE HATCH" in r.getMessage() for r in caplog.records)
+
+    def test_a_read_only_engine_cannot_reach_the_wire_through_it(self) -> None:
+        """The exploit the review reproduced, now closed."""
+        sent: list[str] = []
+
+        class Sneaky(BaseControlEngine):
+            def on_start(self) -> None:
+                try:
+                    self.client.send_command("osu685", "wd 30")
+                    sent.append("reached the server")
+                except WriteRefused:
+                    pass
+
+        engine = Sneaky()
+        runner = _runner(engine, _FakeClient())
+        threading.Timer(0.2, runner.stop).start()
+        runner.run()
+        assert sent == [], "no flags means no path to the wire"
+
+
+class TestConcurrencyReviewRegressions:
+    """Guards for what the concurrency review found."""
+
+    def test_the_failure_cap_trips_at_a_realistic_arrival_pace(self) -> None:
+        """The bug that passed the obvious test and failed in production.
+
+        The framework publishes an `error` event when on_event raises.
+        Handling that notice used to count as a success and reset the
+        strike counter, so an engine failing on every dialog line
+        oscillated 1 -> 0 forever: totally dead, never stopped, nobody
+        told.  It tripped only when events were pre-queued in a burst,
+        which is how a test naturally gets written.
+        """
+        notified: list[str] = []
+
+        class AlwaysFails(BaseControlEngine):
+            def on_event(self, event: Event) -> None:
+                if event.source == "dialog":
+                    raise ValueError("boom")
+
+            def notify(self, key: str, summary: str, detail: str) -> None:
+                notified.append(key)
+
+        engine = AlwaysFails()
+        runner = _runner(engine, _FakeClient(), max_failures=3)
+
+        def feed() -> None:
+            # One line at a time, as a glider on the link actually sends
+            # them -- never a pre-queued burst.
+            for i in range(40):
+                if runner._stop.is_set():
+                    return
+                runner._merge.publish("osu684", "dialog", i)
+                time.sleep(0.01)
+
+        threading.Thread(target=feed, daemon=True).start()
+        threading.Timer(3.0, runner.stop).start()
+        runner.run()
+
+        assert runner.failures >= 3, "the cap must trip on paced arrival"
+        assert notified == ["engine-failed"], "and the operator must be told"
+
+    def test_an_event_already_dequeued_is_not_discarded_by_stop(self) -> None:
+        seen: list[Any] = []
+
+        class Stopper(BaseControlEngine):
+            def on_event(self, event: Event) -> None:
+                seen.append(event.body)
+                if event.body == "second":
+                    runner.stop()
+
+        engine = Stopper()
+        runner = _runner(engine, _FakeClient())
+        for body in ("first", "second", "third"):
+            runner._merge.publish("osu684", "dialog", body)
+        runner.run()
+        assert "second" in seen, "the event that triggered the stop was still handled"
+
+    def test_run_is_once_only(self) -> None:
+        engine = BaseControlEngine()
+        runner = _runner(engine, _FakeClient())
+        runner.stop()
+        runner.run()
+        with pytest.raises(RuntimeError, match="already run"):
+            runner.run()
+
+    def test_close_shuts_the_pool_even_if_the_fleet_raises(self) -> None:
+        """A skipped merge.close() leaves run() blocked forever."""
+        engine = BaseControlEngine()
+        client = _FakeClient()
+        fleet = FleetStream(client, sources=("dialog",))
+
+        def explode() -> None:
+            raise RuntimeError("close failed")
+
+        runner = EngineRunner(engine, client, fleet=fleet, watchdog=None)
+        runner._owns_fleet = True
+        fleet.close = explode  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="close failed"):
+            runner.close()
+        assert runner._merge.get(timeout=0.1) is None, "the merge was still closed"
+
+    def test_replay_delivers_results(self) -> None:
+        """Replay answered nothing, so the acting half was untestable."""
+        seen: list[str] = []
+
+        class Asker(BaseControlEngine):
+            def on_event(self, event: Event) -> None:
+                seen.append(event.source)
+                if event.source == "dialog":
+                    self.request("get_glider_details", "osusim", glider="osusim", tag="d")
+
+        engine = Asker()
+        runner = _runner(engine, _FakeClient())
+        try:
+            runner.replay(["Vehicle Name: osusim"], glider="osusim", settle=3.0)
+        finally:
+            runner.close()
+        assert "result" in seen, "a replayed engine must see its own answers"
+
+    def test_constructing_a_runner_does_not_touch_the_filesystem(self) -> None:
+        """download_dir is a property whose getter mkdir()s.
+
+        Classifying with getattr invoked it, so building a runner made a
+        directory -- and raised if the path was unwritable, for an
+        engine that never downloads anything.
+        """
+        touched: list[str] = []
+
+        class Nosy(_FakeClient):
+            @property
+            def download_dir(self) -> str:
+                touched.append("evaluated")
+                raise PermissionError("read-only filesystem")
+
+        runner = _runner(BaseControlEngine(), Nosy())
+        runner.close()
+        assert touched == [], "classification must not evaluate properties"
+
+
+class TestOutOfFleetWritesAreFlagged:
+    """--glider is what is streamed, not a capability boundary.
+
+    An earlier revision refused writes whose `glider=` fell outside the
+    fleet.  That rail was both too strict and useless: it blocked
+    register_glider (whose key names a glider that cannot be in the
+    fleet yet) and upload_cache_files (whose key is a *group*), while
+    stopping nothing, because `glider=` is the serialisation key and the
+    real target is an argument -- so relabelling the request walked
+    straight through it.  A rail that can be stepped over is worse than
+    none, because it gets believed.  It is now an audited warning.
+    """
+
+    def test_an_out_of_fleet_key_is_warned_about(self, caplog: pytest.LogCaptureFixture) -> None:
+        engine = BaseControlEngine()
+        client = _FakeClient()
+        with caplog.at_level("WARNING", logger="sfmc_api.engine.audit"):
+            runner = _runner(engine, client, gliders=("osu684",), allow_writes=True)
+            try:
+                engine.request("send_command", "osu999", "abort", glider="osu999")
+                time.sleep(0.2)
+            finally:
+                runner.stop()
+                runner.close()
+        assert any("outside this run's fleet" in r.getMessage() for r in caplog.records)
+
+    def test_registering_a_new_glider_is_not_blocked(self) -> None:
+        """The rail made this impossible: a new glider is never in the fleet."""
+        engine = BaseControlEngine()
+        client = _FakeClient()
+        runner = _runner(engine, client, gliders=("osu684",), allow_writes=True)
+        try:
+            engine.request("register_glider", "osu999", glider="osu999")
+            event = runner._merge.get(timeout=2)
+            assert event is not None and event.source == "result"
+        finally:
+            runner.stop()
+            runner.close()
+
+    def test_a_write_inside_the_fleet_proceeds(self) -> None:
+        engine = BaseControlEngine()
+        client = _FakeClient()
+        runner = _runner(engine, client, gliders=("osu684",), allow_writes=True)
+        try:
+            engine.request("send_command", "osu684", "Ctrl-M", glider="osu684")
+            event = runner._merge.get(timeout=2)
+            assert event is not None and event.source == "result"
+        finally:
+            runner.stop()
+            runner.close()
+
+    def test_reads_outside_the_fleet_are_still_allowed(self) -> None:
+        """Asking about a glider is not commanding it."""
+        engine = BaseControlEngine()
+        runner = _runner(engine, _FakeClient(), gliders=("osu684",))
+        try:
+            engine.request("get_glider_details", "osu999", glider="osu999")
+            event = runner._merge.get(timeout=2)
+            assert event is not None and event.source == "result"
+        finally:
+            runner.stop()
+            runner.close()

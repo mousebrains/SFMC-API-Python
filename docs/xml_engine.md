@@ -201,9 +201,17 @@ sfmc-xml-engine riot.xml --glider osu685 --send                  # silent (defau
 sfmc-xml-engine park.xml --glider osu685 --send --keepalive 240  # parked at GliderDos
 ```
 
-Validated against osusim on 2026-08-16: `Ctrl-M` every four minutes
-held the link `connected` for 6m47s across six keepalives, on a glider
-at a prompt that had otherwise been idle-dropping.
+**What was measured, and what was not.**  A live run against osusim on
+2026-08-16 held the link `connected` for 6m47s across six keepalives
+spaced about **68 seconds** apart, on a glider at a prompt that had
+otherwise been idle-dropping.  That shows `Ctrl-M` works as a keepalive.
+It does **not** show that 240 s is short enough — no run has tested this
+interval.  The 240 s default follows a reported ~5 minute idle drop with
+a minute of margin; lower it if you see a drop.
+
+**The keepalive also skips a disconnected glider.**  Before each send it
+checks `glider_is_connected()` and stays silent if she is down, so a
+submerged glider is never sent into.
 
 Two things this got wrong on the first attempt, both found by running
 it against a live glider rather than by reasoning about it:
@@ -412,10 +420,10 @@ live, as shown above.
   exercise it, and the minutes-vs-seconds unit is established from
   script comments and operator confirmation rather than from watching a
   timer fire on a server.
-- **The keepalive.**  The 90-second inactivity drop is reported by the
-  operator; the 60-second bare return is a response to it that has not
-  yet been observed holding a connection open across a long quiet
-  stretch.
+- **The keepalive at its default interval.**  A keepalive at ~68 s was
+  observed holding a link open; 240 s has not been tested, and the
+  ~5 minute idle-drop figure it derives from is the operator's rather
+  than something measured end to end.
 
 Treat a timer-heavy script's first live run as an experiment, with
 `--max-runtime` set.

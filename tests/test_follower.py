@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import textwrap
+import threading
 from pathlib import Path
 from queue import Queue
 from typing import Any
@@ -53,7 +54,12 @@ class TestBaseFollowerRunLoop:
         assert output is not None
         assert "to-glider" in output.folders
         assert "osu685.txt" in output.folders["to-glider"]
-        assert output.glider == "osu685", "the run loop names the surfacing's glider"
+        # The run loop must NOT stamp a glider parsed out of dialog.
+        # An earlier version set it from event.vehicle_name, which made
+        # untrusted firmware text choose the upload target -- so
+        # replaying one glider's log could write steering files to that
+        # glider instead of the one named on the command line.
+        assert output.glider is None, "the target comes from the operator, not the dialog"
 
     def test_shutdown_sentinel_stops_loop(self) -> None:
         q_in: Queue[SurfacingEvent | None] = Queue()
@@ -318,3 +324,45 @@ class TestFollowerNotify:
             "solver returned no waypoint",
             min_gap_seconds=600.0,
         )
+
+
+class TestUploadTargetIsOperatorSupplied:
+    """Regression guard: dialog text must never choose a glider.
+
+    An earlier revision set ``current_glider`` from
+    ``event.vehicle_name``, which is scraped from glider output by an
+    unanchored regex.  Combined with ``--replay ... `` (which uploads,
+    and skips the glider-existence check) that let a rehearsal against
+    a spare vehicle write steering files to the live glider whose log
+    was being replayed.
+    """
+
+    def test_the_run_loop_does_not_stamp_a_parsed_name(self) -> None:
+        q_in: Queue[SurfacingEvent | None] = Queue()
+        q_out: Queue[Any] = Queue()
+        follower = EchoFollower(config={}, queue_in=q_in, queue_out=q_out)
+        q_in.put(SurfacingEvent(vehicle_name="osu684-FROM-DIALOG"))
+        q_in.put(None)
+        follower.run()
+        assert q_out.get_nowait().glider is None
+
+    def test_current_glider_has_a_class_level_default(self) -> None:
+        """A subclass skipping super().__init__ must not raise in send_files.
+
+        The raise would happen inside on_surfacing, where the run loop
+        catches and logs it -- so the pipeline would look healthy while
+        silently never uploading another file.
+        """
+
+        class OldStyle(BaseFollower):
+            def __init__(self, queue_out: Any) -> None:
+                threading.Thread.__init__(self, daemon=True)
+                self.queue_out = queue_out
+
+            def on_surfacing(self, event: SurfacingEvent) -> None:
+                self.send_files(to_glider={"a.ma": "x"})
+
+        q_out: Queue[Any] = Queue()
+        follower = OldStyle(q_out)
+        follower.on_surfacing(SurfacingEvent(vehicle_name="osu685"))
+        assert q_out.get_nowait().folders == {"to-glider": {"a.ma": "x"}}

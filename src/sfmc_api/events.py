@@ -118,8 +118,17 @@ class Event:
             guaranteed: glider time appears *inside* dialog text
             (``Curr Time: ...``) and the two can differ by an hour on a
             simulator — 48 minutes, measured.
-        seq: Monotonic counter across the whole merge, assigned at
-            publish.  Gives a total order over every glider and source.
+        seq: Monotonic counter assigned at **publish**, so it orders
+            events by arrival across every glider and source.
+
+            Delivery order is not the same thing, and code must not
+            assume it is.  A ``dropped`` notice is delivered ahead of
+            queued events but takes its ``seq`` when it is *emitted*, so
+            it carries a higher number than events still waiting; and
+            dropped events consume numbers, so there are gaps.  An
+            engine that filters on ``seq <= last_seen`` would therefore
+            discard real dialog immediately after a drop notice --
+            exactly when it can least afford to.
         request_id: Set on ``result`` / ``error``.
         tag: Caller's label, echoed back on results.
     """
@@ -184,9 +193,14 @@ class EventMerge:
     from any thread; one consumer calls :meth:`get`.
 
     Ordering is by arrival: every event is stamped with a monotonic
-    ``seq`` at publish, and :meth:`get` always returns the lowest
-    outstanding one.  So order *within* a (glider, source) pair is
-    strictly preserved, and across pairs it is arrival order.
+    ``seq`` at publish, and :meth:`get` returns the lowest outstanding
+    *event*.  So order within a ``(glider, source)`` pair is strictly
+    preserved, and across pairs it is arrival order.
+
+    ``dropped`` notices are the exception: they jump the queue, because
+    news that events were lost is more useful early than in order.  See
+    :attr:`Event.seq` before writing anything that compares sequence
+    numbers.
 
     Args:
         maxsize: Per-pair queue bound.  See :data:`DEFAULT_PAIR_MAXSIZE`.
@@ -335,10 +349,27 @@ class EventMerge:
     # ── Lifecycle ────────────────────────────────────────────────────
 
     def forget(self, glider: str) -> None:
-        """Discard every queue for *glider*, e.g. once it has left."""
+        """Discard every queue for *glider*, e.g. once it has left.
+
+        Says what it destroyed.  Removing and re-adding a glider -- to
+        change sources, or after a silence timeout -- used to discard
+        whatever was in flight, possibly a surfacing, with no notice at
+        all.  Silent loss is the one outcome not on offer.
+        """
         with self._lock:
+            lost = 0
+            unreported = 0
             for key in [k for k in self._pairs if k[0] == glider]:
-                del self._pairs[key]
+                pair = self._pairs.pop(key)
+                lost += len(pair.items)
+                unreported += pair.dropped - pair.reported_at
+        if lost or unreported:
+            logger.warning(
+                "forgetting %s discarded %d queued event(s) and %d unreported drop(s)",
+                glider,
+                lost,
+                unreported,
+            )
 
     def close(self) -> None:
         """Stop accepting events and release every waiter."""
@@ -388,7 +419,8 @@ class FleetStream:
         self._client = client
         self._sources = tuple(dict.fromkeys(sources))
         self._merge = merge if merge is not None else EventMerge(maxsize=maxsize)
-        self._sessions: dict[str, GliderSession] = {}
+        self._sessions: dict[str, GliderSession | None] = {}
+        self._closed = False
         self._lock = threading.Lock()
 
     @property
@@ -400,7 +432,7 @@ class FleetStream:
     def gliders(self) -> tuple[str, ...]:
         """Names currently streaming, in the order they were added."""
         with self._lock:
-            return tuple(self._sessions)
+            return tuple(n for n, s in self._sessions.items() if s is not None)
 
     def add_glider(self, name: str, session: GliderSession | None = None) -> GliderSession:
         """Start streaming *name* into the merge.
@@ -408,20 +440,47 @@ class FleetStream:
         A formation changes, so this is an ordinary call rather than
         startup-only configuration.
 
+        The name is **reserved** before the session is built.  Checking
+        and then registering left a window in which two callers both
+        passed the duplicate check, both built a session, and both
+        started it -- after which every dialog line arrived twice.  For
+        an engine that acts per line, that is the same command sent to a
+        vehicle twice, and ``close()`` only ever closed the survivor.
+
         Args:
             name: Registered glider name.
             session: An existing session to adopt, mainly for tests.
                 When ``None`` one is created and started.
+
+        Raises:
+            ValueError: If *name* is already streaming.
+            RuntimeError: If this stream is closed.
         """
         with self._lock:
+            if self._closed:
+                raise RuntimeError("this fleet stream is closed")
             if name in self._sessions:
                 raise ValueError(f"{name} is already streaming")
-        topics = tuple(dict.fromkeys(_SUBSCRIBABLE[s] for s in self._sources))
-        if session is None:
-            session = self._client.session(name, topics=topics, start=False)
-        self._wire(name, session)
-        with self._lock:
-            self._sessions[name] = session
+            self._sessions[name] = None  # reservation
+        try:
+            topics = tuple(dict.fromkeys(_SUBSCRIBABLE[s] for s in self._sources))
+            if session is None:
+                session = self._client.session(name, topics=topics, start=False)
+            self._wire(name, session)
+            with self._lock:
+                if self._closed:
+                    # close() ran while we were building.  Registering
+                    # now would leave a live session nobody will ever
+                    # close, while `gliders` reported it as streaming.
+                    raise RuntimeError("this fleet stream closed while adding " + name)
+                self._sessions[name] = session
+        except Exception:
+            with self._lock:
+                if self._sessions.get(name) is None:
+                    self._sessions.pop(name, None)
+            if session is not None:
+                session.close()
+            raise
         # Started after wiring so nothing can arrive before it can be
         # delivered, and with no deadline so every retry -- including the
         # first connection -- belongs to the session's own supervisor.
@@ -431,10 +490,11 @@ class FleetStream:
     def remove_glider(self, name: str) -> None:
         """Stop streaming *name* and discard its queues."""
         with self._lock:
-            session = self._sessions.pop(name, None)
-        if session is None:
-            raise ValueError(f"{name} is not streaming")
-        session.close()
+            if name not in self._sessions:
+                raise ValueError(f"{name} is not streaming")
+            session = self._sessions.pop(name)
+        if session is not None:
+            session.close()
         self._merge.forget(name)
 
     def _wire(self, name: str, session: GliderSession) -> None:
@@ -494,13 +554,24 @@ class FleetStream:
     # ── Lifecycle ────────────────────────────────────────────────────
 
     def close(self) -> None:
-        """Close every session and the merge."""
+        """Close every session and the merge.  Every one, even after a failure.
+
+        One raising ``session.close()`` used to abort the loop, so the
+        remaining sessions stayed open *and* the merge was never closed
+        -- and a consumer blocked in ``get()`` then waited forever.
+        """
         with self._lock:
-            sessions = list(self._sessions.values())
+            self._closed = True
+            sessions = [s for s in self._sessions.values() if s is not None]
             self._sessions.clear()
-        for session in sessions:
-            session.close()
-        self._merge.close()
+        try:
+            for session in sessions:
+                try:
+                    session.close()
+                except Exception:
+                    logger.exception("closing a session failed; closing the rest anyway")
+        finally:
+            self._merge.close()
 
     def __enter__(self) -> FleetStream:
         return self

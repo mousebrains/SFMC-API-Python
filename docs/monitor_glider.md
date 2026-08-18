@@ -36,7 +36,7 @@ to two topics:
    everything the glider sends during an Iridium surfacing: GPS
    fixes, sensor readings, file transfers, abort history, etc.
 
-2. **Script events** (`/topic/glider-script-assignment-updates/{gliderId}`)
+2. **Script events** (`/topic/glider-script-assignment-updates-{gliderId}`)
    -- state transitions of the assigned script (running, paused, etc.).
 
 Each line is logged with a high-resolution UTC timestamp:

@@ -82,8 +82,12 @@ import contextlib
 import logging
 import math
 import re
+import time
+from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 from sfmc_api.coordinates import dddmm_to_decimal
 
@@ -225,6 +229,25 @@ class SurfacingEvent:
 
 #: Trigger: a new Iridium connection has started.
 CARRIER_DETECT_RE = re.compile(r"Carrier Detect found")
+
+#: ``Time until diving is: 295 secs`` -- how long she is still listening.
+TIME_TO_DIVE_RE = re.compile(r"Time until diving is:\s*(-?\d+(?:\.\d+)?)\s*secs")
+
+#: ``Time until diving is: 295 secs`` -- how long she is still listening.
+
+
+def parse_seconds_to_dive(line: str) -> float | None:
+    """Seconds left at the surface, if *line* announces it.
+
+    Deliberately not a field on :class:`SurfacingEvent`: the glider
+    prints this *after* the sensor block that completes the event, so by
+    the time it arrives the event has already been emitted.  A field
+    would therefore be ``None`` almost always, which is worse than no
+    field.  :class:`SurfacingStream` tracks it live instead.
+    """
+    match = TIME_TO_DIVE_RE.search(line)
+    return None if match is None else float(match.group(1))
+
 
 #: ``Vehicle Name: osu685``
 VEHICLE_NAME_RE = re.compile(r"Vehicle Name:\s*(\S+)")
@@ -446,4 +469,148 @@ class DialogParser:
             result = self._try_emit()
             self.reset()
             return result
+        return None
+
+
+class SurfacingDeduplicator:
+    """Remembers recent surfacings so a re-delivered one is not acted on twice.
+
+    SFMC replays dialog when a subscription is replaced, so the same
+    surfacing block can arrive again after a reconnect.  Acting on it
+    twice means a follower re-runs its decision and a control engine
+    re-sends its commands.
+
+    Lives *outside* any parser on purpose: a :class:`DialogParser` is
+    reset at each stream boundary, and this must survive exactly those
+    boundaries to do its job.
+
+    Args:
+        maxsize: How many identities to remember.
+    """
+
+    def __init__(self, maxsize: int = 128) -> None:
+        self._maxsize = maxsize
+        self._ordered: deque[tuple[Any, ...]] = deque()
+        self._known: set[tuple[Any, ...]] = set()
+
+    def duplicate_identity(self, event: SurfacingEvent) -> tuple[Any, ...] | None:
+        """Return the identity if *event* was seen before, else ``None``."""
+        if event.timestamp is not None and event.mission_time is not None:
+            identity: tuple[Any, ...] = (
+                event.vehicle_name,
+                event.timestamp,
+                event.mission_time,
+            )
+        else:
+            # Weak fallback: a surfacing whose Curr Time line was
+            # dropped or garbled still reproduces the identical raw
+            # dialog block when SFMC's resubscribe replay re-delivers
+            # it, so its content identifies it.  Treating "no identity"
+            # as "not a duplicate" delivered the same surfacing to the
+            # follower twice across a reconnect.
+            identity = (event.vehicle_name, "raw-lines", hash(tuple(event.raw_lines)))
+        if identity in self._known:
+            return identity
+        if len(self._ordered) >= self._maxsize:
+            self._known.remove(self._ordered.popleft())
+        self._ordered.append(identity)
+        self._known.add(identity)
+        return None
+
+
+class SurfacingStream:
+    """One glider's dialog lines in, de-duplicated surfacings out.
+
+    The parser and the deduplicator have deliberately different
+    lifetimes -- :meth:`reset` clears the parser at a stream boundary
+    and leaves the deduplicator alone, because a surfacing replayed
+    *across* that boundary is the case it exists for.  Keeping them in
+    one object is what stops the two from being wired up differently in
+    two places, which is how one consumer ended up with no
+    de-duplication at all.
+
+    Args:
+        dedup: Share one across streams to suppress duplicates fleet
+            wide, or leave it and get a private one per glider.
+        on_duplicate: Called with the identity when one is suppressed.
+    """
+
+    def __init__(
+        self,
+        dedup: SurfacingDeduplicator | None = None,
+        on_duplicate: Callable[[tuple[Any, ...]], None] | None = None,
+    ) -> None:
+        self.parser = DialogParser()
+        self.dedup = dedup if dedup is not None else SurfacingDeduplicator()
+        self._on_duplicate = on_duplicate
+        #: Seconds left at the surface when she last said, or ``None``.
+        self.seconds_to_dive: float | None = None
+        #: Host-clock ``time.time()`` when she is expected to stop
+        #: listening.  Host clock, not the glider's -- they differ by 48
+        #: minutes on osusim, so a deadline in glider time would be
+        #: unusable for deciding whether to keep waiting.
+        self.dive_deadline: float | None = None
+
+    def feed(self, line: str) -> SurfacingEvent | None:
+        """Feed one line; return a surfacing if one completed and is new.
+
+        Blank lines are dropped before the parser, because
+        :class:`DialogParser` treats the first non-sensor line after the
+        sensor block as end-of-surfacing -- so one blank line inside that
+        block (Iridium framing, a firmware variant) truncates the
+        surfacing and discards every sensor after it.  ``sfmc-follow``
+        has always filtered them; a second consumer that did not made
+        the same dialog yield a different surfacing, which is the drift
+        this class exists to prevent.
+        """
+        if not line.strip():
+            return None
+        remaining = parse_seconds_to_dive(line)
+        if remaining is not None:
+            # Tracked here rather than on the event, because the glider
+            # prints it after the event has already been emitted.  It
+            # counts down through one surfacing, so the newest wins.
+            self.seconds_to_dive = remaining
+            self.dive_deadline = time.time() + remaining
+        return self._filter(self.parser.feed_line(line))
+
+    def time_left(self, now: float | None = None) -> float | None:
+        """Seconds until she dives, or ``None`` if she never said.
+
+        The budget every decision is spending.  A controller that waits
+        -- for a second glider to surface so it can decide jointly, or
+        for a Zmodem transfer to end -- is spending this, and without it
+        the wait is a guess that fails silently: she dives, and the
+        thing that was waiting simply never acted.
+        """
+        if self.dive_deadline is None:
+            return None
+        return self.dive_deadline - (time.time() if now is None else now)
+
+    def flush(self) -> SurfacingEvent | None:
+        """Emit whatever the parser is still holding, if it is new."""
+        return self._filter(self.parser.flush())
+
+    def reset(self) -> None:
+        """Clear the parser at a stream boundary.
+
+        Also clears the dive deadline, which belongs to the surfacing
+        that just ended: keeping it made ``time_left()`` return a large
+        negative number on the next surfacing, so a controller waiting
+        on it stopped waiting immediately.  The dedup cache is
+        deliberately *not* cleared -- a boundary is exactly when a
+        replayed surfacing arrives.
+        """
+        self.parser.reset()
+        self.seconds_to_dive = None
+        self.dive_deadline = None
+
+    def _filter(self, event: SurfacingEvent | None) -> SurfacingEvent | None:
+        if event is None:
+            return None
+        identity = self.dedup.duplicate_identity(event)
+        if identity is None:
+            return event
+        if self._on_duplicate is not None:
+            self._on_duplicate(identity)
         return None

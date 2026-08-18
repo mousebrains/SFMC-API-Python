@@ -102,7 +102,7 @@ for the `goto_list` behavior.  See
 next surfacing.  This is where your follower's `.ma` files end up.
 
 **`from-glider`** — Files the glider has uploaded to SFMC (mostly
-`.sbd` and `.tbd` data).  Read-only; you cannot delete from here.
+`.sbd` and `.tbd` data).  You cannot *delete* from here, but you can upload to it.
 
 **`to-science`** — Science-payload configuration files.
 

@@ -132,12 +132,17 @@ KEEPALIVE_COMMAND = "Ctrl-M"
 #: Suggested seconds of dialog silence before sending
 #: :data:`KEEPALIVE_COMMAND`, for callers that opt in.
 #:
-#: SFMC drops an idle link after about five minutes, so four leaves a
-#: minute of margin without sending more than necessary.  Validated
-#: against osusim on 2026-08-16: ``Ctrl-M`` at this cadence held the
-#: link ``connected`` for 6m47s across six keepalives, on a glider
-#: sitting at a GliderDos prompt that had otherwise been dropping after
-#: roughly five minutes of quiet.
+#: SFMC drops an idle link after about five minutes -- the operator's
+#: figure, and consistent with an observed idle drop -- so four leaves a
+#: minute of margin without sending more than necessary.
+#:
+#: **What was actually measured, and what was not.**  A live run against
+#: osusim on 2026-08-16 held the link ``connected`` for 6m47s across six
+#: keepalives spaced about **68 seconds** apart, on a glider at a
+#: GliderDos prompt that had otherwise been idle-dropping.  That
+#: demonstrates ``Ctrl-M`` works and that a keepalive holds the link.  It
+#: does **not** demonstrate that 240s is short enough: no run has tested
+#: this interval.  Lower it if you see an idle drop.
 #:
 #: **Not a default.**  Keepalives are off unless asked for — see
 #: :func:`run_live`.
@@ -1033,7 +1038,8 @@ def main(argv: list[str] | None = None) -> int:
             f"With --send, send {KEEPALIVE_COMMAND} (a carriage return) after this "
             "much dialog silence, so SFMC does not drop the connection while "
             "sitting at a GliderDos prompt.  OFF by default: during a mission "
-            f"this injects traffic no script asked for.  Try {KEEPALIVE_SECONDS:.0f}"
+            f"this injects traffic no script asked for.  {KEEPALIVE_SECONDS:.0f} follows "
+            "a ~5 min idle drop; only ~68s has actually been tested"
         ),
     )
     args = parser.parse_args(argv)
