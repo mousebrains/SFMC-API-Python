@@ -283,6 +283,16 @@ class BaseControlEngine:
         it runs — no other glider's dialog, no results — and none of the
         framework's safety rails apply to what you do with it.  Prefer
         :meth:`request`.
+
+        Because nothing downstream can tell a read from a write once the
+        client is in hand, taking it requires ``allow_writes`` and is
+        refused under a dry run.  Every access is logged at ``WARNING``
+        to the audit trail, since it is the point where that trail stops
+        being a complete account of what the run did.
+
+        Raises:
+            WriteRefused: If writes are not enabled, or this is a dry
+                run.
         """
         return self._require_runner().client
 
@@ -431,8 +441,35 @@ class EngineRunner:
 
     @property
     def client(self) -> SFMCClient:
+        """The raw client, gated and audited.  See the engine docstring.
+
+        Refused unless writes are enabled, because nothing downstream of
+        here can tell a read from a write: handing out the client hands
+        out every endpoint on it.  Refused under a dry run for the same
+        reason -- that mode promises nothing reaches the glider, and a
+        raw client cannot honour a promise it does not know about.
+        """
         if self._client is None:
             raise RuntimeError("this runner has no client; it is replay-only")
+        if not self.allow_writes:
+            raise WriteRefused(
+                "the raw client bypasses the write gate, the rate cap and the "
+                "audit log, so it is refused unless writes are enabled; "
+                "pass allow_writes=True (--allow-writes), or use request()"
+            )
+        if self.dry_run:
+            raise WriteRefused(
+                "a dry run promises nothing reaches the glider, and the raw "
+                "client cannot honour that; use request(), which is simulated"
+            )
+        # Audited at WARNING, and loudly, because from here on the trail
+        # goes cold: the banner at startup says what the run was allowed
+        # to do, and this is the moment that stops being the whole story.
+        audit_log.warning(
+            "engine=%s took the raw client ESCAPE HATCH: "
+            "operations from here are unaudited and ungated",
+            type(self._engine).__name__,
+        )
         return self._client
 
     def add_glider(self, name: str) -> None:

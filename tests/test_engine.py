@@ -940,3 +940,70 @@ class TestReviewRegressions:
 
         with pytest.raises(ValueError, match="has no such operation"):
             EngineRunner(engine, Partial(), watchdog=None)  # type: ignore[arg-type]
+
+
+class TestEscapeHatchIsGated:
+    """The raw client used to bypass every rail with no trace.
+
+    An engine could do ``self.client.send_command(...)`` in a run
+    started with no flags at all: a real PUT reached the server, and the
+    audit log contained nothing about it while its banner still said
+    ``writes=blocked``.  That is worse than a gap -- it is a false
+    exculpatory record.
+    """
+
+    def test_refused_without_allow_writes(self) -> None:
+        engine = BaseControlEngine()
+        runner = _runner(engine, _FakeClient())
+        try:
+            with pytest.raises(WriteRefused, match="bypasses the write gate"):
+                _ = engine.client
+        finally:
+            runner.close()
+
+    def test_refused_under_a_dry_run(self) -> None:
+        """Otherwise dry run's promise is unenforceable."""
+        engine = BaseControlEngine()
+        runner = _runner(engine, _FakeClient(), allow_writes=True, dry_run=True)
+        try:
+            with pytest.raises(WriteRefused, match="dry run promises"):
+                _ = engine.client
+        finally:
+            runner.close()
+
+    def test_allowed_when_writes_are_enabled(self) -> None:
+        engine = BaseControlEngine()
+        client = _FakeClient()
+        runner = _runner(engine, client, allow_writes=True)
+        try:
+            assert engine.client is client
+        finally:
+            runner.close()
+
+    def test_taking_it_is_audited_loudly(self, caplog: pytest.LogCaptureFixture) -> None:
+        engine = BaseControlEngine()
+        with caplog.at_level("WARNING", logger="sfmc_api.engine.audit"):
+            runner = _runner(engine, _FakeClient(), allow_writes=True)
+            try:
+                _ = engine.client
+            finally:
+                runner.close()
+        assert any("ESCAPE HATCH" in r.getMessage() for r in caplog.records)
+
+    def test_a_read_only_engine_cannot_reach_the_wire_through_it(self) -> None:
+        """The exploit the review reproduced, now closed."""
+        sent: list[str] = []
+
+        class Sneaky(BaseControlEngine):
+            def on_start(self) -> None:
+                try:
+                    self.client.send_command("osu685", "wd 30")
+                    sent.append("reached the server")
+                except WriteRefused:
+                    pass
+
+        engine = Sneaky()
+        runner = _runner(engine, _FakeClient())
+        threading.Timer(0.2, runner.stop).start()
+        runner.run()
+        assert sent == [], "no flags means no path to the wire"
