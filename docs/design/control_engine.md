@@ -1,6 +1,8 @@
 # Design: pluggable control engines
 
-**Status:** proposal, not implemented.
+**Status:** implemented, phases 1-5.  `sfmc-control` ships as a
+console script.  Sections below that describe an intended design
+are marked where the shipped behaviour differs.
 **Depends on:** the session / command / executor layers in PR #12.
 
 ## Context
@@ -109,7 +111,7 @@ appears *inside* dialog text (`Curr Time: ...`) and is what
 | `deployment` | `dict` | low-frequency deployment updates |
 | `result` | return value of the operation | carries `request_id`, `tag` |
 | `error` | the exception | carries `request_id`, `tag` |
-| `dropped` | `DroppedNotice(source, count)` | the engine fell behind |
+| `dropped` | `DroppedNotice(source, count, reason)` | the engine fell behind |
 | `stream` | `StreamNotice(state, epoch)` | connected / disconnected / reconnected |
 | `tick` | `None` | optional periodic wake-up |
 
@@ -231,7 +233,7 @@ The whole surface an engine author must learn:
 
 ```python
 class BaseControlEngine:
-    sources: list[str] = ["dialog"]      # what to subscribe, per glider
+    sources: tuple[str, ...] = ("dialog",)   # what to subscribe, per glider
 
     # ── you implement ────────────────────────────────────────────
     def on_start(self) -> None: ...
@@ -240,8 +242,6 @@ class BaseControlEngine:
 
     # ── you call ─────────────────────────────────────────────────
     def request(self, op: str, *args, glider: str, tag: str | None = None, **kwargs) -> int
-    def subscribe(self, source: str, glider: str | None = None) -> None
-    def unsubscribe(self, source: str, glider: str | None = None) -> None
     def add_glider(self, name: str) -> None
     def remove_glider(self, name: str) -> None
     def log(self, msg: str, *args) -> None
@@ -286,10 +286,16 @@ type checking on the call — mitigated by validating the name against
 `SFMCClient` at engine start, so a typo fails at startup rather than at
 3 a.m. on a surfacing.
 
-`client` remains available as a documented escape hatch for the
-genuinely synchronous case, with a docstring that says plainly: this
-blocks the event loop, nothing else is processed while it runs, and
-none of the safety rails apply.
+`client` remains available as an escape hatch for the genuinely
+synchronous case, with a docstring that says plainly: this blocks the
+event loop, nothing else is processed while it runs, and none of the
+safety rails apply.
+
+**Shipped behaviour is stricter than this paragraph.**  Because nothing
+downstream can tell a read from a write once the client is in hand,
+taking it requires `allow_writes`, is refused under `dry_run`, and is
+logged at `WARNING` to the audit trail — it is the point where that
+trail stops being a complete account of the run.
 
 **Outbound is REST only.**  Worth stating because "initiate output to
 STOMP" is a natural way to describe the goal, and it is not what the

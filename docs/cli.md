@@ -36,7 +36,14 @@ python -m sfmc_api --help
 
 ### Destructive commands
 
-The following commands modify or remove server-side state:
+These commands **prompt for confirmation**.  Note what this list is
+and is not: it is the confirmation list, not the list of commands that
+change state.  **29** client operations are marked `@mutates` —
+including `send-command`, `set-assigned-script`, every `deploy-*`,
+every `update-*-plan`, `upload-glider-files` and `register-glider`.
+None of those prompt, and several move the vehicle.  "Removes
+server-side state" and "moves the glider" are different axes, and only
+the first one prompts:
 
 - `delete-glider-file`
 - `delete-hit-waypoint-surface-plan-rule`
@@ -171,7 +178,7 @@ sfmc-api --compact get-glider-details osu685 | jq .data.state
 | `resume-assigned-script` | `GLIDER` | Resume assigned script |
 | `rewind-assigned-script` | `GLIDER` | Rewind assigned script |
 | `send-command` | `GLIDER COMMAND` | Send command to glider |
-| `probe-command` | `GLIDER COMMAND` | Diagnostic: dump raw dialog frames around a command |
+| `probe-command` | `GLIDER COMMAND` | Diagnostic: **submits the command** and dumps raw dialog frames around it |
 
 #### Capturing a command's reply
 

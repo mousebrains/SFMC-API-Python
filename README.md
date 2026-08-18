@@ -122,9 +122,10 @@ sfmc-follow --glider osu685 --follower examples/drifter_follower.py \
             --config examples/drifter_config.yaml \
             --replay dialog.log --dry-run
 
-# Live: monitor the glider and upload generated files
+# Live: monitor the glider and upload generated files.
+# --allow-writes is required; without it the files are printed.
 sfmc-follow --glider osu685 --follower examples/drifter_follower.py \
-            --config examples/drifter_config.yaml
+            --config examples/drifter_config.yaml --allow-writes
 ```
 
 The included drifter follower example tracks a drifting target using
@@ -152,6 +153,27 @@ sfmc-xml-engine riot.xml --glider osu685 --send --max-runtime 3600
 attribute is in *minutes*.  See
 [docs/xml_engine.md](docs/xml_engine.md) for the language, the safety
 rails, and what is and is not validated against a live glider.
+
+### [Control Engines](docs/control_engine.md)
+
+Run a control engine — or an existing follower — against one or more
+gliders, reacting to every event on one thread:
+
+```bash
+# Read-only: sees everything, changes nothing
+sfmc-control --glider osu685 --engine my_engine.py
+
+# A formation, with an existing follower, writes enabled
+sfmc-control --glider osu684 --glider osu685 \
+             --follower my_follower.py --allow-writes
+
+# Offline against a recorded log, no network at all
+sfmc-control --glider osusim --engine my_engine.py --replay dialog.log
+```
+
+**Nothing changes state without `--allow-writes`**, and `--dry-run`
+simulates writes while still performing reads.  See
+[docs/control_engine.md](docs/control_engine.md).
 
 ### Integration Tests
 
@@ -215,6 +237,7 @@ See [docs/configuration.md](docs/configuration.md) for full details.
 - [Monitor Glider](docs/monitor_glider.md) -- real-time dialog and script monitoring
 - [Pull New Downloads](docs/pull_new_downloads.md) -- event-driven mirroring of new from-glider files
 - [Follow Glider](docs/follow_glider.md) -- autonomous follower plugins and simulation modes
+- [Control Engines](docs/control_engine.md) -- multi-glider engines, safety rails, `sfmc-control`
 - [XML Script Engine](docs/xml_engine.md) -- parse, replay, and run SFMC glider-script XML
 
 ## Getting Help

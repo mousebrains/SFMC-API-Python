@@ -1,5 +1,13 @@
 # Follow Glider
 
+> **Uploading now requires `--allow-writes`.**  Without it, generated
+> files are printed instead of sent — the same convention `sfmc-control`,
+> `sfmc-xml-engine` and `sfmc-api-test` use.  `--replay` no longer uploads
+> by default either; `--replay --allow-writes` still does, and warns that
+> it is PUTting files computed from stale recorded positions onto a live
+> vehicle.
+
+
 `sfmc-follow` monitors a glider's real-time dialog output, parses
 telemetry from each surfacing, feeds it to a user-supplied **follower
 plugin**, and uploads any files the follower generates back to SFMC.
@@ -261,7 +269,7 @@ Every run prints a one-line summary just before exiting:
   delivered to your follower.
 - `files_emitted` — number of files actually uploaded (or printed in
   `--dry-run`).
-- `upload_errors` — number of upload attempts that failed.  A non-zero
+- `upload_errors` — number of upload *batches* that failed after all retries.  Each batch is attempted 3 times, so `upload_errors=1` means three failed requests.  A non-zero
   count is logged with full tracebacks at the time of failure; the
   count is recapped here so you cannot miss it.
 - `reconnects` — number of successful second-or-later live subscriptions.

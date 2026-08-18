@@ -18,7 +18,7 @@ An engine subclasses :class:`BaseControlEngine`, implements
 :meth:`~BaseControlEngine.on_event`, and acts through
 :meth:`~BaseControlEngine.request`::
 
-    class WatchBattery(ControlEngine):
+    class WatchBattery(BaseControlEngine):
         sources = ("dialog",)
 
         def on_event(self, event):
@@ -277,8 +277,14 @@ class BaseControlEngine:
                 tagged with.
             tag: Your label, echoed back on the result.
 
-        Raises:
-            WriteRefused: If *op* changes state.  Phase 2 is read-only.
+        Returns:
+            A request id.  **This does not raise for a blocked write** —
+            a refusal (writes not enabled, rate cap reached) arrives as
+            an ``error`` event carrying :class:`WriteRefused` or
+            :class:`RateLimited`, so an engine handles it exactly like
+            any other failed operation.  It *does* raise ``ValueError``
+            if *op* is not a requestable operation at all, because that
+            is a bug in the engine rather than an operational condition.
         """
         return self._require_runner()._request(op, args, kwargs, glider=glider, tag=tag)
 
@@ -297,9 +303,9 @@ class BaseControlEngine:
     def notify(self, key: str, summary: str, detail: str) -> None:
         """Raise an operator-visible notification.
 
-        Phase 2 logs it.  Wiring this to the existing disconnect
-        notifier is deliberately left for the phase that also has to
-        decide de-duplication policy.
+        Logged here.  :class:`~sfmc_api.follower.FollowerEngine` passes a
+        notifier through to a wrapped follower; ``sfmc-control`` does not
+        yet construct one, so under that CLI this is log-only.
         """
         logger.warning("%s [%s] %s: %s", type(self).__name__, key, summary, detail)
 
