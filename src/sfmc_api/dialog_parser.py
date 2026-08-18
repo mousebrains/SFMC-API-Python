@@ -234,7 +234,6 @@ CARRIER_DETECT_RE = re.compile(r"Carrier Detect found")
 TIME_TO_DIVE_RE = re.compile(r"Time until diving is:\s*(-?\d+(?:\.\d+)?)\s*secs")
 
 #: ``Time until diving is: 295 secs`` -- how long she is still listening.
-TIME_TO_DIVE_RE = re.compile(r"Time until diving is:\s*(-?\d+(?:\.\d+)?)\s*secs")
 
 
 def parse_seconds_to_dive(line: str) -> float | None:
@@ -553,7 +552,19 @@ class SurfacingStream:
         self.dive_deadline: float | None = None
 
     def feed(self, line: str) -> SurfacingEvent | None:
-        """Feed one line; return a surfacing if one completed and is new."""
+        """Feed one line; return a surfacing if one completed and is new.
+
+        Blank lines are dropped before the parser, because
+        :class:`DialogParser` treats the first non-sensor line after the
+        sensor block as end-of-surfacing -- so one blank line inside that
+        block (Iridium framing, a firmware variant) truncates the
+        surfacing and discards every sensor after it.  ``sfmc-follow``
+        has always filtered them; a second consumer that did not made
+        the same dialog yield a different surfacing, which is the drift
+        this class exists to prevent.
+        """
+        if not line.strip():
+            return None
         remaining = parse_seconds_to_dive(line)
         if remaining is not None:
             # Tracked here rather than on the event, because the glider
@@ -581,8 +592,18 @@ class SurfacingStream:
         return self._filter(self.parser.flush())
 
     def reset(self) -> None:
-        """Clear the parser at a stream boundary.  Keeps the dedup cache."""
+        """Clear the parser at a stream boundary.
+
+        Also clears the dive deadline, which belongs to the surfacing
+        that just ended: keeping it made ``time_left()`` return a large
+        negative number on the next surfacing, so a controller waiting
+        on it stopped waiting immediately.  The dedup cache is
+        deliberately *not* cleared -- a boundary is exactly when a
+        replayed surfacing arrives.
+        """
         self.parser.reset()
+        self.seconds_to_dive = None
+        self.dive_deadline = None
 
     def _filter(self, event: SurfacingEvent | None) -> SurfacingEvent | None:
         if event is None:

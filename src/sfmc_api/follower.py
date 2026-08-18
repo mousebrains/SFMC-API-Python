@@ -487,6 +487,20 @@ class FollowerEngine(BaseControlEngine):
         # look before shutdown.
         for glider in list(self._streams):
             self._flush(glider)
+        # ...and whatever the follower queued from its own thread, which
+        # nothing else will drain.  sfmc-follow drains through a
+        # sentinel for the same reason: a steering file queued just
+        # before shutdown must still go, or the glider flies stale
+        # waypoints for the whole next dive.
+        remaining = list(self.gliders)
+        if remaining:
+            self._drain_uploads(remaining[0])
+        elif not self._queue_out.empty():
+            logger.warning(
+                "%s: %d queued upload batch(es) discarded; no glider to send them to",
+                type(self).__name__,
+                self._queue_out.qsize(),
+            )
 
     def on_event(self, event: Event) -> None:
         match event.source:
@@ -550,9 +564,25 @@ class FollowerEngine(BaseControlEngine):
             if batch is None:
                 return
             if isinstance(batch, UploadBatch):
-                folders, target = batch.folders, batch.glider or default_glider
+                folders, named = batch.folders, batch.glider
             else:
-                folders, target = batch, default_glider
+                folders, named = batch, None
+            target = named or default_glider
+            if named is None and len(self.gliders) > 1:
+                # An unnamed batch in a formation is a guess, and the
+                # guess is "whichever glider happens to drain it" -- so a
+                # follower that computes off-thread and queues files
+                # after on_surfacing returns would have its work
+                # uploaded to the *next* glider to surface.  Refuse
+                # rather than steer the wrong vehicle.
+                logger.error(
+                    "%s: refusing an upload with no target glider while following %s; "
+                    "call send_files(..., glider=...) -- outside on_surfacing there is "
+                    "no 'current' glider to default to",
+                    type(self).__name__,
+                    ", ".join(self.gliders),
+                )
+                continue
             for folder, files in folders.items():
                 if not files:
                     continue

@@ -40,9 +40,11 @@ flags                                what reaches the glider
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
 import inspect
 import logging
+import signal
 import sys
 import threading
 from pathlib import Path
@@ -330,7 +332,25 @@ def main(argv: list[str] | None = None) -> int:
             **extra,
         )
         if args.max_runtime:
-            threading.Timer(args.max_runtime, runner.stop).start()
+            # daemon=True: a non-daemon Timer kept the process alive for
+            # the full --max-runtime after Ctrl-C, so a day-long run took
+            # a day to exit.
+            timer = threading.Timer(args.max_runtime, runner.stop)
+            timer.daemon = True
+            timer.start()
+
+        # Every other long-running command handles these; this one did
+        # not, so `systemctl stop` killed it outright -- no on_stop, no
+        # parser flush, no upload drain -- on the only entry point that
+        # can command a glider.
+        def request_stop(signum: int, frame: object) -> None:
+            del signum, frame
+            logger.info("stop requested; draining")
+            runner.stop()
+
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with contextlib.suppress(ValueError):
+                signal.signal(sig, request_stop)
         try:
             runner.run()
         except KeyboardInterrupt:

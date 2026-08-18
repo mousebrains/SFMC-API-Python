@@ -474,6 +474,13 @@ class EngineRunner:
         # fail-safe direction.  Classifying the base class instead would
         # have kept calling it a read and let the PUT through.
         self.reads, self.writes = _classify(client)
+        if not self.reads and not self.writes:
+            raise ValueError(
+                f"{type(client).__name__} exposes no @reads/@mutates operations. "
+                "A client whose attributes resolve dynamically (Mock, autospec, a "
+                "delegating proxy) classifies as nothing, and every request would "
+                "then fail one at a time instead of here."
+            )
 
     @property
     def operations(self) -> frozenset[str]:
@@ -520,9 +527,14 @@ class EngineRunner:
         return self._client
 
     def add_glider(self, name: str) -> None:
+        # Audited: an engine adding a glider widens what this run
+        # touches, and that moment was previously invisible -- only the
+        # writes that followed were recorded.
+        audit_log.info("fleet: adding %s", name)
         self._require_fleet().add_glider(name)
 
     def remove_glider(self, name: str) -> None:
+        audit_log.info("fleet: removing %s", name)
         self._require_fleet().remove_glider(name)
 
     def _require_fleet(self) -> FleetStream:
@@ -549,10 +561,12 @@ class EngineRunner:
         # than wrapping every request in a try block.
         if op not in self.operations:
             raise ValueError(
-                f"{op!r} is not a requestable operation.  "
-                f"Reads: {sorted(READ_OPERATIONS)}.  Writes: {sorted(WRITE_OPERATIONS)}"
+                f"{op!r} is not a requestable operation on "
+                f"{type(self._client).__name__}.  "
+                f"Reads: {sorted(self.reads)}.  Writes: {sorted(self.writes)}"
             )
-        if self._client is None:
+        is_write_op = op in self.writes
+        if self._client is None and not (is_write_op and self.dry_run):
             raise RuntimeError(f"cannot {op!r}: this runner has no client; it is replay-only")
 
         with self._lock:
@@ -562,17 +576,22 @@ class EngineRunner:
         self._audit(request_id, glider, op, args, tag, "requested", kwargs=kwargs)
 
         if is_write and self._fleet is not None and glider not in self.gliders:
-            return self._refuse(
+            # Warned, not refused, and deliberately so.  `glider` is the
+            # serialisation *key*, which this module documents as not
+            # necessarily a glider at all -- register_glider names a new
+            # one, upload_cache_files names a group.  Refusing on it
+            # blocked those outright while stopping nothing: the actual
+            # target is an argument, so relabelling the request walked
+            # straight through.  A rail that can be stepped over is worse
+            # than none, because it is believed.  Enforcing a real scope
+            # needs a per-operation map of which argument names the
+            # vehicle; until that exists this is a signal, not a gate.
+            audit_log.warning(
+                "req=%d key=%s is outside this run's fleet (%s); "
+                "--glider is what is streamed, not a capability boundary",
                 request_id,
                 glider,
-                op,
-                args,
-                tag,
-                WriteRefused(
-                    f"{glider!r} is not in this run's fleet "
-                    f"({', '.join(self.gliders) or 'none'}); --glider is a scope, "
-                    "and a write to a glider outside it is refused"
-                ),
+                ", ".join(self.gliders) or "none",
             )
         if is_write and not self.allow_writes:
             return self._refuse(
@@ -814,6 +833,8 @@ class EngineRunner:
                 continue
             if not self.outstanding:
                 return
+            if self._merge._closed:
+                time.sleep(0.05)
         if self.outstanding:
             logger.warning(
                 "replay finished with %d request(s) still outstanding after %.0fs",
@@ -929,7 +950,11 @@ class EngineRunner:
                 self._fleet.close()
         finally:
             try:
-                self._merge.close()
+                if self._owns_fleet:
+                    # An injected fleet's merge belongs to its owner;
+                    # closing it left their sessions live and permanently
+                    # blinded the next runner built on that fleet.
+                    self._merge.close()
             finally:
                 if self._owns_executor:
                     self._ops.shutdown(wait=False, cancel_pending=True)

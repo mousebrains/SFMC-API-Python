@@ -1141,28 +1141,41 @@ class TestConcurrencyReviewRegressions:
         assert touched == [], "classification must not evaluate properties"
 
 
-class TestWritesAreScopedToTheFleet:
-    """--glider is a scope, so the CLI's warning is true.
+class TestOutOfFleetWritesAreFlagged:
+    """--glider is what is streamed, not a capability boundary.
 
-    control.py warns "this run can command X" naming the --glider list.
-    Without scoping that was false: request() would command any glider
-    registered on the server, including one never named -- and a
-    formation follower with a stale name in its YAML would upload a
-    waypoint file to a vehicle nobody was flying.
+    An earlier revision refused writes whose `glider=` fell outside the
+    fleet.  That rail was both too strict and useless: it blocked
+    register_glider (whose key names a glider that cannot be in the
+    fleet yet) and upload_cache_files (whose key is a *group*), while
+    stopping nothing, because `glider=` is the serialisation key and the
+    real target is an argument -- so relabelling the request walked
+    straight through it.  A rail that can be stepped over is worse than
+    none, because it gets believed.  It is now an audited warning.
     """
 
-    def test_a_write_outside_the_fleet_is_refused(self) -> None:
+    def test_an_out_of_fleet_key_is_warned_about(self, caplog: pytest.LogCaptureFixture) -> None:
+        engine = BaseControlEngine()
+        client = _FakeClient()
+        with caplog.at_level("WARNING", logger="sfmc_api.engine.audit"):
+            runner = _runner(engine, client, gliders=("osu684",), allow_writes=True)
+            try:
+                engine.request("send_command", "osu999", "abort", glider="osu999")
+                time.sleep(0.2)
+            finally:
+                runner.stop()
+                runner.close()
+        assert any("outside this run's fleet" in r.getMessage() for r in caplog.records)
+
+    def test_registering_a_new_glider_is_not_blocked(self) -> None:
+        """The rail made this impossible: a new glider is never in the fleet."""
         engine = BaseControlEngine()
         client = _FakeClient()
         runner = _runner(engine, client, gliders=("osu684",), allow_writes=True)
         try:
-            engine.request("send_command", "osu999", "abort", glider="osu999")
-            event = runner._merge.get(timeout=1)
-            assert event is not None and event.source == "error"
-            assert isinstance(event.body, WriteRefused)
-            assert "not in this run's fleet" in str(event.body)
-            time.sleep(0.1)
-            assert client.calls == [], "and nothing reached the client"
+            engine.request("register_glider", "osu999", glider="osu999")
+            event = runner._merge.get(timeout=2)
+            assert event is not None and event.source == "result"
         finally:
             runner.stop()
             runner.close()

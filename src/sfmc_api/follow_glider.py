@@ -522,6 +522,22 @@ def _upload_files(
             folders = output
             target = glider_name
 
+        if target != glider_name:
+            # sfmc-follow takes exactly one --glider, so a batch naming
+            # another vehicle is by construction outside what the
+            # operator asked for.  Formations belong on sfmc-control,
+            # where the fleet is declared.
+            upload_log.error(
+                "refusing upload to %s: this pipeline was started for %s. "
+                "send_files(glider=...) naming another vehicle needs sfmc-control "
+                "with that glider in --glider",
+                target,
+                glider_name,
+            )
+            if stats is not None:
+                stats.incr_upload_errors()
+            continue
+
         for folder, files in folders.items():
             if not files:
                 continue
@@ -1035,8 +1051,12 @@ def follow_glider(
     if replay and not dry_run and client is None:
         raise ValueError("client is required for replay + upload mode")
 
-    # ── Verify glider exists (skip in offline replay) ───────────
-    if client is not None and not replay:
+    # ── Verify glider exists ────────────────────────────────────
+    # No longer skipped in replay.  A client exists only when we are
+    # actually uploading, and that is precisely when the target must be
+    # real -- replay + upload was the path that could PUT steering files
+    # onto a live vehicle with nothing having checked the name.
+    if client is not None:
         # Retried like the session loop: a service started at boot,
         # before DNS/WAN is up, must not exit on a transient failure
         # the steady-state supervisor would have ridden out.
@@ -1305,10 +1325,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Seconds between surfacing events during replay (default: 10)",
     )
     sim.add_argument(
+        "--allow-writes",
+        action="store_true",
+        default=False,
+        help=(
+            "Permit uploads to the glider.  Without this, generated files are "
+            "printed instead of sent -- the same rule sfmc-control, "
+            "sfmc-xml-engine and sfmc-api-test use, so one convention covers "
+            "every tool that can move a vehicle."
+        ),
+    )
+    sim.add_argument(
         "--dry-run",
         action="store_true",
         default=False,
-        help="Print generated files instead of uploading to SFMC",
+        help="Print generated files instead of uploading (the default without --allow-writes)",
     )
     sim.add_argument(
         "--strict",
@@ -1373,8 +1404,25 @@ def main() -> None:
     if args.config:
         follower_config = _load_yaml(args.config)
 
-    # Decide whether we need an SFMC client.
-    need_client = not (args.replay and args.dry_run)
+    # Uploading now requires --allow-writes, like every other tool that
+    # can move a vehicle.  --dry-run remains as an explicit way to say
+    # "print what you would send", which is also what happens by default.
+    uploading = args.allow_writes and not args.dry_run
+    if args.replay and uploading:
+        # --replay used to upload to the live glider while sitting in an
+        # argparse group titled "simulation modes", and the same word
+        # means genuinely offline in every other tool.  Replayed dialog
+        # carries stale positions, so the follower computes waypoints for
+        # where the glider *was* and PUTs them onto where it *is*.
+        # Still available -- it is a real integration test -- but it must
+        # now be asked for twice.
+        logger.warning(
+            "--replay with --allow-writes UPLOADS TO THE LIVE GLIDER %s "
+            "from recorded, stale dialog",
+            args.glider,
+        )
+    # A client is needed for uploads, and for the startup glider check.
+    need_client = uploading
 
     stats: RunStats | None = None
     stop = threading.Event()
@@ -1422,7 +1470,7 @@ def main() -> None:
                         log_backup_count=args.log_backup_count,
                         replay=args.replay,
                         replay_interval=args.replay_interval,
-                        dry_run=args.dry_run,
+                        dry_run=not uploading,
                         stop=stop,
                         reconnect=not args.no_reconnect,
                         notifier=notifier,
@@ -1440,7 +1488,7 @@ def main() -> None:
                     log_backup_count=args.log_backup_count,
                     replay=args.replay,
                     replay_interval=args.replay_interval,
-                    dry_run=args.dry_run,
+                    dry_run=not uploading,
                     stop=stop,
                     reconnect=not args.no_reconnect,
                 )
