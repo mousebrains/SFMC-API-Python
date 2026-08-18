@@ -356,6 +356,10 @@ class EngineRunner:
         max_failures: Consecutive ``on_event`` failures before stopping.
             Continuing after one bad event is right for a long mission;
             continuing forever with a wedged engine is not.
+        final_drain: Seconds to let work queued during shutdown finish.
+            ``sfmc-follow`` waits 45 s for the same reason: a steering
+            file queued just before a disconnect must still be uploaded,
+            or the glider flies stale waypoints for the whole next dive.
         allow_writes: Permit state-changing operations.  **Off by
             default**, matching ``sfmc-api-test``'s posture so the
             project has one rule rather than two.  A blocked write
@@ -388,6 +392,7 @@ class EngineRunner:
         max_workers: int = DEFAULT_MAX_WORKERS,
         watchdog: float | None = DEFAULT_WATCHDOG_SECONDS,
         max_failures: int = DEFAULT_MAX_FAILURES,
+        final_drain: float = 45.0,
         allow_writes: bool = False,
         dry_run: bool = False,
         max_outstanding: int = DEFAULT_MAX_OUTSTANDING,
@@ -403,6 +408,7 @@ class EngineRunner:
         self.writes: frozenset[str] = WRITE_OPERATIONS
         self._watchdog = watchdog
         self._max_failures = max_failures
+        self._final_drain = final_drain
         self._validate(engine, client)
         if fleet is not None:
             self._fleet: FleetStream | None = fleet
@@ -555,6 +561,19 @@ class EngineRunner:
         is_write = op in self.writes
         self._audit(request_id, glider, op, args, tag, "requested", kwargs=kwargs)
 
+        if is_write and self._fleet is not None and glider not in self.gliders:
+            return self._refuse(
+                request_id,
+                glider,
+                op,
+                args,
+                tag,
+                WriteRefused(
+                    f"{glider!r} is not in this run's fleet "
+                    f"({', '.join(self.gliders) or 'none'}); --glider is a scope, "
+                    "and a write to a glider outside it is refused"
+                ),
+            )
         if is_write and not self.allow_writes:
             return self._refuse(
                 request_id,
@@ -728,6 +747,13 @@ class EngineRunner:
                 self._engine.on_stop()
             except Exception:
                 logger.exception("%s.on_stop failed", type(self._engine).__name__)
+            # on_stop may queue work -- a follower flushes a part-built
+            # surfacing and its files land here.  Closing immediately
+            # submitted those and then cancelled them, which reverses
+            # what the deployed pipeline promises out loud: files queued
+            # just before a disconnect must still be uploaded, or the
+            # glider flies stale waypoints for the whole next dive.
+            self._drain_final(self._final_drain)
             self.close()
 
     def _deliver(self, event: Event) -> None:
@@ -838,6 +864,20 @@ class EngineRunner:
 
         self._tick_thread = threading.Thread(target=beat, daemon=True, name="sfmc-engine-tick")
         self._tick_thread.start()
+
+    def _drain_final(self, timeout: float) -> None:
+        """Let work queued during shutdown finish before the pool closes."""
+        if timeout <= 0 or not self.outstanding:
+            return
+        deadline = time.monotonic() + timeout
+        while self.outstanding and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if self.outstanding:
+            logger.warning(
+                "shutting down with %d request(s) unfinished after %.0fs; they are cancelled",
+                self.outstanding,
+                timeout,
+            )
 
     # ── Watchdog ─────────────────────────────────────────────────────
 

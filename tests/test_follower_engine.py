@@ -355,3 +355,31 @@ class TestDeduplicationIsShared:
 
         legacy = importlib.import_module("sfmc_api.follow_glider")
         assert legacy.SurfacingDeduplicator is SurfacingDeduplicator
+
+
+class TestShutdownDrains:
+    """Files queued during shutdown must still be uploaded.
+
+    sfmc-follow says so explicitly: "files queued just before a
+    disconnect or Ctrl-C must still be uploaded... the glider would fly
+    stale waypoints for the whole next dive."  On the engine path
+    on_stop's flush queued uploads and close() then cancelled them.
+    """
+
+    def test_files_flushed_in_on_stop_are_uploaded(self) -> None:
+        engine = FollowerEngine(LegacyFollower)
+        client = _FakeClient()
+        fleet = FleetStream(client, sources=("dialog",))
+        session = _FakeSession()
+        fleet.add_glider("osu684", session)
+        runner = EngineRunner(engine, client, fleet=fleet, watchdog=None, allow_writes=True)
+        # A surfacing the parser is still holding when we stop: no
+        # disconnect arrives, so only on_stop's flush will emit it.
+        for line in SURFACING[:-1]:
+            session.emit_line(line)
+        session.emit_line(SURFACING[-1])
+        threading.Timer(0.4, runner.stop).start()
+        runner.run()
+
+        assert client.uploads, "the shutdown flush reached the client"
+        assert client.uploads[0][0] == "osu684"

@@ -469,6 +469,16 @@ class FollowerEngine(BaseControlEngine):
         # reconnect reached the follower twice.
         self._streams: dict[str, SurfacingStream] = {}
 
+    def set_notifier(self, notifier: DisconnectNotifier | None) -> None:
+        """Pass the operator-email notifier through to the follower.
+
+        sfmc-follow has always wired this; without it every
+        :meth:`BaseFollower.notify` is a silent no-op, and a follower
+        that alerts an operator when its external feed goes quiet simply
+        stops alerting anyone.
+        """
+        self.follower.set_notifier(notifier)
+
     def on_start(self) -> None:
         self.log("following %s", ", ".join(self.gliders) or "no gliders yet")
 

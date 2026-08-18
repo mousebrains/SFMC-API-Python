@@ -87,9 +87,21 @@ class _FakeClient:
         return call
 
 
-def _runner(engine: BaseControlEngine, client: Any = None, **kwargs: Any) -> EngineRunner:
+def _runner(
+    engine: BaseControlEngine,
+    client: Any = None,
+    gliders: tuple[str, ...] = ("osu684", "osu685"),
+    **kwargs: Any,
+) -> EngineRunner:
+    """A runner with a fleet, because --glider is a write scope.
+
+    Writes to a glider outside the run's fleet are refused, so a test
+    that requests one has to have added it -- same as an operator.
+    """
     client = client if client is not None else _FakeClient()
     fleet = FleetStream(client, sources=tuple(engine.sources))
+    for name in gliders:
+        fleet.add_glider(name, _FakeSession())
     return EngineRunner(engine, client, fleet=fleet, watchdog=None, **kwargs)
 
 
@@ -1127,3 +1139,54 @@ class TestConcurrencyReviewRegressions:
         runner = _runner(BaseControlEngine(), Nosy())
         runner.close()
         assert touched == [], "classification must not evaluate properties"
+
+
+class TestWritesAreScopedToTheFleet:
+    """--glider is a scope, so the CLI's warning is true.
+
+    control.py warns "this run can command X" naming the --glider list.
+    Without scoping that was false: request() would command any glider
+    registered on the server, including one never named -- and a
+    formation follower with a stale name in its YAML would upload a
+    waypoint file to a vehicle nobody was flying.
+    """
+
+    def test_a_write_outside_the_fleet_is_refused(self) -> None:
+        engine = BaseControlEngine()
+        client = _FakeClient()
+        runner = _runner(engine, client, gliders=("osu684",), allow_writes=True)
+        try:
+            engine.request("send_command", "osu999", "abort", glider="osu999")
+            event = runner._merge.get(timeout=1)
+            assert event is not None and event.source == "error"
+            assert isinstance(event.body, WriteRefused)
+            assert "not in this run's fleet" in str(event.body)
+            time.sleep(0.1)
+            assert client.calls == [], "and nothing reached the client"
+        finally:
+            runner.stop()
+            runner.close()
+
+    def test_a_write_inside_the_fleet_proceeds(self) -> None:
+        engine = BaseControlEngine()
+        client = _FakeClient()
+        runner = _runner(engine, client, gliders=("osu684",), allow_writes=True)
+        try:
+            engine.request("send_command", "osu684", "Ctrl-M", glider="osu684")
+            event = runner._merge.get(timeout=2)
+            assert event is not None and event.source == "result"
+        finally:
+            runner.stop()
+            runner.close()
+
+    def test_reads_outside_the_fleet_are_still_allowed(self) -> None:
+        """Asking about a glider is not commanding it."""
+        engine = BaseControlEngine()
+        runner = _runner(engine, _FakeClient(), gliders=("osu684",))
+        try:
+            engine.request("get_glider_details", "osu999", glider="osu999")
+            event = runner._merge.get(timeout=2)
+            assert event is not None and event.source == "result"
+        finally:
+            runner.stop()
+            runner.close()
