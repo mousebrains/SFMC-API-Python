@@ -308,3 +308,50 @@ class TestUploadBatch:
         finally:
             runner.stop()
             runner.close()
+
+
+class TestDeduplicationIsShared:
+    """The drift that already happened, now closed.
+
+    sfmc-follow has always suppressed a surfacing re-delivered after a
+    reconnect -- SFMC replays dialog when a subscription is replaced.
+    FollowerEngine re-implemented the parser feeding and omitted it, so
+    a follower on the engine acted on the same surfacing twice: it
+    re-ran its decision and re-sent its files.  Both now use
+    SurfacingStream.
+    """
+
+    def test_a_replayed_surfacing_reaches_the_follower_once(self) -> None:
+        engine = FollowerEngine(LegacyFollower)
+        # SFMC's resubscribe replay: the identical block, twice.
+        for _ in range(2):
+            for line in SURFACING:
+                surfacing = engine._stream("osu684").feed(line)
+                if surfacing is not None:
+                    engine.follower.on_surfacing(surfacing)
+        assert engine.follower.seen == ["osu684"], "the replay must be suppressed"
+
+    def test_the_parser_resets_but_the_dedup_cache_does_not(self) -> None:
+        """Their lifetimes differ, and that difference is the point.
+
+        Resetting the cache at a stream boundary would defeat it
+        entirely: a boundary is exactly when the replay arrives.
+        """
+        from sfmc_api.dialog_parser import SurfacingStream
+
+        stream = SurfacingStream()
+        for line in SURFACING:
+            stream.feed(line)
+        stream.reset()
+        again = [stream.feed(line) for line in SURFACING]
+        assert all(event is None for event in again)
+
+    def test_both_consumers_use_the_same_implementation(self) -> None:
+        # import_module, because sfmc_api.follow_glider the *function*
+        # is exported from the package and shadows the module name.
+        import importlib
+
+        from sfmc_api.dialog_parser import SurfacingDeduplicator
+
+        legacy = importlib.import_module("sfmc_api.follow_glider")
+        assert legacy.SurfacingDeduplicator is SurfacingDeduplicator

@@ -151,7 +151,7 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any
 
-from sfmc_api.dialog_parser import DialogParser, SurfacingEvent
+from sfmc_api.dialog_parser import SurfacingEvent, SurfacingStream
 from sfmc_api.engine import BaseControlEngine
 from sfmc_api.events import Event
 
@@ -460,10 +460,14 @@ class FollowerEngine(BaseControlEngine):
         self._queue_in: Queue[SurfacingEvent | None] = Queue()
         self._queue_out: Queue[UploadBatch | dict[str, dict[str, str | bytes]] | None] = Queue()
         self.follower = follower_class(self.config, self._queue_in, self._queue_out)
-        # One parser per glider: a parser accumulates the lines of one
+        # One stream per glider: a parser accumulates the lines of one
         # surfacing, and two gliders surfacing at once would otherwise
-        # braid their GPS fixes into a single event.
-        self._parsers: dict[str, DialogParser] = {}
+        # braid their GPS fixes into a single event.  SurfacingStream
+        # also carries the de-duplication sfmc-follow has always had --
+        # an earlier version of this class re-implemented the parser
+        # feeding and simply omitted it, so a surfacing replayed after a
+        # reconnect reached the follower twice.
+        self._streams: dict[str, SurfacingStream] = {}
 
     def on_start(self) -> None:
         self.log("following %s", ", ".join(self.gliders) or "no gliders yet")
@@ -471,14 +475,13 @@ class FollowerEngine(BaseControlEngine):
     def on_stop(self) -> None:
         # Whatever a partial surfacing has accumulated is worth one last
         # look before shutdown.
-        for glider in list(self._parsers):
+        for glider in list(self._streams):
             self._flush(glider)
 
     def on_event(self, event: Event) -> None:
         match event.source:
             case "dialog":
-                parser = self._parsers.setdefault(event.glider, DialogParser())
-                surfacing = parser.feed_line(event.body)
+                surfacing = self._stream(event.glider).feed(event.body)
                 if surfacing is not None:
                     self._deliver(surfacing, event.glider)
             case "stream" if event.body.state == "disconnected":
@@ -488,14 +491,25 @@ class FollowerEngine(BaseControlEngine):
             case "error" if event.tag == "upload":
                 self.log("%s: upload failed: %s", event.glider, event.body)
 
+    def _stream(self, glider: str) -> SurfacingStream:
+        stream = self._streams.get(glider)
+        if stream is None:
+            stream = SurfacingStream(
+                on_duplicate=lambda identity, g=glider: self.log(  # type: ignore[misc]
+                    "%s: duplicate surfacing suppressed: %s", g, identity
+                )
+            )
+            self._streams[glider] = stream
+        return stream
+
     def _flush(self, glider: str) -> None:
-        parser = self._parsers.get(glider)
-        if parser is None:
+        stream = self._streams.get(glider)
+        if stream is None:
             return
-        surfacing = parser.flush()
+        surfacing = stream.flush()
         if surfacing is not None:
             self._deliver(surfacing, glider)
-        parser.reset()
+        stream.reset()
 
     def _deliver(self, surfacing: SurfacingEvent, glider: str) -> None:
         """Hand one surfacing to the follower, then send what it queued."""

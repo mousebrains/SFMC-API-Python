@@ -139,7 +139,6 @@ import signal
 import sys
 import threading
 import time
-from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -147,7 +146,11 @@ from queue import Queue
 from typing import Any
 
 from sfmc_api.client import SFMCClient
-from sfmc_api.dialog_parser import DialogParser, SurfacingEvent
+from sfmc_api.dialog_parser import (
+    DialogParser,
+    SurfacingDeduplicator,
+    SurfacingEvent,
+)
 from sfmc_api.dialog_stream import LineAssembler, ordered_dialog
 from sfmc_api.disconnect_notify import (
     DisconnectNotifier,
@@ -318,38 +321,6 @@ def _open_replay(
 # ── Dialog reader thread (shared by live and replay) ────────────────
 
 
-class _RecentSurfacingIds:
-    """Bounded de-duplication cache for strong surfacing identities."""
-
-    def __init__(self, maxsize: int = 128) -> None:
-        self._maxsize = maxsize
-        self._ordered: deque[tuple[Any, ...]] = deque()
-        self._known: set[tuple[Any, ...]] = set()
-
-    def duplicate_identity(self, event: SurfacingEvent) -> tuple[Any, ...] | None:
-        if event.timestamp is not None and event.mission_time is not None:
-            identity: tuple[Any, ...] = (
-                event.vehicle_name,
-                event.timestamp,
-                event.mission_time,
-            )
-        else:
-            # Weak fallback: a surfacing whose Curr Time line was
-            # dropped or garbled still reproduces the identical raw
-            # dialog block when SFMC's resubscribe replay re-delivers
-            # it, so its content identifies it.  Treating "no identity"
-            # as "not a duplicate" delivered the same surfacing to the
-            # follower twice across a reconnect.
-            identity = (event.vehicle_name, "raw-lines", hash(tuple(event.raw_lines)))
-        if identity in self._known:
-            return identity
-        if len(self._ordered) >= self._maxsize:
-            self._known.remove(self._ordered.popleft())
-        self._ordered.append(identity)
-        self._known.add(identity)
-        return None
-
-
 #: Queue depth beyond which a backlog warning is logged.  Surfacings
 #: arrive hours apart, so more than this many waiting means the
 #: follower has been stuck or too slow for days.
@@ -360,7 +331,7 @@ def _deliver_surfacing(
     event: SurfacingEvent | None,
     queue_in: Queue[SurfacingEvent | None],
     stats: RunStats | None,
-    recent_ids: _RecentSurfacingIds | None,
+    recent_ids: SurfacingDeduplicator | None,
     info_log: logging.Logger | None,
 ) -> bool:
     if event is None:
@@ -391,7 +362,7 @@ def _finish_dialog_session(
     dialog_log: logging.Logger | None,
     flush_unterminated: bool,
     stats: RunStats | None,
-    recent_ids: _RecentSurfacingIds | None,
+    recent_ids: SurfacingDeduplicator | None,
     info_log: logging.Logger | None,
 ) -> None:
     pending_bytes = len(assembler.pending.encode("utf-8"))
@@ -424,7 +395,7 @@ def _read_dialog(
     stop: threading.Event,
     event_interval: float = 0.0,
     stats: RunStats | None = None,
-    recent_ids: _RecentSurfacingIds | None = None,
+    recent_ids: SurfacingDeduplicator | None = None,
     info_log: logging.Logger | None = None,
     flush_unterminated: bool = True,
 ) -> None:
@@ -801,7 +772,7 @@ def _run_live_dialog_sessions(
     info_log: logging.Logger,
     stop: threading.Event,
     stats: RunStats,
-    recent_ids: _RecentSurfacingIds,
+    recent_ids: SurfacingDeduplicator,
     follower: BaseFollower,
     output_thread: threading.Thread,
     output_results: queue.Queue[_ThreadResult],
@@ -873,7 +844,7 @@ def _run_replay_dialog(
     info_log: logging.Logger,
     stop: threading.Event,
     stats: RunStats,
-    recent_ids: _RecentSurfacingIds,
+    recent_ids: SurfacingDeduplicator,
     follower: BaseFollower,
     output_thread: threading.Thread,
     output_results: queue.Queue[_ThreadResult],
@@ -1141,7 +1112,7 @@ def follow_glider(
     # files reach the wrong vehicle.
     follower.current_glider = glider_name
     info_log.info("Follower: %s", type(follower).__name__)
-    recent_ids = _RecentSurfacingIds()
+    recent_ids = SurfacingDeduplicator()
     output_results: queue.Queue[_ThreadResult] = queue.Queue()
     upload_abort = threading.Event()
     if dry_run:

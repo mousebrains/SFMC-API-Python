@@ -18,9 +18,9 @@ from sfmc_api.disconnect_notify import DisconnectNotifier
 from sfmc_api.exceptions import RateLimitError
 from sfmc_api.follow_glider import (
     RunStats,
+    SurfacingDeduplicator,
     _open_replay,
     _read_dialog,
-    _RecentSurfacingIds,
     follow_glider,
 )
 from sfmc_api.follower import BaseFollower
@@ -373,7 +373,7 @@ def test_replay_boundary_flushes_and_resets_parser(tmp_path: Path) -> None:
         None,
         stop,
         stats=stats,
-        recent_ids=_RecentSurfacingIds(),
+        recent_ids=SurfacingDeduplicator(),
     )
     file_reader.join(timeout=2)
 

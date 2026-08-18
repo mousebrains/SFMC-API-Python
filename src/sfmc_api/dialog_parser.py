@@ -82,8 +82,11 @@ import contextlib
 import logging
 import math
 import re
+from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 from sfmc_api.coordinates import dddmm_to_decimal
 
@@ -446,4 +449,99 @@ class DialogParser:
             result = self._try_emit()
             self.reset()
             return result
+        return None
+
+
+class SurfacingDeduplicator:
+    """Remembers recent surfacings so a re-delivered one is not acted on twice.
+
+    SFMC replays dialog when a subscription is replaced, so the same
+    surfacing block can arrive again after a reconnect.  Acting on it
+    twice means a follower re-runs its decision and a control engine
+    re-sends its commands.
+
+    Lives *outside* any parser on purpose: a :class:`DialogParser` is
+    reset at each stream boundary, and this must survive exactly those
+    boundaries to do its job.
+
+    Args:
+        maxsize: How many identities to remember.
+    """
+
+    def __init__(self, maxsize: int = 128) -> None:
+        self._maxsize = maxsize
+        self._ordered: deque[tuple[Any, ...]] = deque()
+        self._known: set[tuple[Any, ...]] = set()
+
+    def duplicate_identity(self, event: SurfacingEvent) -> tuple[Any, ...] | None:
+        """Return the identity if *event* was seen before, else ``None``."""
+        if event.timestamp is not None and event.mission_time is not None:
+            identity: tuple[Any, ...] = (
+                event.vehicle_name,
+                event.timestamp,
+                event.mission_time,
+            )
+        else:
+            # Weak fallback: a surfacing whose Curr Time line was
+            # dropped or garbled still reproduces the identical raw
+            # dialog block when SFMC's resubscribe replay re-delivers
+            # it, so its content identifies it.  Treating "no identity"
+            # as "not a duplicate" delivered the same surfacing to the
+            # follower twice across a reconnect.
+            identity = (event.vehicle_name, "raw-lines", hash(tuple(event.raw_lines)))
+        if identity in self._known:
+            return identity
+        if len(self._ordered) >= self._maxsize:
+            self._known.remove(self._ordered.popleft())
+        self._ordered.append(identity)
+        self._known.add(identity)
+        return None
+
+
+class SurfacingStream:
+    """One glider's dialog lines in, de-duplicated surfacings out.
+
+    The parser and the deduplicator have deliberately different
+    lifetimes -- :meth:`reset` clears the parser at a stream boundary
+    and leaves the deduplicator alone, because a surfacing replayed
+    *across* that boundary is the case it exists for.  Keeping them in
+    one object is what stops the two from being wired up differently in
+    two places, which is how one consumer ended up with no
+    de-duplication at all.
+
+    Args:
+        dedup: Share one across streams to suppress duplicates fleet
+            wide, or leave it and get a private one per glider.
+        on_duplicate: Called with the identity when one is suppressed.
+    """
+
+    def __init__(
+        self,
+        dedup: SurfacingDeduplicator | None = None,
+        on_duplicate: Callable[[tuple[Any, ...]], None] | None = None,
+    ) -> None:
+        self.parser = DialogParser()
+        self.dedup = dedup if dedup is not None else SurfacingDeduplicator()
+        self._on_duplicate = on_duplicate
+
+    def feed(self, line: str) -> SurfacingEvent | None:
+        """Feed one line; return a surfacing if one completed and is new."""
+        return self._filter(self.parser.feed_line(line))
+
+    def flush(self) -> SurfacingEvent | None:
+        """Emit whatever the parser is still holding, if it is new."""
+        return self._filter(self.parser.flush())
+
+    def reset(self) -> None:
+        """Clear the parser at a stream boundary.  Keeps the dedup cache."""
+        self.parser.reset()
+
+    def _filter(self, event: SurfacingEvent | None) -> SurfacingEvent | None:
+        if event is None:
+            return None
+        identity = self.dedup.duplicate_identity(event)
+        if identity is None:
+            return event
+        if self._on_duplicate is not None:
+            self._on_duplicate(identity)
         return None

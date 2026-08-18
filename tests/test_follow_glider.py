@@ -1143,9 +1143,9 @@ class TestWeakDuplicateIdentity:
     missing/garbled — replayed surfacings reproduce identical blocks."""
 
     def test_identical_raw_block_is_duplicate(self) -> None:
-        from sfmc_api.follow_glider import _RecentSurfacingIds
+        from sfmc_api.dialog_parser import SurfacingDeduplicator
 
-        cache = _RecentSurfacingIds()
+        cache = SurfacingDeduplicator()
         lines = ["Carrier Detect found", "GPS Location: ...", "sensor: ..."]
         first = SurfacingEvent(vehicle_name="g", raw_lines=list(lines))
         replayed = SurfacingEvent(vehicle_name="g", raw_lines=list(lines))
@@ -1154,9 +1154,9 @@ class TestWeakDuplicateIdentity:
         assert cache.duplicate_identity(replayed) is not None
 
     def test_distinct_raw_blocks_are_not_duplicates(self) -> None:
-        from sfmc_api.follow_glider import _RecentSurfacingIds
+        from sfmc_api.dialog_parser import SurfacingDeduplicator
 
-        cache = _RecentSurfacingIds()
+        cache = SurfacingDeduplicator()
         first = SurfacingEvent(vehicle_name="g", raw_lines=["block one"])
         second = SurfacingEvent(vehicle_name="g", raw_lines=["block two"])
 
@@ -1166,9 +1166,9 @@ class TestWeakDuplicateIdentity:
     def test_strong_identity_still_used_when_available(self) -> None:
         from datetime import UTC, datetime
 
-        from sfmc_api.follow_glider import _RecentSurfacingIds
+        from sfmc_api.dialog_parser import SurfacingDeduplicator
 
-        cache = _RecentSurfacingIds()
+        cache = SurfacingDeduplicator()
         ts = datetime(2026, 3, 28, 20, 40, 38, tzinfo=UTC)
         first = SurfacingEvent(vehicle_name="g", timestamp=ts, mission_time=1.0)
         # Same time identity, different raw lines (fragmentation varies).
