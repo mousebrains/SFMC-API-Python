@@ -586,8 +586,12 @@ def _upload_files(
                     else:
                         time.sleep(delay)
                 else:
+                    # Naming the glider matters: without it neither
+                    # this log nor --dry-run can reveal a mistargeted
+                    # upload.
                     upload_log.info(
-                        "Uploaded to %s: %s",
+                        "Uploaded to %s %s: %s",
+                        target,
                         folder,
                         filenames,
                     )
@@ -603,6 +607,7 @@ def _print_files(
     queue_out: Queue[UploadBatch | dict[str, dict[str, str | bytes]] | None],
     output_log: logging.Logger,
     stats: RunStats | None = None,
+    glider_name: str = "?",
 ) -> None:
     """Print generated files instead of uploading them.
 
@@ -618,7 +623,10 @@ def _print_files(
         if output is None:
             break
 
-        folders = output.folders if isinstance(output, UploadBatch) else output
+        if isinstance(output, UploadBatch):
+            folders, target = output.folders, output.glider or glider_name
+        else:
+            folders, target = output, glider_name
         for folder, files in folders.items():
             if not files:
                 continue
@@ -629,8 +637,12 @@ def _print_files(
                 else:
                     byte_count = len(content.encode("utf-8"))
                     display = content
+                # The target is named so a dry run can reveal a
+                # mistargeted upload, which is most of what a dry run
+                # is for.
                 output_log.info(
-                    "[dry-run] %s/%s (%d bytes):\n%s",
+                    "[dry-run] -> %s %s/%s (%d bytes):\n%s",
+                    target,
                     folder,
                     filename,
                     byte_count,
@@ -1123,6 +1135,11 @@ def follow_glider(
     # (conditions only its own logic can see, e.g. an external feed
     # going quiet).  No-op when email alerting is off.
     follower.set_notifier(notifier)
+    # The operator's --glider is the upload target, full stop.  It was
+    # validated against SFMC at startup; a name parsed out of dialog was
+    # not, and letting firmware text choose the target is how steering
+    # files reach the wrong vehicle.
+    follower.current_glider = glider_name
     info_log.info("Follower: %s", type(follower).__name__)
     recent_ids = _RecentSurfacingIds()
     output_results: queue.Queue[_ThreadResult] = queue.Queue()
@@ -1130,7 +1147,12 @@ def follow_glider(
     if dry_run:
         output_thread = threading.Thread(
             target=_run_thread_target,
-            args=("output", _print_files, (queue_out, upload_log, stats), output_results),
+            args=(
+                "output",
+                _print_files,
+                (queue_out, upload_log, stats, glider_name),
+                output_results,
+            ),
             daemon=True,
             name="dry-run-printer",
         )

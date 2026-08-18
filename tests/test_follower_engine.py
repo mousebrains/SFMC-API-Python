@@ -68,7 +68,11 @@ class _FakeClient:
     def __init__(self) -> None:
         self.uploads: list[tuple[str, str, dict[str, Any]]] = []
         for op in READ_OPERATIONS | WRITE_OPERATIONS:
-            setattr(self, op, self._make(op))
+            call = self._make(op)
+            # A double must be classified like the real thing: unmarked
+            # means not requestable, which is the fail-safe rule.
+            call.sfmc_mutates = op in WRITE_OPERATIONS  # type: ignore[attr-defined]
+            setattr(self, op, call)
 
     def _make(self, op: str) -> Any:
         def call(*args: Any, **kwargs: Any) -> Any:
@@ -120,16 +124,40 @@ class TestSendFilesCompatibility:
         follower.send_files(to_glider={"a.ma": "x"}, glider="osu686")
         assert follower.queue_out.get_nowait().glider == "osu686"
 
-    def test_the_run_loop_sets_the_current_glider(self) -> None:
-        """So an unmodified follower's send_files targets correctly."""
+    def test_the_run_loop_does_not_trust_the_parsed_name(self) -> None:
+        """The legacy loop must not stamp a glider read from dialog.
+
+        ``vehicle_name`` comes from an unanchored regex over glider
+        output.  Using it as an upload target let untrusted firmware
+        text choose which vehicle received steering files; the operator
+        supplies the target instead, once, at startup.
+        """
         from queue import Queue
 
         queue_in: Queue[Any] = Queue()
         follower = LegacyFollower({}, queue_in, Queue())
-        queue_in.put(SurfacingEvent(vehicle_name="osu685"))
+        queue_in.put(SurfacingEvent(vehicle_name="osu685-FROM-DIALOG"))
         queue_in.put(None)
         follower.run()
-        assert follower.queue_out.get_nowait().glider == "osu685"
+        assert follower.queue_out.get_nowait().glider is None
+
+    def test_the_engine_stamps_the_trusted_glider(self) -> None:
+        """FollowerEngine may, because its identity is the fleet tag.
+
+        ``event.glider`` is the name the operator gave FleetStream, not
+        anything parsed out of the dialog, so it is safe as a target --
+        and it is what the follower sees, whatever the dialog claims.
+        """
+        seen: list[str | None] = []
+
+        class Observer(BaseFollower):
+            def on_surfacing(self, event: SurfacingEvent) -> None:
+                seen.append(self.current_glider)
+
+        engine = FollowerEngine(Observer)
+        engine._deliver(SurfacingEvent(vehicle_name="LIES-FROM-DIALOG"), "osu685")
+        assert seen == ["osu685"]
+        assert engine.follower.current_glider is None, "cleared after delivery"
 
 
 class TestFollowerEngine:

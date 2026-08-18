@@ -70,7 +70,11 @@ class _FakeClient:
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
         self._returns = returns
         for op in READ_OPERATIONS | WRITE_OPERATIONS:
-            setattr(self, op, self._make(op))
+            call = self._make(op)
+            # A double must be classified like the real thing: unmarked
+            # means not requestable, which is the fail-safe rule.
+            call.sfmc_mutates = op in WRITE_OPERATIONS  # type: ignore[attr-defined]
+            setattr(self, op, call)
 
     def _make(self, op: str) -> Any:
         def call(*args: Any, **kwargs: Any) -> Any:
@@ -839,3 +843,100 @@ class TestTicks:
         threading.Timer(0.3, runner.stop).start()
         runner.run()
         assert "tick" not in seen
+
+
+class TestReviewRegressions:
+    """Guards for defects an adversarial review found."""
+
+    def test_a_failed_submission_returns_its_slot(self) -> None:
+        """Otherwise the engine wedges and refuses everything, silently.
+
+        Three failed calls against a cap of three used to leave the
+        counter permanently full, after which every request -- including
+        reads -- was refused as RateLimited.  A watching engine goes
+        blind and says nothing.
+        """
+        engine = BaseControlEngine()
+
+        class Broken(_FakeClient):
+            def _make(self, op: str) -> Any:
+                call = super()._make(op)
+                call.sfmc_mutates = op in WRITE_OPERATIONS  # type: ignore[attr-defined]
+                return call
+
+        client = Broken()
+        runner = _runner(engine, client, max_outstanding=2)
+        try:
+            # Make submission itself fail, after the slot is taken.
+            runner._ops.shutdown(wait=False)
+            for _ in range(5):
+                engine.request("get_glider_details", "osu684", glider="osu684")
+            assert runner.outstanding == 0, "every failed submission gave its slot back"
+        finally:
+            runner.stop()
+            runner.close()
+
+    def test_a_failed_submission_is_reported_as_an_error_event(self) -> None:
+        engine = BaseControlEngine()
+        runner = _runner(engine, _FakeClient())
+        try:
+            runner._ops.shutdown(wait=False)
+            engine.request("get_glider_details", "osu684", glider="osu684")
+            event = runner._merge.get(timeout=1)
+            assert event is not None and event.source == "error"
+        finally:
+            runner.stop()
+            runner.close()
+
+    def test_keyword_arguments_reach_the_audit_log(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A command passed by keyword used to audit as an empty args=."""
+        engine = BaseControlEngine()
+        with caplog.at_level("INFO", logger="sfmc_api.engine.audit"):
+            runner = _runner(engine, _FakeClient(), allow_writes=True)
+            try:
+                engine.request(
+                    "send_command", glider="osu685", glider_name="osu685", command="abort"
+                )
+                time.sleep(0.2)
+            finally:
+                runner.stop()
+                runner.close()
+        assert any("abort" in r.getMessage() for r in caplog.records), (
+            "the command text must appear in the audit trail"
+        )
+
+    def test_an_unmarked_client_method_is_not_requestable(self) -> None:
+        """A subclass overriding a read loses the marker with the method.
+
+        That is the fail-safe direction: it becomes unmarked, and
+        unmarked means uncallable.  Classifying SFMCClient instead would
+        have kept calling it a read and let the override through.
+        """
+        engine = BaseControlEngine()
+
+        class Sneaky(_FakeClient):
+            def __init__(self) -> None:
+                super().__init__()
+                # Override a read with something unmarked.
+                self.get_glider_details = lambda *a, **k: None  # type: ignore[assignment]
+
+        runner = _runner(engine, Sneaky())
+        try:
+            with pytest.raises(ValueError, match="not a requestable operation"):
+                engine.request("get_glider_details", "osu684", glider="osu684")
+        finally:
+            runner.close()
+
+    def test_validation_covers_writes_too(self) -> None:
+        """_validate checked only reads, so a missing write surfaced late."""
+        engine = BaseControlEngine()
+
+        class Partial:
+            def __init__(self) -> None:
+                for op in READ_OPERATIONS:
+                    call = lambda *a, **k: {}  # noqa: E731
+                    call.sfmc_mutates = False  # type: ignore[attr-defined]
+                    setattr(self, op, call)
+
+        with pytest.raises(ValueError, match="has no such operation"):
+            EngineRunner(engine, Partial(), watchdog=None)  # type: ignore[arg-type]

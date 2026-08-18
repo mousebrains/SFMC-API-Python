@@ -101,9 +101,7 @@ position::
 
     # file: my_follower.py
     from sfmc_api.follower import BaseFollower
-    from sfmc_api.dialog_parser import DialogParser, SurfacingEvent
-from sfmc_api.engine import BaseControlEngine
-from sfmc_api.events import Event
+    from sfmc_api.dialog_parser import SurfacingEvent
     from sfmc_api.ma_writer import generate_goto_ma
 
     class FixedWaypointFollower(BaseFollower):
@@ -214,6 +212,14 @@ class BaseFollower(threading.Thread):
             You never need to write to it yourself.
     """
 
+    #: Glider these files are for, set by the framework to the identity
+    #: the *operator* supplied -- never to a name parsed out of dialog.
+    #: A class-level default so a subclass that does not chain
+    #: ``super().__init__`` cannot raise inside ``send_files``: that
+    #: exception is caught by the run loop, so the pipeline would look
+    #: healthy while never uploading another file.
+    current_glider: str | None = None
+
     def __init__(
         self,
         config: dict[str, Any],
@@ -225,9 +231,7 @@ class BaseFollower(threading.Thread):
         self.queue_in = queue_in
         self.queue_out = queue_out
         self._notifier: DisconnectNotifier | None = None
-        #: Glider whose surfacing is being handled, for send_files().
-        #: Set by the framework around each on_surfacing call.
-        self.current_glider: str | None = None
+        self.current_glider = None
 
     def set_notifier(self, notifier: DisconnectNotifier | None) -> None:
         """Attach the operator-email notifier.
@@ -305,7 +309,11 @@ class BaseFollower(threading.Thread):
             if event is None:
                 logger.debug("%s: received shutdown sentinel", self.name)
                 break
-            self.current_glider = event.vehicle_name
+            # NOT event.vehicle_name.  That is scraped from glider
+            # output by an unanchored regex, and using it as an upload
+            # target means untrusted firmware text decides which vehicle
+            # receives steering files.  current_glider is set once, by
+            # the framework, to the identity the operator gave.
             try:
                 self.on_surfacing(event)
             except Exception:

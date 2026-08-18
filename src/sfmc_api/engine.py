@@ -101,13 +101,13 @@ logger = logging.getLogger(__name__)
 #: An **unmarked** method is not requestable at all.  That is the
 #: fail-safe direction: a new mutating endpoint nobody classified
 #: cannot be called by an engine, rather than defaulting to allowed.
-def _classify(client_cls: type) -> tuple[frozenset[str], frozenset[str]]:
+def _classify(client: object) -> tuple[frozenset[str], frozenset[str]]:
     reads: set[str] = set()
     writes: set[str] = set()
-    for name in dir(client_cls):
+    for name in dir(client):
         if name.startswith("_"):
             continue
-        marker = getattr(getattr(client_cls, name, None), "sfmc_mutates", None)
+        marker = getattr(getattr(client, name, None), "sfmc_mutates", None)
         if marker is True:
             writes.add(name)
         elif marker is False:
@@ -354,6 +354,10 @@ class EngineRunner:
     ) -> None:
         self._engine = engine
         self._client = client
+        # Default to the base class's classification; _validate narrows
+        # these to the actual client instance when there is one.
+        self.reads: frozenset[str] = READ_OPERATIONS
+        self.writes: frozenset[str] = WRITE_OPERATIONS
         self._watchdog = watchdog
         self._max_failures = max_failures
         self._validate(engine, client)
@@ -403,9 +407,21 @@ class EngineRunner:
             raise ValueError("engine.sources is empty; nothing would ever arrive")
         if client is None:
             return
-        missing = sorted(op for op in READ_OPERATIONS if not hasattr(client, op))
+        missing = sorted(op for op in OPERATIONS if not hasattr(client, op))
         if missing:
             raise ValueError(f"client has no such operation(s): {missing}")
+        # Classification follows the *client we were given*, not
+        # SFMCClient.  A subclass that overrides a read to issue a PUT
+        # loses the marker with the method it replaced, so it becomes
+        # unmarked -- and unmarked means not requestable, which is the
+        # fail-safe direction.  Classifying the base class instead would
+        # have kept calling it a read and let the PUT through.
+        self.reads, self.writes = _classify(client)
+
+    @property
+    def operations(self) -> frozenset[str]:
+        """Everything this runner's client may be asked to do."""
+        return self.reads | self.writes
 
     # ── Fleet ────────────────────────────────────────────────────────
 
@@ -447,7 +463,7 @@ class EngineRunner:
         # dry run -- and those are reported as events, so an engine
         # handles them the same way it handles any other failure rather
         # than wrapping every request in a try block.
-        if op not in OPERATIONS:
+        if op not in self.operations:
             raise ValueError(
                 f"{op!r} is not a requestable operation.  "
                 f"Reads: {sorted(READ_OPERATIONS)}.  Writes: {sorted(WRITE_OPERATIONS)}"
@@ -458,8 +474,8 @@ class EngineRunner:
         with self._lock:
             self._request_seq += 1
             request_id = self._request_seq
-        is_write = op in WRITE_OPERATIONS
-        self._audit(request_id, glider, op, args, tag, "requested")
+        is_write = op in self.writes
+        self._audit(request_id, glider, op, args, tag, "requested", kwargs=kwargs)
 
         if is_write and not self.allow_writes:
             return self._refuse(
@@ -497,7 +513,7 @@ class EngineRunner:
         if is_write and self.dry_run:
             with self._lock:
                 self._outstanding -= 1
-            self._audit(request_id, glider, op, args, tag, "dry-run")
+            self._audit(request_id, glider, op, args, tag, "dry-run", kwargs=kwargs)
             self._merge.publish(
                 glider,
                 "result",
@@ -507,11 +523,22 @@ class EngineRunner:
             )
             return request_id
 
-        method = getattr(self._client, op)
-        # Serialized per glider: two operations on one glider must not
-        # interleave, while the same two on different gliders may run
-        # concurrently.
-        future = self._ops.serialized(glider, method, *args, **kwargs)
+        try:
+            method = getattr(self._client, op)
+            # Serialized per glider: two operations on one glider must
+            # not interleave, while the same two on different gliders
+            # may run concurrently.
+            future = self._ops.serialized(glider, method, *args, **kwargs)
+        except Exception as exc:
+            # The slot must come back.  Without this, a client missing a
+            # method, or a pool shut down under us, leaks one slot per
+            # attempt until the cap is full -- and then every request,
+            # including reads, is refused forever.  A watching engine
+            # goes silently blind, which is the worst failure this
+            # system has.
+            with self._lock:
+                self._outstanding -= 1
+            return self._refuse(request_id, glider, op, args, tag, exc)
         future.add_done_callback(
             self._make_completion(request_id=request_id, glider=glider, op=op, args=args, tag=tag)
         )
@@ -540,13 +567,18 @@ class EngineRunner:
         tag: str | None,
         outcome: str,
         elapsed: float | None = None,
+        kwargs: dict[str, Any] | None = None,
     ) -> None:
+        # kwargs are logged because the calling convention puts real
+        # payloads there: request("send_command", command="abort") used
+        # to audit as args= -- empty -- while an abort went to a glider.
         audit_log.info(
-            "req=%d glider=%s op=%s args=%s tag=%s %s%s",
+            "req=%d glider=%s op=%s args=%s%s tag=%s %s%s",
             request_id,
             glider,
             op,
             _summarise(args),
+            "" if not kwargs else " " + _summarise(tuple(f"{k}={v!r}" for k, v in kwargs.items())),
             tag,
             outcome,
             "" if elapsed is None else f" in {elapsed:.2f}s",
