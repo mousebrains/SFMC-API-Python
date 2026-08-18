@@ -28,6 +28,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **The dive deadline is available to engines.**
+  `parse_seconds_to_dive` and `SurfacingStream.time_left()` expose
+  `Time until diving is: N secs` — the budget every surfacing decision
+  is spending.  A controller that waits (for a second glider, for a
+  Zmodem transfer to end) was previously guessing, and a wait that
+  outlives the surfacing fails silently: she dives, and the thing that
+  was waiting simply never acted.  Deliberately *not* a field on
+  `SurfacingEvent`, because the glider prints it after the sensor block
+  that completes the event, so the field would be `None` almost always.
+- **`examples/control_engine_joint_decision.py`** — two gliders forced
+  to surface together, one joint decision.  The barrier degrades to
+  deciding with whoever arrived rather than blocking, because a
+  call-in can be missed and waiting for a glider that is not coming
+  leaves the one that *did* surface with nothing while looking like a
+  decision was made.
+- **`sfmc-control --follower FILE`** runs an existing `BaseFollower` on
+  the engine, which is what the `FollowerEngine` docstring had been
+  advertising: the CLI constructed engines as `engine_class(config)`,
+  so that path did not exist.
+
 - **Control engine, phase 5: followers fold in as a specialisation.**
   `FollowerEngine` runs any existing `BaseFollower` on the control
   engine, so a follower gains formations, the safety rails, and the

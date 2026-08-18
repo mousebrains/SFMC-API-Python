@@ -82,6 +82,7 @@ import contextlib
 import logging
 import math
 import re
+import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -228,6 +229,26 @@ class SurfacingEvent:
 
 #: Trigger: a new Iridium connection has started.
 CARRIER_DETECT_RE = re.compile(r"Carrier Detect found")
+
+#: ``Time until diving is: 295 secs`` -- how long she is still listening.
+TIME_TO_DIVE_RE = re.compile(r"Time until diving is:\s*(-?\d+(?:\.\d+)?)\s*secs")
+
+#: ``Time until diving is: 295 secs`` -- how long she is still listening.
+TIME_TO_DIVE_RE = re.compile(r"Time until diving is:\s*(-?\d+(?:\.\d+)?)\s*secs")
+
+
+def parse_seconds_to_dive(line: str) -> float | None:
+    """Seconds left at the surface, if *line* announces it.
+
+    Deliberately not a field on :class:`SurfacingEvent`: the glider
+    prints this *after* the sensor block that completes the event, so by
+    the time it arrives the event has already been emitted.  A field
+    would therefore be ``None`` almost always, which is worse than no
+    field.  :class:`SurfacingStream` tracks it live instead.
+    """
+    match = TIME_TO_DIVE_RE.search(line)
+    return None if match is None else float(match.group(1))
+
 
 #: ``Vehicle Name: osu685``
 VEHICLE_NAME_RE = re.compile(r"Vehicle Name:\s*(\S+)")
@@ -523,10 +544,37 @@ class SurfacingStream:
         self.parser = DialogParser()
         self.dedup = dedup if dedup is not None else SurfacingDeduplicator()
         self._on_duplicate = on_duplicate
+        #: Seconds left at the surface when she last said, or ``None``.
+        self.seconds_to_dive: float | None = None
+        #: Host-clock ``time.time()`` when she is expected to stop
+        #: listening.  Host clock, not the glider's -- they differ by 48
+        #: minutes on osusim, so a deadline in glider time would be
+        #: unusable for deciding whether to keep waiting.
+        self.dive_deadline: float | None = None
 
     def feed(self, line: str) -> SurfacingEvent | None:
         """Feed one line; return a surfacing if one completed and is new."""
+        remaining = parse_seconds_to_dive(line)
+        if remaining is not None:
+            # Tracked here rather than on the event, because the glider
+            # prints it after the event has already been emitted.  It
+            # counts down through one surfacing, so the newest wins.
+            self.seconds_to_dive = remaining
+            self.dive_deadline = time.time() + remaining
         return self._filter(self.parser.feed_line(line))
+
+    def time_left(self, now: float | None = None) -> float | None:
+        """Seconds until she dives, or ``None`` if she never said.
+
+        The budget every decision is spending.  A controller that waits
+        -- for a second glider to surface so it can decide jointly, or
+        for a Zmodem transfer to end -- is spending this, and without it
+        the wait is a guess that fails silently: she dives, and the
+        thing that was waiting simply never acted.
+        """
+        if self.dive_deadline is None:
+            return None
+        return self.dive_deadline - (time.time() if now is None else now)
 
     def flush(self) -> SurfacingEvent | None:
         """Emit whatever the parser is still holding, if it is new."""

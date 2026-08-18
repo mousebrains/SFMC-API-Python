@@ -368,6 +368,72 @@ lie that bites later:
   a set of last-known values with per-glider timestamps, not a
   snapshot.
 
+## Coordinated surfacings, and joint decisions
+
+**Status:** implemented as `examples/control_engine_joint_decision.py`;
+this section records what building it taught.
+
+Two formation cases look similar and are not.
+
+**Independent decisions with shared information** — the usual case.
+Gliders surface at different times, and each decision uses whatever the
+others last reported: position, currents, CTD.  This needs nothing
+beyond what the engine already is.  One thread, fleet state in ordinary
+attributes, values banked as they arrive.
+
+**A joint decision across a coordinated surfacing** — gliders forced up
+together so one decision can modify both behaviours.  This is a
+*barrier*: wait for the formation, then decide once.  It works on the
+existing design, but three things make it harder than it looks.
+
+### A call-in can be missed, and that is normal
+
+A glider may not surface, may surface late, or may surface into a gap
+in our own stream.  The last is not hypothetical: a run of this
+software sat through a real surfacing because SFMC delivers one as a
+single burst and a reconnect had eaten it.
+
+So a barrier must **degrade to deciding with whoever arrived**, never
+block.  Waiting for a glider that is not coming spends the entire
+surfacing window and leaves the glider that *did* surface with nothing
+— while looking, from outside, exactly like a decision was made.
+
+A partial decision is a different decision from the joint one, and an
+engine should know which it made.
+
+### The wait has a deadline the vehicle sets
+
+She announces `Time until diving is: N secs` and then stops listening.
+Any wait is spending that budget, and without it the wait is a guess
+that fails silently.
+
+`SurfacingStream` tracks it live (`seconds_to_dive`, `time_left()`),
+and `parse_seconds_to_dive` is public so nothing reimplements the
+regex.
+
+It is deliberately **not** a field on `SurfacingEvent`: the glider
+prints it *after* the sensor block that completes the event, so the
+field would be `None` almost always — worse than no field.
+
+That ordering has a consequence for the barrier itself, which is easy
+to get wrong: deciding the instant the last glider arrives means
+deciding **before that glider's deadline is known**.  The example waits
+for the next `tick` instead.  Costing one tick to learn how much time
+you have is the right trade inside a window of minutes.
+
+### The one time a snapshot is honest
+
+Elsewhere this document insists a formation engine must treat fleet
+state as last-known values with per-glider timestamps, never a
+snapshot.  That is right when gliders surface independently — one may
+be hours stale while another is current.
+
+A *coordinated* surfacing is the exception, and the reason to force one:
+inside the barrier the states are genuinely contemporaneous, and
+comparing them directly is exactly what the operator arranged.  The
+rule is not "never snapshot" but "never snapshot **unless you made one
+happen**, and then only within the window you created."
+
 ## Backpressure
 
 Queues are bounded.  A slow engine must not grow memory without bound,
