@@ -1,0 +1,4 @@
+get m_bms_battery_pack_anomaly
+get m_bms_pitch_current
+get m_bms_aft_current
+get m_bms_ebay_current
